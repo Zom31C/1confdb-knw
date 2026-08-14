@@ -353,17 +353,54 @@ class Tui:
         db = self._pick_path('База для MCP-сервера 1confdb-knw', [], recent)
         if not db:
             return
-        _cls()
-        print('MCP-сервер 1confdb-knw работает по stdio; остановка — Ctrl+C.')
-        print('Пример конфигурации клиента (локально):')
-        print(f'  {{"command": "{sys.executable}", "args": ["-m", "confdb.mcp_server", "{db}"]}}')
-        print()
-        try:
-            subprocess.run([sys.executable, '-m', 'confdb.mcp_server', db])
-        except KeyboardInterrupt:
-            pass
-        print('Сервер остановлен.')
-        input('Нажмите Enter…')
+        while True:
+            _cls()
+            print('--- MCP-сервер 1confdb-knw ---')
+            print(f' База: {db}')
+            print(' 1. stdio — клиент сам запускает процесс')
+            print(' 2. Сеть (HTTP-порт) — удалённые клиенты через SSH-туннель')
+            print(' 0. Назад')
+            choice = input('Выбор: ').strip()
+            if choice == '0':
+                return
+            if choice == '1':
+                _cls()
+                print('Сервер работает по stdio; остановка — Ctrl+C.')
+                print(f'  {{"command": "{sys.executable}", '
+                      f'"args": ["-m", "confdb.mcp_server", "{db}"]}}')
+                print()
+                try:
+                    subprocess.run([sys.executable, '-m', 'confdb.mcp_server', db])
+                except KeyboardInterrupt:
+                    pass
+                print('Сервер остановлен.')
+                input('Нажмите Enter…')
+                return
+            if choice == '2':
+                port = _ask('Порт', '8765')
+                if not port.isdigit():
+                    print('Нужно целое число.')
+                    input('Нажмите Enter…')
+                    continue
+                _cls()
+                print(f'Сервер слушает http://127.0.0.1:{port}/mcp '
+                      '(legacy SSE: /sse); остановка — Ctrl+C.')
+                print('С другой машины — через SSH-туннель:')
+                print(f'  ssh -L {port}:127.0.0.1:{port} user@host')
+                print('Конфигурация клиента:')
+                print(f'  {{"mcpServers": {{"1confdb-knw": '
+                      f'{{"url": "http://127.0.0.1:{port}/mcp"}}}}}}')
+                print()
+                from .mcp_server import serve_http
+                try:
+                    serve_http(db, '127.0.0.1', int(port))
+                except KeyboardInterrupt:
+                    pass
+                print('Сервер остановлен.')
+                input('Нажмите Enter…')
+                return
+            print('Неизвестный пункт меню.')
+            input('Нажмите Enter…')
 
     # ---------- проверка СКД ----------
 

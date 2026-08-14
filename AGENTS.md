@@ -21,9 +21,9 @@ section=табличная часть (row table of an object).
   `.venv\Scripts\python.exe` is a launcher, the real worker is a child process).
 - **No git on this machine** — git commands are unavailable.
 - Comments, docstrings and user-facing text are in **Russian**.
-- The 885 MB test file `SmallBusinessKz_3_0_4_4_cf.cf` lives in `cf/` (or repo root,
-  or `D:\Projects\confdb\cf\`); never commit it; a full extract takes ~3 min with
-  `--workers 8` — keep it out of unit tests (tests use small synthetic fixtures).
+- The 885 MB test file `SmallBusinessKz_3_0_4_4_cf.cf` lives in `cf/` (or repo root);
+  never commit it; a full extract takes ~2.5 min with `--workers 8` — keep it out of
+  unit tests (tests use small synthetic fixtures).
 - Keep the decoder equivalent to `_vendor/v8unpack`; comparison helpers in `_tmp/`.
 
 ## Layout
@@ -32,6 +32,8 @@ section=табличная часть (row table of an object).
 - `src/confdb/__main__.py` — CLI: `extract`, `check`, `1confdb-knw`.
 - `src/confdb/mcp_server.py` — MCP server `1confdb-knw <db>` (12 tools, read-only;
   self-describing: schema primer + glossary + workflow in `initialize.instructions`).
+  Transports: stdio by default; `--port N` — HTTP (Streamable HTTP `POST /mcp`,
+  legacy SSE `/sse`) for SSH-tunnel access (`ssh -L N:127.0.0.1:N`).
 - `src/confdb/tui.py` — console UI (user chose console over GUI; do not suggest tkinter).
 - `src/confdb/bsl_parser.py` — splits BSL modules into procedures/functions.
 - `src/confdb/query_lang.py` — 1C query language lexer/parser/semantic validator.
@@ -43,21 +45,23 @@ section=табличная часть (row table of an object).
 
 ```bat
 .venv\Scripts\python.exe -m pip install -e ".[dev]"   :: once
-test.bat                                              :: pytest (49 tests)
+test.bat                                              :: pytest (51 tests)
 confdb.bat extract <file.cf> --db out.db --workers 8
 confdb.bat check out.db                               :: validate all SKD queries
 1confdb-knw.bat out.db                                :: MCP server (stdio)
+1confdb-knw.bat out.db --port 8765                    :: MCP over HTTP (SSH tunnel)
 .venv\Scripts\python.exe -m compileall -q src\confdb  :: static check
 ```
 
-Deployed copies used by the user: `dist\confdb` and `D:\Projects\confdb`
+Deployed copies used by the user: `dist\confdb` and `D:\Projects\1confdb-knw-main`
+(the latter also has a real copy in `.venv\Lib\site-packages\confdb` — sync it too)
 (sync with `robocopy src\confdb <dest>\src\confdb /MIR /XD __pycache__` + README/bats
 after changing `src`).
 
 ## Database schema (quick map)
 
 - `meta_object(path, type, type_ru, name, uuid, parent_id, ord)` — path like
-  `Catalog/Номенклатура` or nested `…/CatalogForm/ФормаЭлемента`.
+  `Catalog/Контрагенты` or nested `…/CatalogForm/ФормаЭлемента`.
 - `meta_attribute(object_id, ord, name, type_str, tabular)` — fields; `tabular`
   names the tabular section a field belongs to. `type_str`: `Строка(50)`,
   `Ссылка: Catalog/Х`, `ОпределяемыйТип: DefinedType/Х (…)`, composites with ` | `.

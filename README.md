@@ -19,12 +19,13 @@
 confdb extract file.cf --db out.db --dump _out\file
 
 :: то же через confdb.bat
-confdb.bat extract SmallBusinessKz_3_0_4_4_cf.cf --db _out\ubkz.db
+confdb.bat extract file.cf --db out.db
 
-:: текстовый консольный интерфейс (все опции + просмотр базы запросами)
+:: текстовый консольный интерфейс (меню с обновлением экрана:
+:: извлечение, запросы, проверка СКД, запуск MCP-сервера, опции)
 confdb-ui.bat
 
-:: проверка корректности запросов СКД в готовой базе (пункт 11 в confdb-ui)
+:: проверка корректности запросов СКД в готовой базе (пункт 3 в confdb-ui)
 confdb check out.db
 ```
 
@@ -74,6 +75,33 @@ confdb check out.db
 }
 ```
 
+### Сетевой режим (когда stdio не подходит)
+
+Сервер слушает порт и отдаёт MCP по HTTP (Streamable HTTP: `POST /mcp`;
+legacy SSE для старых клиентов: `GET /sse` + `POST /messages`):
+
+```bat
+1confdb-knw.bat out.db --port 8765
+```
+
+С другой машины подключение — через SSH-туннель:
+
+```bat
+ssh -L 8765:127.0.0.1:8765 user@host
+```
+
+```json
+{
+  "mcpServers": {
+    "1confdb-knw": { "url": "http://127.0.0.1:8765/mcp" }
+  }
+}
+```
+
+По умолчанию слушает `127.0.0.1` (без аутентификации, база read-only);
+`--host 0.0.0.0` открывает порт наружу — используйте только в доверенной сети.
+В консольном интерфейсе — пункт 4 → «Сеть (HTTP-порт)».
+
 Опции `extract`:
 
 - `--db FILE` — записать результат в SQLite;
@@ -83,7 +111,7 @@ confdb check out.db
 - `--store-blobs` — хранить бинарные файлы (картинки, макеты) в БД как BLOB;
 - `--workers N` — число процессов стадии 3 (по умолчанию 1; на многоядерной
   машине 8 процессов ускоряют разбор в несколько раз). В консольном интерфейсе —
-  пункт меню 10. При вызове `extract()` из собственного скрипта на Windows с
+  меню «Опции извлечения». При вызове `extract()` из собственного скрипта на Windows с
   `workers > 1` вызов должен быть обёрнут в `if __name__ == '__main__':`
   (требование multiprocessing spawn).
 
@@ -96,7 +124,7 @@ confdb check out.db
 ## Схема базы данных
 
 - `source` — исходный файл: путь, дата, тип/имя/uuid корневого объекта;
-- `meta_object` — объект метаданных: `path` (например `Catalog/Номенклатура/CatalogForm/ФормаЭлемента`),
+- `meta_object` — объект метаданных: `path` (например `Catalog/Контрагенты/CatalogForm/ФормаЭлемента`),
   `type` (Catalog, Document, CommonModule, …), `type_ru` (русское имя «как в конфигураторе»:
   Справочник, Документ, Общий модуль, …), `name`, `uuid`, `comment`, `obj_version`,
   `header_json` (полный разобранный заголовок), `parent_id` + `ord` (иерархия и порядок
@@ -116,7 +144,7 @@ confdb check out.db
 - `common_target` — привязка общих реквизитов к объектам метаданных;
 - `meta_tabular` — табличные части объекта (`ord`, `name`) в порядке объявления;
   поля табличных частей лежат в `meta_attribute` с заполненной колонкой
-  `tabular` (имя секции) — цепочки вида `Т.Запасы.Номенклатура` в запросах
+  `tabular` (имя секции) — цепочки вида `Т.Товары.Наименование` в запросах
   проверяются по этим данным.
 - `module` — паспорт модуля: `code_name` (obj, mgr, mod, con, app …) и для общих
   модулей `context` (Сервер/Клиент/Вызов сервера/…), плюс `body` — текст модуля как есть
@@ -141,17 +169,17 @@ confdb check out.db
 -- реквизиты справочника с типами
 SELECT a.name, a.type_str
 FROM meta_attribute a JOIN meta_object o ON o.id = a.object_id
-WHERE o.path = 'Catalog/Номенклатура' ORDER BY a.ord;
+WHERE o.path = 'Catalog/Контрагенты' ORDER BY a.ord;
 
 -- краткое представление модуля (текст без кода методов)
 SELECT m.body FROM module m JOIN meta_object o ON o.id = m.object_id
-WHERE o.path = 'Catalog/Номенклатура' AND m.code_name = 'obj';
+WHERE o.path = 'Catalog/Контрагенты' AND m.code_name = 'obj';
 
 -- тело конкретного метода
 SELECT mt.body FROM method mt JOIN module m ON m.id = mt.module_id
 JOIN meta_object o ON o.id = m.object_id
-WHERE o.path = 'Catalog/Номенклатура' AND m.code_name = 'obj'
-  AND mt.name = 'ПриСозданииНаСервере';
+WHERE o.path = 'Document/Заказ' AND m.code_name = 'obj'
+  AND mt.name = 'ПриПроведении';
 ```
 
 ## Состав

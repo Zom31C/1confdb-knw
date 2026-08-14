@@ -1,18 +1,29 @@
-"""1confdb-knw — MCP-сервер (stdio) знаний по конфигурации 1С и BSL.
+"""1confdb-knw — MCP-сервер знаний по конфигурации 1С и BSL.
 
 Рассчитан на использование любой LLM без контекста проекта: инструкции
 протокола и описания инструментов содержат справочник по базе данных,
 глоссарий 1С и рекомендуемые рабочие процессы.
 
-Запуск (в т.ч. через SSH со стороны MCP-клиента):
+Транспорты:
+- stdio (по умолчанию): JSON-RPC 2.0, сообщения по одному на строку stdin/stdout;
+  запуск, в т.ч. через SSH со стороны MCP-клиента:
     1confdb-knw <путь-к-базе.sqlite>
     python -m confdb.mcp_server <путь-к-базе.sqlite>
-Протокол: JSON-RPC 2.0, сообщения по одному на строку stdin/stdout.
+- HTTP (опция --port): сервер слушает порт, клиент подключается по URL
+  (Streamable HTTP: POST /mcp; legacy SSE: GET /sse + POST /messages).
+  Для доступа с другой машины — SSH-туннель:
+    ssh -L 8765:127.0.0.1:8765 user@host
+  и в конфиге клиента {"url": "http://127.0.0.1:8765/mcp"}.
 """
 import argparse
 import json
+import queue
 import sqlite3
 import sys
+import threading
+import uuid
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
 
 PROTOCOL_VERSION = '2024-11-05'
 
@@ -49,7 +60,8 @@ class McpServer:
     def conn(self):
         if self._conn is None:
             self._conn = sqlite3.connect(
-                f'file:{self.db_path}?mode=ro', uri=True)
+                f'file:{self.db_path}?mode=ro', uri=True,
+                check_same_thread=False)  # HTTP-транспорт: потоки под блокировкой
         return self._conn
 
     def ctx(self):
@@ -425,12 +437,141 @@ TOOLS = [
 ]
 
 
+def make_handler(server):
+    """HTTP-обработчик MCP: Streamable HTTP (POST /mcp) и legacy SSE (/sse)."""
+    state = {'lock': threading.Lock(), 'sessions': {}}
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = 'HTTP/1.1'
+        server_version = '1confdb-knw'
+
+        def _send(self, code, body=None, extra=None):
+            data = None if body is None else (
+                json.dumps(body, ensure_ascii=False).encode('utf-8'))
+            self.send_response(code)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            for key, val in (extra or {}).items():
+                self.send_header(key, val)
+            self.send_header('Content-Length', str(len(data) if data else 0))
+            self.end_headers()
+            if data:
+                self.wfile.write(data)
+
+        def _read_msg(self):
+            length = int(self.headers.get('Content-Length') or 0)
+            try:
+                return json.loads(self.rfile.read(length))
+            except ValueError:
+                return None
+
+        def do_OPTIONS(self):
+            self._send(204, extra={
+                'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+                'Access-Control-Allow-Headers': 'Content-Type, Mcp-Session-Id'})
+
+        def do_GET(self):
+            path = urlparse(self.path)
+            if path.path != '/sse':
+                return self._send(404, {'error': f'not found: {path.path}'})
+            sid = uuid.uuid4().hex
+            events = queue.Queue()
+            state['sessions'][sid] = events
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/event-stream')
+            self.send_header('Cache-Control', 'no-cache')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.close_connection = True
+            try:
+                self.wfile.write(
+                    f'event: endpoint\n'
+                    f'data: /messages?session_id={sid}\n\n'.encode('utf-8'))
+                self.wfile.flush()
+                while True:
+                    try:
+                        msg = events.get(timeout=20)
+                    except queue.Empty:
+                        self.wfile.write(b': keep-alive\n\n')
+                        self.wfile.flush()
+                        continue
+                    self.wfile.write((
+                        f'event: message\n'
+                        f'data: {json.dumps(msg, ensure_ascii=False)}\n\n'
+                    ).encode('utf-8'))
+                    self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError, TimeoutError):
+                pass
+            finally:
+                state['sessions'].pop(sid, None)
+
+        def do_POST(self):
+            path = urlparse(self.path)
+            if path.path not in ('/mcp', '/messages'):
+                return self._send(404, {'error': f'not found: {path.path}'})
+            msg = self._read_msg()
+            if msg is None:
+                return self._send(400, {'error': 'body must be a JSON-RPC message'})
+            with state['lock']:
+                resp = server.handle(msg)
+            if path.path == '/mcp':
+                if resp is None:
+                    return self._send(202)
+                return self._send(200, resp)
+            sid = parse_qs(path.query).get('session_id', [''])[0]
+            events = state['sessions'].get(sid)
+            if events is None:
+                return self._send(404, {'error': 'unknown session_id'})
+            if resp is not None:
+                events.put(resp)
+            return self._send(202, {'status': 'accepted'})
+
+    return Handler
+
+
+def start_http_server(server, host='127.0.0.1', port=0):
+    """Поднимает ThreadingHTTPServer; возвращает (httpd, фактический порт)."""
+    httpd = ThreadingHTTPServer((host, port), make_handler(server))
+    httpd.daemon_threads = True
+    return httpd, httpd.server_address[1]
+
+
+def serve_http(db_path, host='127.0.0.1', port=8765):
+    server = McpServer(db_path)
+    httpd, real_port = start_http_server(server, host, port)
+    print(f'1confdb-knw: слушаю http://{host}:{real_port}/mcp '
+          f'(legacy SSE: /sse); остановка — Ctrl+C.')
+    if host == '127.0.0.1':
+        print('С другой машины — через SSH-туннель: '
+              f'ssh -L {real_port}:127.0.0.1:{real_port} user@host')
+        print('Конфигурация клиента: '
+              f'{{"mcpServers": {{"1confdb-knw": '
+              f'{{"url": "http://127.0.0.1:{real_port}/mcp"}}}}}}')
+    else:
+        print('Внимание: порт открыт для внешних подключений без аутентификации; '
+              'база отдаётся read-only.')
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        print('Сервер остановлен.')
+    finally:
+        httpd.server_close()
+    return 0
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(
         prog='1confdb-knw',
-        description='MCP-сервер (stdio) знаний по конфигурации 1С и BSL')
+        description='MCP-сервер знаний по конфигурации 1С и BSL '
+                    '(stdio по умолчанию; --port — HTTP для SSH-туннеля)')
     parser.add_argument('db', help='путь к базе SQLite')
+    parser.add_argument('--host', default='127.0.0.1',
+                        help='адрес для HTTP-режима (по умолчанию 127.0.0.1)')
+    parser.add_argument('--port', type=int, default=0,
+                        help='порт HTTP-режима (без него — stdio)')
     args = parser.parse_args(argv)
+    if args.port:
+        return serve_http(args.db, args.host, args.port)
     server = McpServer(args.db)
     for line in sys.stdin:
         line = line.strip()
