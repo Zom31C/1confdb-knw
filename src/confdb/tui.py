@@ -6,13 +6,15 @@
 Запуск: confdb-ui.bat (или python -m confdb.tui)
 """
 import glob
-import json
 import os
 import sqlite3
 import subprocess
 import sys
 
 from . import __version__
+from .config import bench_workers
+from .config import load_config as _load_config
+from .config import save_config as _save_config
 from .extract import extract
 
 PRESETS = [
@@ -68,7 +70,6 @@ PRESETS = [
 
 MAX_CELL = 60
 MAX_ROWS = 100
-CONFIG_PATH = os.path.join(os.path.expanduser('~'), '.confdb', 'config.json')
 
 
 def _cls():
@@ -92,20 +93,6 @@ def _out_defaults(src):
     base = os.path.splitext(os.path.basename(src))[0]
     out_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '_out'))
     return os.path.join(out_dir, base + '.sqlite'), os.path.join(out_dir, base)
-
-
-def _load_config():
-    try:
-        with open(CONFIG_PATH, encoding='utf-8') as file:
-            return json.load(file)
-    except (OSError, ValueError):
-        return {}
-
-
-def _save_config(config):
-    os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
-    with open(CONFIG_PATH, 'w', encoding='utf-8') as file:
-        json.dump(config, file, ensure_ascii=False, indent=2)
 
 
 def _remember(items, value, limit=6):
@@ -147,7 +134,7 @@ class Tui:
         self.prefix = opts.get('prefix', '')
         self.keep_temp = bool(opts.get('keep_temp'))
         self.store_blobs = bool(opts.get('store_blobs'))
-        self.workers = int(opts.get('workers', 1))
+        self.workers = int(opts.get('workers') or bench_workers() or 1)
 
     def _save(self):
         _save_config({
@@ -173,6 +160,7 @@ class Tui:
             print(' 3. Проверка запросов СКД')
             print(' 4. Запустить MCP-сервер (1confdb-knw)')
             print(' 5. Опции извлечения')
+            print(' 6. Бенчмарк: подбор числа процессов под железо')
             print(' 0. Выход')
             if self.last_db:
                 print(f'Последняя БД: {self.last_db}')
@@ -187,6 +175,8 @@ class Tui:
                 self._run_mcp()
             elif choice == '5':
                 self._options_menu()
+            elif choice == '6':
+                self._run_bench()
             elif choice in ('0', 'q', 'exit', 'выход'):
                 _cls()
                 print('До свидания.')
@@ -401,6 +391,31 @@ class Tui:
                 return
             print('Неизвестный пункт меню.')
             input('Нажмите Enter…')
+
+    # ---------- бенчмарк ----------
+
+    def _run_bench(self):
+        if not self.src or not os.path.isfile(self.src):
+            picked = self._pick_path('Файл конфигурации 1С для бенчмарка',
+                                     _cf_candidates(), self.recent_src)
+            if not picked:
+                return
+            self.src = picked
+        _cls()
+        print('Бенчмарк: прогон сэмпла объектов при разном числе процессов.')
+        print('Стадии 0/1 выполняются один раз, затем сэмпл стадии 3 + запись БД.')
+        print()
+        from .bench import bench
+        try:
+            best = bench(self.src)
+        except Exception as err:
+            print(f'Ошибка бенчмарка: {err}')
+            input('Нажмите Enter…')
+            return
+        self.workers = best
+        self.recent_src = _remember(self.recent_src, self.src)
+        self._save()
+        input('Нажмите Enter…')
 
     # ---------- проверка СКД ----------
 

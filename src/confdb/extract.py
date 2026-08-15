@@ -64,7 +64,8 @@ def extract(src_file, *, db_path=None, dump_dir=None, temp_dir=None, keep_temp=F
             db_path = os.path.abspath(db_path)
             print(f'Пишем базу данных {db_path}')
             stats['db_rows'] = write_db(stage3, db_path, source_file=src_file,
-                                        store_blobs=options.get('store_blobs', False))
+                                        store_blobs=options.get('store_blobs', False),
+                                        workers=workers)
 
         stats['dump_dir'] = dump_dir if dump_dir else None
     finally:

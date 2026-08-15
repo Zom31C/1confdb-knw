@@ -37,7 +37,12 @@ section=табличная часть (row table of an object).
 - `src/confdb/tui.py` — console UI (user chose console over GUI; do not suggest tkinter).
 - `src/confdb/bsl_parser.py` — splits BSL modules into procedures/functions.
 - `src/confdb/query_lang.py` — 1C query language lexer/parser/semantic validator.
-- `src/confdb/db/writer.py` — SQLite schema + dump writer.
+- `src/confdb/db/writer.py` — SQLite schema + dump writer (batched inserts; BSL
+  parsing parallelized via `workers`).
+- `src/confdb/bench.py` — hardware benchmark: non-linear object sample (stride over
+  the whole top-level list + one object of every type) timed through stage 3 + DB
+  write at 1/2/4/8/CPU processes; best `workers` saved to `~/.confdb/config.json`
+  (`src/confdb/config.py` — shared user config, also used by the TUI).
 - `src/confdb/v8/` — ported unpack core.
 - `tests/` — fast tests (`test.bat`); `_tmp/` — throwaway probes (gitignored).
 
@@ -45,9 +50,10 @@ section=табличная часть (row table of an object).
 
 ```bat
 .venv\Scripts\python.exe -m pip install -e ".[dev]"   :: once
-test.bat                                              :: pytest (51 tests)
+test.bat                                              :: pytest (54 tests)
 confdb.bat extract <file.cf> --db out.db --workers 8
 confdb.bat check out.db                               :: validate all SKD queries
+confdb.bat bench <file.cf>                            :: tune workers to hardware
 1confdb-knw.bat out.db                                :: MCP server (stdio)
 1confdb-knw.bat out.db --port 8765                    :: MCP over HTTP (SSH tunnel)
 .venv\Scripts\python.exe -m compileall -q src\confdb  :: static check

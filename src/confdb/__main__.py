@@ -25,11 +25,19 @@ def build_parser():
     p.add_argument('--prefix', metavar='STR', help='префикс имён объектов для снятия')
     p.add_argument('--store-blobs', action='store_true',
                    help='хранить бинарные файлы в БД как BLOB')
-    p.add_argument('--workers', metavar='N', type=int, default=1,
-                   help='число процессов стадии 3 (1 — последовательно)')
+    p.add_argument('--workers', metavar='N', type=int, default=None,
+                   help='число процессов стадии 3 и записи БД '
+                        '(по умолчанию — результат "confdb bench" или 1)')
 
     c = subparsers.add_parser('check', help='проверить запросы СКД в готовой базе')
     c.add_argument('db', help='путь к базе SQLite')
+
+    b = subparsers.add_parser(
+        'bench',
+        help='бенчмарк: подбор числа процессов под железо (результат в конфиг)')
+    b.add_argument('src', help='путь к файлу .cf/.cfe/.epf')
+    b.add_argument('--sample', metavar='N', type=int, default=1000,
+                   help='размер сэмпла объектов верхнего уровня (по умолчанию 1000)')
 
     m = subparsers.add_parser(
         '1confdb-knw',
@@ -84,6 +92,15 @@ def main(argv=None):
         if args.port:
             argv += ['--host', args.host, '--port', str(args.port)]
         return mcp_main(argv)
+
+    if args.cmd == 'bench':
+        from .bench import bench as run_bench
+        run_bench(args.src, sample=args.sample)
+        return 0
+
+    if args.workers is None:
+        from .config import bench_workers
+        args.workers = bench_workers() or 1
 
     if not args.db and not args.dump:
         parser.error('нужно указать хотя бы один из --db / --dump')

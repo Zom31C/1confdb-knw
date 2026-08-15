@@ -708,13 +708,24 @@ def _extract_skd_queries(path):
     return queries or None
 
 
-def write_db(dump_dir, db_path, *, source_file=None, store_blobs=False):
+# Разбор модулей масштабируется примерно до 8 процессов: дальше накладные
+# расходы на spawn и передачу тел методов через IPC превышают выигрыш.
+MAX_PARSE_WORKERS = 8
+
+
+def _parse_bsl_worker(path):
+    """Разбор модуля в рабочем процессе пула (данные остаются на диске)."""
+    return parse_methods(_read_text(path))
+
+
+def write_db(dump_dir, db_path, *, source_file=None, store_blobs=False, workers=1):
     """Пишет дамп каталога stage 3 в SQLite. Возвращает статистику.
 
     :param dump_dir: каталог результата декодера (стадия 3)
     :param db_path: файл SQLite (существующий перезаписывается)
     :param source_file: путь к исходному .cf/.cfe/.epf (для таблицы source)
     :param store_blobs: хранить бинарные файлы (image/bin) как BLOB
+    :param workers: число процессов для разбора модулей BSL (1 — последовательно)
     """
     dump_dir = os.path.abspath(dump_dir)
     if not os.path.isdir(dump_dir):
@@ -784,24 +795,26 @@ def write_db(dump_dir, db_path, *, source_file=None, store_blobs=False):
                 uuid_index_cache[parent_rel] = _uuid_first_index(parent_header)
             info['ord'] = uuid_index_cache[parent_rel].get(info['uuid'])
 
+        # id объектов — по порядку вставки (таблица пересоздаётся с нуля)
         dir_to_id = {}
         obj_header_file = {}
+        obj_params = []
         for rel in sorted(infos, key=lambda r: r.count('/')):
             info = infos[rel]
-            cur = conn.execute(
-                'INSERT INTO meta_object (source_id, parent_id, ord, path, type, type_ru, name,'
-                ' uuid, comment, obj_version, header_json)'
-                ' VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-                (source_id,
-                 dir_to_id.get(info['parent_rel']),
-                 info['ord'], rel, info['stem'], TYPE_RU.get(info['stem'], info['stem']),
-                 info['name'], info['uuid'],
-                 info['header'].get('comment'), info['header'].get('obj_version'),
-                 json.dumps(info['header'], ensure_ascii=False))
-            )
-            dir_to_id[rel] = cur.lastrowid
+            dir_to_id[rel] = len(obj_params) + 1
             obj_header_file[info['dirpath']] = f'{info["stem"]}.json'
-            stats['objects'] += 1
+            obj_params.append((
+                source_id, dir_to_id.get(info['parent_rel']),
+                info['ord'], rel, info['stem'], TYPE_RU.get(info['stem'], info['stem']),
+                info['name'], info['uuid'],
+                info['header'].get('comment'), info['header'].get('obj_version'),
+                json.dumps(info['header'], ensure_ascii=False)))
+        conn.executemany(
+            'INSERT INTO meta_object (source_id, parent_id, ord, path, type, type_ru, name,'
+            ' uuid, comment, obj_version, header_json)'
+            ' VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', obj_params)
+        stats['objects'] += len(obj_params)
+        for rel, info in infos.items():
             if info['parent_rel'] is None:
                 conn.execute(
                     'UPDATE source SET root_type=?, root_name=?, root_uuid=? WHERE id=?',
@@ -820,53 +833,64 @@ def write_db(dump_dir, db_path, *, source_file=None, store_blobs=False):
         ref2name = _read_refmap(os.path.join(dump_dir, f'{root_stem}.10.json'))
         dt_map, dt_members = _defined_type_map(infos)
         resolver = _TypeResolver(uuid_to_path, name2paths, ref2name, dt_map, dt_members)
+        attr_params = []
+        ref_params = []
         for rel, info in infos.items():
             attrs = _extract_attributes(info['header'], resolver)
             for ord_no, (name, type_str, links, tabular) in enumerate(attrs):
-                cur = conn.execute(
-                    'INSERT INTO meta_attribute'
-                    ' (object_id, ord, name, type_str, tabular)'
-                    ' VALUES (?, ?, ?, ?, ?)',
-                    (dir_to_id[rel], ord_no, name, type_str, tabular))
-                stats['attributes'] += 1
+                attr_params.append((dir_to_id[rel], ord_no, name, type_str, tabular))
+                attr_id = len(attr_params)
                 # связи реквизита с объектами метаданных по ссылочным uuid
                 for l_ord, (l_uuid, l_path) in enumerate(links):
-                    conn.execute(
-                        'INSERT INTO attribute_ref (attribute_id, ord, uuid, object_id)'
-                        ' VALUES (?, ?, ?, ?)',
-                        (cur.lastrowid, l_ord, l_uuid,
-                         dir_to_id.get(l_path) if l_path else None))
-                    stats['refs'] += 1
+                    ref_params.append((attr_id, l_ord, l_uuid,
+                                       dir_to_id.get(l_path) if l_path else None))
+        conn.executemany(
+            'INSERT INTO meta_attribute'
+            ' (object_id, ord, name, type_str, tabular) VALUES (?, ?, ?, ?, ?)',
+            attr_params)
+        conn.executemany(
+            'INSERT INTO attribute_ref (attribute_id, ord, uuid, object_id)'
+            ' VALUES (?, ?, ?, ?)', ref_params)
+        stats['attributes'] += len(attr_params)
+        stats['refs'] += len(ref_params)
 
         # значения перечислений, предопределённые, привязки общих реквизитов
+        tab_params = []
+        enum_params = []
+        common_params = []
+        predef_params = []
         for rel, info in infos.items():
             obj_id = dir_to_id[rel]
             for ord_no, name in enumerate(_extract_tabular(info['header'])):
-                conn.execute(
-                    'INSERT INTO meta_tabular (object_id, ord, name) VALUES (?, ?, ?)',
-                    (obj_id, ord_no, name))
-                stats['tabular'] += 1
+                tab_params.append((obj_id, ord_no, name))
             if info['stem'] == 'Enum':
                 for ord_no, name in enumerate(_extract_enum_values(info['header'])):
-                    conn.execute(
-                        'INSERT INTO enum_value (object_id, ord, name) VALUES (?, ?, ?)',
-                        (obj_id, ord_no, name))
-                    stats['enum_values'] += 1
+                    enum_params.append((obj_id, ord_no, name))
             elif info['stem'] == 'CommonAttribute':
                 for target in _extract_common_targets(info['header'], uuid_to_id, obj_id):
-                    conn.execute(
-                        'INSERT INTO common_target (common_id, target_id) VALUES (?, ?)',
-                        (obj_id, target))
-                    stats['common_targets'] += 1
+                    common_params.append((obj_id, target))
             for ord_no, (name, code, display) in enumerate(_extract_predefined(
                     os.path.join(info['dirpath'], 'Предустановленные данные.bin'))):
-                conn.execute(
-                    'INSERT INTO predefined (object_id, ord, name, code, display)'
-                    ' VALUES (?, ?, ?, ?, ?)',
-                    (obj_id, ord_no, name, code, display))
-                stats['predefined'] += 1
+                predef_params.append((obj_id, ord_no, name, code, display))
+        conn.executemany(
+            'INSERT INTO meta_tabular (object_id, ord, name) VALUES (?, ?, ?)',
+            tab_params)
+        conn.executemany(
+            'INSERT INTO enum_value (object_id, ord, name) VALUES (?, ?, ?)',
+            enum_params)
+        conn.executemany(
+            'INSERT INTO common_target (common_id, target_id) VALUES (?, ?)',
+            common_params)
+        conn.executemany(
+            'INSERT INTO predefined (object_id, ord, name, code, display)'
+            ' VALUES (?, ?, ?, ?, ?)', predef_params)
+        stats['tabular'] += len(tab_params)
+        stats['enum_values'] += len(enum_params)
+        stats['common_targets'] += len(common_params)
+        stats['predefined'] += len(predef_params)
 
         # состав подсистем: ссылки из заголовка подсистемы в порядке объявления
+        sub_params = []
         for rel, info in infos.items():
             if info['stem'] != 'Subsystem':
                 continue
@@ -882,10 +906,11 @@ def write_db(dump_dir, db_path, *, source_file=None, store_blobs=False):
                 if value in seen:
                     continue
                 seen.add(value)
-                conn.execute(
-                    'INSERT INTO subsystem_content (subsystem_id, target_id, ord) VALUES (?, ?, ?)',
-                    (rel_to_id[rel], target, ord_no))
+                sub_params.append((rel_to_id[rel], target, ord_no))
                 ord_no += 1
+        conn.executemany(
+            'INSERT INTO subsystem_content (subsystem_id, target_id, ord) VALUES (?, ?, ?)',
+            sub_params)
 
         module_re_tpl = {}
 
@@ -897,6 +922,48 @@ def write_db(dump_dir, db_path, *, source_file=None, store_blobs=False):
             return res
 
         rel_by_dir = {i['dirpath']: r for r, i in infos.items()}
+
+        # предпроход: список модулей в порядке обхода — для параллельного разбора
+        bsl_tasks = []  # (path, object_id, code_name, context)
+        for dirpath, dirnames, filenames in os.walk(dump_dir):
+            rel = rel_by_dir.get(dirpath)
+            object_id = dir_to_id.get(rel) if rel is not None else None
+            if not object_id:
+                continue
+            stem = objects.get(dirpath)
+            for fn in sorted(filenames):
+                m = module_re(stem).match(fn)
+                if m and m.group('ext') == 'bsl':
+                    context = None
+                    if stem == 'CommonModule':
+                        context = _common_module_context(infos[rel]['header'])
+                    bsl_tasks.append((os.path.join(dirpath, fn), object_id,
+                                      m.group('code'), context))
+
+        # CPU-тяжёлый разбор модулей — в пуле процессов; данные остаются на диске
+        if workers > 1 and len(bsl_tasks) > 1:
+            import multiprocessing
+            pool_size = min(workers, MAX_PARSE_WORKERS, len(bsl_tasks))
+            mp_ctx = multiprocessing.get_context('spawn')
+            with mp_ctx.Pool(pool_size) as pool:
+                parsed = pool.map(_parse_bsl_worker, [t[0] for t in bsl_tasks],
+                                  chunksize=max(1, len(bsl_tasks) // (pool_size * 8)))
+        else:
+            parsed = [_parse_bsl_worker(t[0]) for t in bsl_tasks]
+        parsed_by_path = {t[0]: (res[0], res[1], t[2], t[3])
+                          for t, res in zip(bsl_tasks, parsed)}
+
+        module_params = []
+        method_params = []
+        file_params = []
+        skd_params = []
+        module_id_seq = 0
+
+        def flush(buf, sql):
+            if buf:
+                conn.executemany(sql, buf)
+                buf.clear()
+
         for dirpath, dirnames, filenames in os.walk(dump_dir):
             rel = rel_by_dir.get(dirpath)
             object_id = dir_to_id.get(rel) if rel is not None else None
@@ -912,30 +979,29 @@ def write_db(dump_dir, db_path, *, source_file=None, store_blobs=False):
                 if object_id:
                     m = module_re(stem).match(fn)
                     if m and m.group('ext') == 'bsl':
-                        body = _read_text(full)
-                        context = None
-                        if stem == 'CommonModule':
-                            context = _common_module_context(infos[rel]['header'])
-                        module_body, methods = parse_methods(body)
-                        cur = conn.execute(
-                            'INSERT INTO module (object_id, code_name, context, body)'
-                            ' VALUES (?, ?, ?, ?)',
-                            (object_id, m.group('code'), context, module_body)
-                        )
-                        stats['modules'] += 1
+                        # pop — отдаём память по мере вставки
+                        module_body, methods, code_name, context = parsed_by_path.pop(full)
+                        module_id_seq += 1
+                        module_params.append((object_id, code_name, context, module_body))
                         ord_no = 0
                         for method in methods:
-                            conn.execute(
-                                'INSERT INTO method (module_id, ord, kind, name, signature,'
-                                ' is_export, directives, description, line_start, line_end, body)'
-                                ' VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-                                (cur.lastrowid, ord_no, method['kind'], method['name'],
-                                 method['signature'], int(method['is_export']),
-                                 ', '.join(method['directives']), method['description'],
-                                 method['line_start'], method['line_end'],
-                                 method['body']))
+                            method_params.append((
+                                module_id_seq, ord_no, method['kind'], method['name'],
+                                method['signature'], int(method['is_export']),
+                                ', '.join(method['directives']), method['description'],
+                                method['line_start'], method['line_end'],
+                                method['body']))
                             ord_no += 1
-                            stats['methods'] += 1
+                        stats['modules'] += 1
+                        stats['methods'] += len(methods)
+                        if len(method_params) >= 50000:
+                            flush(module_params,
+                                  'INSERT INTO module (object_id, code_name, context, body)'
+                                  ' VALUES (?, ?, ?, ?)')
+                            flush(method_params,
+                                  'INSERT INTO method (module_id, ord, kind, name, signature,'
+                                  ' is_export, directives, description, line_start, line_end, body)'
+                                  ' VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
                         continue
                 size = os.path.getsize(full)
                 data = None
@@ -950,15 +1016,27 @@ def write_db(dump_dir, db_path, *, source_file=None, store_blobs=False):
                     skd = _extract_skd_queries(full)
                     if skd:
                         for ord_no, query in enumerate(skd):
-                            conn.execute(
-                                'INSERT INTO skd_query (object_id, ord, query) VALUES (?, ?, ?)',
-                                (object_id, ord_no, query))
-                            stats['skd'] += 1
-                conn.execute(
-                    'INSERT INTO file (source_id, object_id, path, kind, size, data) VALUES (?, ?, ?, ?, ?, ?)',
-                    (source_id, object_id, rel_file, ext or 'bin', size, data)
-                )
+                            skd_params.append((object_id, ord_no, query))
+                        stats['skd'] += len(skd)
+                file_params.append((source_id, object_id, rel_file, ext or 'bin', size, data))
                 stats['files'] += 1
+                if len(file_params) >= 2000:
+                    flush(file_params,
+                          'INSERT INTO file (source_id, object_id, path, kind, size, data)'
+                          ' VALUES (?, ?, ?, ?, ?, ?)')
+                    flush(skd_params,
+                          'INSERT INTO skd_query (object_id, ord, query) VALUES (?, ?, ?)')
+        flush(module_params,
+              'INSERT INTO module (object_id, code_name, context, body) VALUES (?, ?, ?, ?)')
+        flush(method_params,
+              'INSERT INTO method (module_id, ord, kind, name, signature,'
+              ' is_export, directives, description, line_start, line_end, body)'
+              ' VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+        flush(file_params,
+              'INSERT INTO file (source_id, object_id, path, kind, size, data)'
+              ' VALUES (?, ?, ?, ?, ?, ?)')
+        flush(skd_params,
+              'INSERT INTO skd_query (object_id, ord, query) VALUES (?, ?, ?)')
         conn.commit()
     except Exception:
         conn.rollback()

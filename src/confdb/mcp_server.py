@@ -472,8 +472,17 @@ def make_handler(server):
 
         def do_GET(self):
             path = urlparse(self.path)
-            if path.path != '/sse':
-                return self._send(404, {'error': f'not found: {path.path}'})
+            if path.path in ('/sse', '/mcp'):
+                return self._sse_stream()
+            return self._send(404, {'error': f'not found: {path.path}'})
+
+        def do_DELETE(self):
+            self._send(405, {'error': 'сессии не сохраняются'},
+                       extra={'Allow': 'GET, POST'})
+
+        def _sse_stream(self):
+            # endpoint-событие нужно legacy SSE-клиентам; streamable-клиенты
+            # (POST /mcp) по спецификации игнорируют неизвестные события
             sid = uuid.uuid4().hex
             events = queue.Queue()
             state['sessions'][sid] = events
