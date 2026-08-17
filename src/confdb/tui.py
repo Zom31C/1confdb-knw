@@ -81,6 +81,18 @@ def _ask(prompt, default=''):
     return text or default
 
 
+def _unquote(text):
+    """Убирает окружающие двойные кавычки («копировать как путь» в Explorer)."""
+    text = text.strip()
+    if len(text) >= 2 and text[0] == '"' and text[-1] == '"':
+        text = text[1:-1].strip()
+    return text
+
+
+def _ask_path(prompt, default=''):
+    return _unquote(_ask(prompt, default))
+
+
 def _yes_no(prompt, default=False):
     suffix = 'да/Нет' if not default else 'Да/нет'
     answer = input(f'{prompt} ({suffix}) [Enter]: ').strip().lower()
@@ -125,6 +137,7 @@ class Tui:
         config = _load_config()
         self.recent_src = config.get('recent_src', [])
         self.recent_db = config.get('recent_db', [])
+        self.db_dirs = config.get('db_dirs', [])
         self.last_db = config.get('last_db', '')
         opts = config.get('options', {})
         self.src = opts.get('src', '')
@@ -140,6 +153,7 @@ class Tui:
         _save_config({
             'recent_src': self.recent_src,
             'recent_db': self.recent_db,
+            'db_dirs': self.db_dirs,
             'last_db': self.last_db,
             'options': {
                 'src': self.src, 'db': self.db, 'dump': self.dump, 'temp': self.temp,
@@ -204,7 +218,56 @@ class Tui:
             if choice == 'e' and allow_empty:
                 return ''
             if choice == 'p':
-                return _ask('Путь')
+                return _ask_path('Путь')
+            if choice.isdigit() and 1 <= int(choice) <= len(entries):
+                return entries[int(choice) - 1]
+            print('Неизвестный пункт.')
+
+    def _db_candidates(self):
+        roots = [os.getcwd(),
+                 os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')),
+                 os.path.abspath(os.path.join(os.path.dirname(__file__),
+                                              '..', '..', '_out'))]
+        roots += [d for d in self.db_dirs if os.path.isdir(d)]
+        found = []
+        for root in dict.fromkeys(roots):
+            for pattern in ('*.db', '*.sqlite'):
+                found += glob.glob(os.path.join(root, pattern))
+        return sorted({os.path.abspath(p) for p in found if os.path.isfile(p)})
+
+    def _pick_db(self, title, candidates=(), allow_empty=False, empty_hint=''):
+        while True:
+            recent = [r for r in ([self.last_db] + self.recent_db)
+                      if r and os.path.isfile(r)]
+            entries = list(dict.fromkeys(
+                list(candidates) + self._db_candidates() + recent))
+            _cls()
+            print(title)
+            for i, path in enumerate(entries, 1):
+                print(f' {i}. {path}')
+            print(' p. Указать путь вручную')
+            print(' k. Добавить каталог с базами (его файлы появятся в списке)')
+            if allow_empty:
+                print(f' e. Пусто ({empty_hint})')
+            print(' 0. Отмена')
+            choice = input('Выбор: ').strip()
+            if choice == '0':
+                return None
+            if choice == 'e' and allow_empty:
+                return ''
+            if choice == 'p':
+                return _ask_path('Путь к базе')
+            if choice == 'k':
+                directory = _ask_path('Каталог с базами')
+                if directory and os.path.isdir(directory):
+                    directory = os.path.abspath(directory)
+                    if directory not in self.db_dirs:
+                        self.db_dirs.append(directory)
+                        self._save()
+                else:
+                    print('Нет такого каталога.')
+                    input('Нажмите Enter…')
+                continue
             if choice.isdigit() and 1 <= int(choice) <= len(entries):
                 return entries[int(choice) - 1]
             print('Неизвестный пункт.')
@@ -231,8 +294,8 @@ class Tui:
                     self.src = picked
             elif choice == '2':
                 candidates = [_out_defaults(self.src)[0]] if self.src else []
-                picked = self._pick_path('База SQLite', candidates, self.recent_db,
-                                         allow_empty=True, empty_hint='не писать')
+                picked = self._pick_db('База SQLite', candidates=candidates,
+                                       allow_empty=True, empty_hint='не писать')
                 if picked is not None:
                     self.db = picked
             elif choice == '3':
@@ -321,7 +384,7 @@ class Tui:
                     print('Нужно целое число >= 1.')
                     input('Нажмите Enter…')
             elif choice == '2':
-                self.temp = _ask('Рабочий каталог (пусто — temp ОС)', self.temp)
+                self.temp = _ask_path('Рабочий каталог (пусто — temp ОС)', self.temp)
             elif choice == '3':
                 self.prefix = _ask('Префикс (пусто — нет)', self.prefix)
             elif choice == '4':
@@ -335,12 +398,7 @@ class Tui:
     # ---------- MCP-сервер ----------
 
     def _run_mcp(self):
-        recent = [d for d in ([self.last_db] + self.recent_db) if d and os.path.isfile(d)]
-        if not recent:
-            print('Ошибка: нет ни одной известной базы. Сначала выполните извлечение.')
-            input('Нажмите Enter…')
-            return
-        db = self._pick_path('База для MCP-сервера 1confdb-knw', [], recent)
+        db = self._pick_db('База для MCP-сервера 1confdb-knw')
         if not db:
             return
         while True:
@@ -420,12 +478,7 @@ class Tui:
     # ---------- проверка СКД ----------
 
     def _check_queries(self):
-        recent = [d for d in ([self.last_db] + self.recent_db) if d and os.path.isfile(d)]
-        if not recent:
-            print('Ошибка: нет ни одной известной базы. Сначала выполните извлечение.')
-            input('Нажмите Enter…')
-            return
-        db = self._pick_path('Проверка запросов СКД: файл базы', [], recent)
+        db = self._pick_db('Проверка запросов СКД: файл базы')
         if not db:
             return
         _cls()
@@ -437,12 +490,7 @@ class Tui:
 
     def _query_menu(self, db=None):
         if not db:
-            recent = [d for d in ([self.last_db] + self.recent_db) if d and os.path.isfile(d)]
-            if not recent:
-                print('Ошибка: нет ни одной известной базы. Сначала выполните извлечение.')
-                input('Нажмите Enter…')
-                return
-            db = self._pick_path('Запросы к базе: файл базы', [], recent)
+            db = self._pick_db('Запросы к базе: файл базы')
             if not db:
                 return
         while True:

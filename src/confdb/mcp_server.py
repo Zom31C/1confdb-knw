@@ -18,6 +18,7 @@
 import argparse
 import json
 import queue
+import re
 import sqlite3
 import sys
 import threading
@@ -25,15 +26,58 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
+from .db.writer import TYPE_RU
+
 PROTOCOL_VERSION = '2024-11-05'
+
+# пути объектов наружу — «как в конфигураторе»: Справочник.Имя[.Подобъект];
+# на вход принимается и старый слэш-формат Catalog/Имя
+_RU2TYPES = {}
+for _stem, _ru in TYPE_RU.items():
+    _RU2TYPES.setdefault(_ru, []).append(_stem)
+    _RU2TYPES.setdefault(_ru.replace(' ', ''), []).append(_stem)
+_TYPE_SLASH_RE = re.compile(
+    '(?:' + '|'.join(map(re.escape, sorted(TYPE_RU, key=len, reverse=True))) + ')/')
+# 'Справочник.Имя' в строковых литералах sql -> внутренний 'Catalog/Имя'
+_RU_PATH_LIT_RE = re.compile(
+    "'(" + '|'.join(map(re.escape, sorted(_RU2TYPES, key=len, reverse=True))) +
+    r")\.([^'.]+)'")
+
+
+def _sql_rewrite(query):
+    def sub(match):
+        stems = _RU2TYPES.get(match.group(1))
+        return f"'{stems[0]}/{match.group(2)}'" if stems else match.group(0)
+    return _RU_PATH_LIT_RE.sub(sub, query)
+
+
+def ru_path(path):
+    """'Catalog/Х/CatalogForm/У' -> 'Справочник.Х.У'."""
+    parts = str(path).split('/')
+    if len(parts) % 2 or parts[0] not in TYPE_RU:
+        return str(path)
+    return '.'.join([TYPE_RU[parts[0]]] + parts[1::2])
+
+
+def ru_type_str(text):
+    """'Ссылка: Catalog/Валюты' -> 'Ссылка: Справочник.Валюты'."""
+    if not text:
+        return text
+    return _TYPE_SLASH_RE.sub(lambda m: TYPE_RU[m.group(0)[:-1]] + '.', text)
 
 PRIMER = """1confdb-knw: MCP server over a knowledge base of a 1C:Enterprise 8 configuration — metadata, BSL code and SKD queries, extracted from a binary .cf file into SQLite. 1C is a Russian business-automation platform; a configuration contains metadata objects, their fields, modules of 1C-language code (Russian keywords) and SKD report queries. All object/field names are in Russian.
 
-GLOSSARY: Catalog=справочник (directory), Document=документ, InformationRegister/AccumulationRegister=регистры, Enum=перечисление, DataProcessor=обработка, Report=отчет, DefinedType=определяемый тип, CommonAttribute=общий реквизит. Tabular section (табличная часть) = row table of an object (e.g. Document.ЗаказПокупателя has section Запасы with fields Номенклатура, Цена…).
+GLOSSARY: Catalog=справочник (directory), Document=документ, InformationRegister/AccumulationRegister=регистры, Enum=перечисление, DataProcessor=обработка, Report=отчет, DefinedType=определяемый тип, CommonAttribute=общий реквизит, CommonModule=общий модуль. Tabular section (табличная часть) = row table of an object (e.g. Документ.ЗаказПокупателя has section Запасы with fields Номенклатура, Цена…).
 
-DATABASE SCHEMA:
-- meta_object(id, path, type, type_ru, name, uuid, comment, parent_id, ord). path like 'Catalog/Номенклатура' or nested 'Catalog/Х/CatalogForm/ФормаЭлемента'; type = English stem (Catalog, Document, InformationRegister, Enum, CommonModule, DefinedType…); type_ru = Russian label as in the configurator.
-- meta_attribute(object_id, ord, name, type_str, tabular). Object fields; tabular NULL = header attribute, else the tabular section the field belongs to. type_str examples: 'Строка(50)', 'Число', 'Ссылка: Catalog/Валюты', 'ОпределяемыйТип: DefinedType/Х (Ссылка: …)', composites joined with ' | '; 'Ссылка' alone = abstract/any reference.
+OBJECT PATHS: tools return and accept configurator-style Russian dotted paths: 'Справочник.Номенклатура', nested 'Справочник.Х.ФормаЭлемента' (legacy 'Catalog/Х/…' slash form is also accepted as input). In the 1C query language the table name for an object is exactly this dotted form: 'Справочник.Имя', 'Документ.Имя', 'РегистрСведений.Имя'…
+
+COMMON MODULES: in BSL code a common module is called by its bare name: 'ИмяМодуля.Функция(...)'. Prefixes like 'ОбщийМодуль.', 'Общий модуль.', 'ОбщМодуль.' are NOT valid code — never write them. The dotted 'Общий модуль.Имя' form only identifies the object in this knowledge base.
+
+DATABASE FILE: the SQLite file is internal to the server. Do NOT search for it, open it, read it from disk, or ask the user for its location — you have no filesystem access to it. Everything is available through the tools below; the sql tool runs arbitrary read-only SELECTs.
+
+DATABASE SCHEMA (for the sql tool; path columns store the legacy slash form 'Catalog/Имя', but string literals in the Russian dotted form ('Справочник.Имя') are auto-converted — either form works in WHERE path = …):
+- meta_object(id, path, type, type_ru, name, uuid, comment, parent_id, ord). path like 'Catalog/Номенклатура'; type = English stem (Catalog, Document, InformationRegister, Enum, CommonModule, DefinedType…); type_ru = Russian label as in the configurator.
+- meta_attribute(object_id, ord, name, type_str, tabular). Object fields; tabular NULL = header attribute, else the tabular section the field belongs to. type_str examples: 'Строка(50)', 'Число', 'Ссылка: Справочник.Валюты', 'ОпределяемыйТип: … (Ссылка: …)', composites joined with ' | '; 'Ссылка' alone = abstract/any reference.
 - meta_tabular(object_id, ord, name) — tabular sections in declaration order.
 - module(object_id, code_name, context, body). code_name: 'obj' (object module), 'mgr' (manager module), form/common modules etc.; context = execution context for common modules (Сервер/Клиент/…); body = module text WITHOUT method bodies (signatures, comments, #Если regions) — a table of contents.
 - method(id, module_id, ord, kind, name, signature, is_export, directives, description, line_start, line_end, body). Procedures/functions of the 1C code; directives like '&НаСервере'/'&НаКлиенте'; description = comment block above the method.
@@ -45,7 +89,7 @@ DATABASE SCHEMA:
 
 RECOMMENDED WORKFLOW to write a query or 1C code: 1) find_objects to locate objects; 2) object_card for its fields, sections and references; 3) skd_of / find_skd to see how THIS configuration queries the same tables (best examples); 4) find_methods + get_method to reuse existing code instead of inventing; 5) check_query to validate your query before use.
 
-All tools are read-only. Prefer the dedicated tools over raw sql; use sql only for what is not covered."""
+All tools are read-only. Prefer the dedicated tools over raw sql; use sql only for what is not covered. ANTI-LOOP: never issue more than two sql calls in a row — if sql did not answer the question, switch to the dedicated tools (find_objects, object_card, find_field, skd_of, refs_of). The schema is EXACTLY as documented above — never waste calls on PRAGMA / sqlite_master / schema guessing."""
 
 
 class McpServer:
@@ -62,6 +106,10 @@ class McpServer:
             self._conn = sqlite3.connect(
                 f'file:{self.db_path}?mode=ro', uri=True,
                 check_same_thread=False)  # HTTP-транспорт: потоки под блокировкой
+            # sqlite-LOWER не знает кириллицу — регистрируем питоний lower
+            self._conn.create_function(
+                'lower_ru', 1,
+                lambda v: v.lower() if isinstance(v, str) else v)
         return self._conn
 
     def ctx(self):
@@ -69,6 +117,30 @@ class McpServer:
             from .query_lang import MetaContext
             self._ctx = MetaContext(self.conn())
         return self._ctx
+
+    def resolve_path(self, value):
+        """Русский точечный путь ('Справочник.Х.Форма') -> внутренний слэш-путь."""
+        value = (value or '').strip()
+        if not value or '/' in value or '.' not in value:
+            return value
+        parts = value.split('.')
+        stems = _RU2TYPES.get(parts[0])
+        if not stems:
+            return value
+        row = self.conn().execute(
+            'SELECT id, path FROM meta_object WHERE name=? AND type IN (%s)'
+            % ','.join('?' * len(stems)), [parts[1]] + stems).fetchone()
+        if not row:
+            return value
+        oid, path = row
+        for name in parts[2:]:
+            row = self.conn().execute(
+                'SELECT id, path FROM meta_object '
+                'WHERE parent_id=? AND name=? ORDER BY ord', (oid, name)).fetchone()
+            if not row:
+                return value
+            oid, path = row
+        return path
 
     def handle(self, msg):
         method = msg.get('method')
@@ -108,9 +180,14 @@ class McpServer:
     # -- инструменты ---------------------------------------------------------
     def find_objects(self, mask, type=None, limit=20):  # noqa: A002
         like = f'%{mask}%'
+        # имена в 1С пишутся Слитно, а маски часто приходят с пробелами
+        # и в другой раскладке регистра
+        like_ns = f'%{mask.replace(" ", "").lower()}%'
         sql = ('SELECT path, type, type_ru, name FROM meta_object '
-               'WHERE name LIKE ? OR path LIKE ?')
-        params = [like, like]
+               'WHERE name LIKE ? OR path LIKE ? '
+               "OR lower_ru(REPLACE(name, ' ', '')) LIKE ? "
+               "OR lower_ru(REPLACE(path, ' ', '')) LIKE ?")
+        params = [like, like, like_ns, like_ns]
         if type:
             sql += ' AND (type = ? OR type_ru = ?)'
             params += [type, type]
@@ -119,29 +196,31 @@ class McpServer:
         rows = self.conn().execute(sql, params).fetchall()
         if not rows:
             return 'ничего не найдено'
-        return '\n'.join(f'{p} — {ru} ({t})' for p, t, ru, _ in rows)
+        return '\n'.join(f'{ru_path(p)} — {ru} ({t})' for p, t, ru, _ in rows)
 
     def object_card(self, path):
+        path = self.resolve_path(path)
         q = self.conn().execute
         row = q('SELECT type, type_ru, name, comment FROM meta_object '
                 'WHERE path=?', (path,)).fetchone()
         if not row:
             return f'объект не найден: {path}'
         oid = q('SELECT id FROM meta_object WHERE path=?', (path,)).fetchone()[0]
-        out = [f'{path} — {row[1]} ({row[0]}), имя {row[2]}' +
+        out = [f'{ru_path(path)} — {row[1]} ({row[0]}), имя {row[2]}' +
                (f'; комментарий: {row[3]}' if row[3] else '')]
         attrs = q('SELECT name, type_str FROM meta_attribute '
                   'WHERE object_id=? AND tabular IS NULL ORDER BY ord',
                   (oid,)).fetchall()
         out.append('Реквизиты: ' + ('; '.join(
-            f'{n}: {t or "?"}' for n, t in attrs) if attrs else 'нет'))
+            f'{n}: {ru_type_str(t) or "?"}' for n, t in attrs) if attrs else 'нет'))
         tabs = q('SELECT t.name, a.name, a.type_str FROM meta_tabular t '
                  'LEFT JOIN meta_attribute a ON a.object_id=t.object_id '
                  'AND a.tabular=t.name WHERE t.object_id=? '
                  'ORDER BY t.ord, a.ord', (oid,)).fetchall()
         sections = {}
         for sec, fname, ftype in tabs:
-            sections.setdefault(sec, []).append(f'{fname}: {ftype or "?"}')
+            sections.setdefault(sec, []).append(
+                f'{fname}: {ru_type_str(ftype) or "?"}')
         for sec, fields in sections.items():
             out.append(f'Табличная часть {sec}: ' + '; '.join(fields))
         mods = q('SELECT code_name, context FROM module WHERE object_id=?',
@@ -160,7 +239,7 @@ class McpServer:
             'JOIN meta_object t ON t.id=r.object_id '
             'WHERE v.path=? AND t.path IS NOT NULL LIMIT 12', (path,))]
         if fwd:
-            out.append('Ссылается на: ' + ', '.join(fwd))
+            out.append('Ссылается на: ' + ', '.join(ru_path(p) for p in fwd))
         rev = [r[0] for r in q(
             'SELECT DISTINCT v.path FROM attribute_ref r '
             'JOIN meta_attribute a ON a.id=r.attribute_id '
@@ -168,10 +247,11 @@ class McpServer:
             'JOIN meta_object t ON t.id=r.object_id '
             'WHERE t.path=? LIMIT 12', (path,))]
         if rev:
-            out.append('На него ссылаются: ' + ', '.join(rev))
+            out.append('На него ссылаются: ' + ', '.join(ru_path(p) for p in rev))
         return '\n'.join(out)
 
     def object_tree(self, path='', depth=2):
+        path = self.resolve_path(path)
         rows = self.conn().execute(
             'SELECT id, parent_id, path, type_ru FROM meta_object '
             'ORDER BY ord').fetchall()
@@ -193,26 +273,31 @@ class McpServer:
             if lvl > depth:
                 return
             for p, ru, cid in children.get(oid, []):
-                out.append('  ' * lvl + f'{p} — {ru}')
+                out.append('  ' * lvl + f'{ru_path(p)} — {ru}')
                 walk(cid, lvl + 1)
 
-        out.append(f'{path or "(корень)"} — {ids[root_id][1]}')
+        out.append(f'{ru_path(path) or "(корень)"} — {ids[root_id][1]}')
         walk(root_id, 1)
         return '\n'.join(out)
 
     def find_field(self, name, limit=20):
+        like = f'%{name}%'
+        like_ns = f'%{name.replace(" ", "").lower()}%'
         rows = self.conn().execute(
             'SELECT o.path, a.name, a.tabular, a.type_str FROM meta_attribute a '
             'JOIN meta_object o ON o.id=a.object_id '
-            'WHERE a.name LIKE ? ORDER BY o.path LIMIT ?',
-            (f'%{name}%', int(limit))).fetchall()
+            "WHERE a.name LIKE ? OR lower_ru(REPLACE(a.name, ' ', '')) LIKE ? "
+            'ORDER BY o.path LIMIT ?',
+            (like, like_ns, int(limit))).fetchall()
         if not rows:
             return 'ничего не найдено'
         return '\n'.join(
-            f'{p} :: поле {n} ({t or "?"})' + (f' [табчасть {s}]' if s else '')
+            f'{ru_path(p)} :: поле {n} ({ru_type_str(t) or "?"})' +
+            (f' [табчасть {s}]' if s else '')
             for p, n, s, t in rows)
 
     def refs_of(self, path, direction='both', limit=30):
+        path = self.resolve_path(path)
         q = self.conn().execute
         out = []
         if direction in ('both', 'forward'):
@@ -223,7 +308,7 @@ class McpServer:
                 'JOIN meta_object t ON t.id=r.object_id '
                 'WHERE v.path=? AND t.path IS NOT NULL LIMIT ?',
                 (path, int(limit))).fetchall()
-            out.append('Ссылается на: ' + (', '.join(r[0] for r in rows)
+            out.append('Ссылается на: ' + (', '.join(ru_path(r[0]) for r in rows)
                        if rows else '—'))
         if direction in ('both', 'reverse'):
             rows = q(
@@ -232,11 +317,12 @@ class McpServer:
                 'JOIN meta_object v ON v.id=a.object_id '
                 'JOIN meta_object t ON t.id=r.object_id '
                 'WHERE t.path=? LIMIT ?', (path, int(limit))).fetchall()
-            out.append('На него ссылаются: ' + (', '.join(r[0] for r in rows)
+            out.append('На него ссылаются: ' + (', '.join(ru_path(r[0]) for r in rows)
                        if rows else '—'))
         return '\n'.join(out)
 
     def module_outline(self, path, code_name='obj'):
+        path = self.resolve_path(path)
         row = self.conn().execute(
             'SELECT m.body FROM module m JOIN meta_object o ON o.id=m.object_id '
             'WHERE o.path=? AND m.code_name=?', (path, code_name)).fetchone()
@@ -245,6 +331,7 @@ class McpServer:
         return row[0]
 
     def get_method(self, path, code_name, name):
+        path = self.resolve_path(path)
         row = self.conn().execute(
             'SELECT mt.kind, mt.name, mt.signature, mt.directives, '
             'mt.description, mt.body, mt.is_export FROM method mt '
@@ -264,14 +351,17 @@ class McpServer:
         return '\n'.join(parts)
 
     def find_methods(self, mask, path=None, limit=20):
+        path = self.resolve_path(path) if path else None
         like = f'%{mask}%'
+        like_ns = f'%{mask.replace(" ", "").lower()}%'
         sql = ('SELECT o.path, m.code_name, mt.kind, mt.name, mt.signature, '
                'mt.directives, mt.description FROM method mt '
                'JOIN module m ON m.id=mt.module_id '
                'JOIN meta_object o ON o.id=m.object_id '
                'WHERE mt.name LIKE ? OR mt.signature LIKE ? '
-               'OR mt.description LIKE ?')
-        params = [like, like, like]
+               'OR mt.description LIKE ? '
+               "OR lower_ru(REPLACE(mt.name, ' ', '')) LIKE ?")
+        params = [like, like, like, like_ns]
         if path:
             sql += ' AND o.path=?'
             params.append(path)
@@ -282,7 +372,7 @@ class McpServer:
             return 'ничего не найдено'
         out = []
         for p, code, kind, name, sig, dirs, desc in rows:
-            line = f'{p} ({code}) — {kind} {name}({sig})'
+            line = f'{ru_path(p)} ({code}) — {kind} {name}({sig})'
             if dirs:
                 line += f' [{dirs}]'
             if desc:
@@ -291,6 +381,7 @@ class McpServer:
         return '\n'.join(out)
 
     def skd_of(self, path):
+        path = self.resolve_path(path)
         rows = self.conn().execute(
             'SELECT q.query FROM skd_query q JOIN meta_object o '
             'ON o.id=q.object_id WHERE o.path=? ORDER BY q.ord',
@@ -311,7 +402,7 @@ class McpServer:
         for rid, path, text in rows:
             pos = text.lower().find(mask.lower())
             snippet = text[max(0, pos - 120):pos + 240].replace('\n', ' ')
-            out.append(f'[{rid}] {path} … {snippet} …')
+            out.append(f'[{rid}] {ru_path(path)} … {snippet} …')
         return '\n'.join(out)
 
     def check_query(self, text):
@@ -322,7 +413,7 @@ class McpServer:
         return 'Ошибки:\n' + '\n'.join(errs)
 
     def sql(self, query):
-        stripped = query.strip().rstrip(';')
+        stripped = _sql_rewrite(query).strip().rstrip(';')
         head = stripped.upper()
         if not (head.startswith('SELECT') or head.startswith('WITH')):
             raise ValueError('разрешены только SELECT/WITH (read-only)')
@@ -368,8 +459,9 @@ _INT = {'type': 'integer'}
 TOOLS = [
     Tool('find_objects',
          'Search metadata objects by name or path substring. Returns '
-         "'path — Russian type (English type)'. First step for anything: "
-         "locate Catalog/Документ/регистр by its Russian name.",
+         "configurator-style dotted paths ('Справочник.Имя') with Russian and "
+         'English type labels. First step for anything: locate '
+         'справочник/документ/регистр by its Russian name.',
          _schema({'mask': _STR, 'type': _STR,
                   'limit': _INT}, ('mask',)),
          McpServer.find_objects),
