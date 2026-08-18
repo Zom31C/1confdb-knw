@@ -43,7 +43,9 @@ def build_parser():
         '1confdb-knw',
         help='MCP-сервер знаний по конфигурации 1С и BSL для внешних LLM '
              '(stdio; --port — HTTP для SSH-туннеля)')
-    m.add_argument('db', help='путь к базе SQLite')
+    m.add_argument('db', nargs='?', default=None,
+                   help='путь к базе SQLite; без пути — last_db из конфига '
+                        'или автопоиск *.db/*.sqlite')
     m.add_argument('--host', default='127.0.0.1',
                    help='адрес для HTTP-режима (по умолчанию 127.0.0.1)')
     m.add_argument('--port', type=int, default=0,
@@ -88,7 +90,7 @@ def main(argv=None):
 
     if args.cmd == '1confdb-knw':
         from .mcp_server import main as mcp_main
-        argv = [args.db]
+        argv = [args.db] if args.db else []
         if args.port:
             argv += ['--host', args.host, '--port', str(args.port)]
         return mcp_main(argv)

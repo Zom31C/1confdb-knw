@@ -14,9 +14,17 @@
   Для доступа с другой машины — SSH-туннель:
     ssh -L 8765:127.0.0.1:8765 user@host
   и в конфиге клиента {"url": "http://127.0.0.1:8765/mcp"}.
+
+Путь к базе можно не указывать — тогда берётся last_db из
+~/.confdb/config.json, а при его отсутствии база ищется сама:
+*.db/*.sqlite в текущем каталоге, db/ и _out/ (и в корне установки,
+если запуск из venv). Свежая установка с привезённой базой работает
+без ручной правки конфига.
 """
 import argparse
+import glob
 import json
+import os
 import queue
 import re
 import sqlite3
@@ -26,6 +34,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
+from .config import load_config
 from .db.writer import TYPE_RU
 
 PROTOCOL_VERSION = '2024-11-05'
@@ -637,7 +646,64 @@ def start_http_server(server, host='127.0.0.1', port=0):
     return httpd, httpd.server_address[1]
 
 
+def _scan_roots():
+    """Каталоги автопоиска базы: текущий и корень установки (при запуске из venv)."""
+    roots = [os.getcwd()]
+    if sys.prefix != getattr(sys, 'base_prefix', sys.prefix):
+        # venv: два уровня вверх от python.exe — корень установки с bat-обёртками
+        roots.append(os.path.dirname(os.path.dirname(
+            os.path.dirname(sys.executable))))
+    return list(dict.fromkeys(roots))
+
+
+def find_db_candidates():
+    """Базы .db/.sqlite в типовых местах: корень, db/, _out/ (без рекурсии)."""
+    found = []
+    for root in _scan_roots():
+        for sub in ('', 'db', '_out'):
+            directory = os.path.join(root, sub) if sub else root
+            if not os.path.isdir(directory):
+                continue
+            for pattern in ('*.db', '*.sqlite'):
+                for path in sorted(glob.glob(os.path.join(directory, pattern))):
+                    path = os.path.abspath(path)
+                    if os.path.isfile(path) and path not in found:
+                        found.append(path)
+    return found
+
+
+def resolve_db(db):
+    """Проверяет явный путь либо сам ищет базу; SystemExit(2), если не нашёл."""
+    if db:
+        if os.path.isfile(db):
+            return db
+        print(f'Файл базы не найден: {db}', file=sys.stderr)
+        print('Укажите существующий путь к базе SQLite.', file=sys.stderr)
+        raise SystemExit(2)
+    last = load_config().get('last_db') or ''
+    if last and os.path.isfile(last):
+        print(f'База из ~/.confdb/config.json (last_db): {last}', file=sys.stderr)
+        return last
+    found = find_db_candidates()
+    if len(found) == 1:
+        print(f'База найдена автоматически: {found[0]}', file=sys.stderr)
+        return found[0]
+    if found:
+        print('Найдено несколько баз — укажите путь явно:', file=sys.stderr)
+        for path in found:
+            print(f'  {path}', file=sys.stderr)
+    else:
+        print('База SQLite не найдена. Положите файл .db/.sqlite в текущий '
+              'каталог (или в db/, _out/) либо укажите путь явно:',
+              file=sys.stderr)
+    print('Пример: 1confdb-knw база.sqlite', file=sys.stderr)
+    raise SystemExit(2)
+
+
 def serve_http(db_path, host='127.0.0.1', port=8765):
+    if not os.path.isfile(db_path):
+        print(f'Файл базы не найден: {db_path}', file=sys.stderr)
+        return 2
     server = McpServer(db_path)
     httpd, real_port = start_http_server(server, host, port)
     print(f'1confdb-knw: слушаю http://{host}:{real_port}/mcp '
@@ -672,15 +738,19 @@ def main(argv=None):
         prog='1confdb-knw',
         description='MCP-сервер знаний по конфигурации 1С и BSL '
                     '(stdio по умолчанию; --port — HTTP для SSH-туннеля)')
-    parser.add_argument('db', help='путь к базе SQLite')
+    parser.add_argument(
+        'db', nargs='?', default=None,
+        help='путь к базе SQLite; без пути — last_db из ~/.confdb/config.json '
+             'или автопоиск *.db/*.sqlite (текущий каталог, db/, _out/)')
     parser.add_argument('--host', default='127.0.0.1',
                         help='адрес для HTTP-режима (по умолчанию 127.0.0.1)')
     parser.add_argument('--port', type=int, default=0,
                         help='порт HTTP-режима (без него — stdio)')
     args = parser.parse_args(argv)
+    db = resolve_db(args.db)
     if args.port:
-        return serve_http(args.db, args.host, args.port)
-    server = McpServer(args.db)
+        return serve_http(db, args.host, args.port)
+    server = McpServer(db)
     for line in sys.stdin:
         line = line.strip()
         if not line:
