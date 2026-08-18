@@ -1,10 +1,18 @@
 """Проверка запросов языка 1С:Предприятие (лексер, парсер, семантический контроль).
 
 Синтаксис — подмножество языка запросов 1С, достаточное для реальных запросов
-СКД: ПОМЕСТИТЬ, ОБЪЕДИНИТЬ [ВСЕ], соединения, вложенные запросы, параметры &…,
-ВЫБОР (с операндом и без), ВЫРАЗИТЬ, виртуальные таблицы с аргументами,
-ИНДЕКСИРОВАТЬ ПО, УПОРЯДОЧИТЬ/ПОРЯДОК, ИТОГИ, необязательные области СКД в
-фигурных скобках {…}.
+СКД (сверено с официальным синтаксис-помощником платформы: shquery_ru.hbk и
+его HTML-изданием, каталог query соседнего проекта 1c-syntax-db-extractor):
+ПОМЕСТИТЬ, ОБЪЕДИНИТЬ [ВСЕ], соединения, вложенные запросы, параметры &…,
+ВЫБОР (с операндом и без — операндная форма встречается в реальных запросах,
+хотя в таблице грамматики справки показана только форма с КОГДА), ВЫРАЗИТЬ,
+виртуальные таблицы с аргументами, ИНДЕКСИРОВАТЬ ПО, УПОРЯДОЧИТЬ/ПОРЯДОК
+(в т.ч. ИЕРАРХИЯ [УБЫВ]), АВТОУПОРЯДОЧИВАНИЕ, ИТОГИ (ПО/ОБЩИЕ, [ТОЛЬКО]
+ИЕРАРХИЯ, ПЕРИОДАМИ(…), несколько ИТОГИ подряд), СГРУППИРОВАТЬ ПО (в т.ч.
+ГРУППИРУЮЩИМ НАБОРАМ — с вложенными скобками ((…), (…)) и плоским списком),
+В [ИЕРАРХИИ] / НЕ В, НЕ МЕЖДУ, НЕ ПОДОБНО, ПОДОБНО … [СПЕЦСИМВОЛ …],
+ЕСТЬ [НЕ] NULL, ССЫЛКА, псевдонимы с КАК и без, необязательные области СКД
+в фигурных скобках {…}, ДЛЯ ИЗМЕНЕНИЯ [[OF] <таблицы>].
 
 Семантический контроль опирается на метаданные в БД: существование таблиц
 (объектов и виртуальных таблиц), существование полей (meta_attribute +
@@ -74,11 +82,17 @@ def tokenize(text):
 
 _KW = {
     'ВЫБРАТЬ', 'РАЗЛИЧНЫЕ', 'РАЗРЕШЕННЫЕ', 'ПЕРВЫЕ', 'КАК', 'ИЗ', 'ГДЕ',
-    'ПОРЯДОК', 'УПОРЯДОЧИТЬ', 'ПО', 'ВОЗР', 'УБЫВ', 'СГРУППИРОВАТЬ', 'ИМЕЮЩИЕ',
+    'ПОРЯДОК', 'УПОРЯДОЧИТЬ', 'ПО', 'ВОЗР', 'УБЫВ', 'СГРУППИРОВАТЬ',
+    'СГРУППИРОВАНО', 'ИМЕЮЩИЕ',
     'ОБЪЕДИНИТЬ', 'ВСЕ', 'ВЫБОР', 'КОГДА', 'ТОГДА', 'ИНАЧЕ', 'КОНЕЦ', 'И', 'ИЛИ',
-    'НЕ', 'В', 'МЕЖДУ', 'ЕСТЬ', 'NULL', 'ПОДОБНО', 'ПОМЕСТИТЬ', 'ВЫРАЗИТЬ',
+    'НЕ', 'В', 'МЕЖДУ', 'ЕСТЬ', 'NULL', 'ПОДОБНО', 'СПЕЦСИМВОЛ', 'ПОМЕСТИТЬ',
+    'ВЫРАЗИТЬ',
     'ЛЕВОЕ', 'ПРАВОЕ', 'ВНУТРЕННЕЕ', 'ПОЛНОЕ', 'ВНЕШНЕЕ', 'СОЕДИНЕНИЕ',
     'ИНДЕКСИРОВАТЬ', 'ИТОГИ', 'ИСТИНА', 'ЛОЖЬ', 'НЕОПРЕДЕЛЕНО', 'ССЫЛКА',
+    'ГРУППИРУЮЩИМ', 'НАБОРАМ', 'ИЕРАРХИЯ', 'ИЕРАРХИИ', 'АВТОУПОРЯДОЧИВАНИЕ',
+    'ТОЛЬКО', 'ПЕРИОДАМИ', 'ОБЩИЕ', 'ПУСТАЯТАБЛИЦА', 'ДЛЯ', 'ИЗМЕНЕНИЯ', 'OF',
+    'СЕКУНДА', 'МИНУТА', 'ЧАС', 'ДЕНЬ', 'НЕДЕЛЯ', 'МЕСЯЦ', 'КВАРТАЛ', 'ГОД',
+    'ДЕКАДА', 'ПОЛУГОДИЕ',
 }
 
 _JOINS = {
@@ -186,7 +200,28 @@ class _Parser:
                 node['where'] = self.parse_expr()
             elif self.accept_kw('СГРУППИРОВАТЬ'):
                 self.expect_kw('ПО')
-                node['group'] = self.parse_expr_list()
+                if self.accept_kw('ГРУППИРУЮЩИМ'):
+                    # СГРУППИРОВАТЬ ПО ГРУППИРУЮЩИМ НАБОРАМ — допустимы и
+                    # вложенные скобки ((…), (…)), и плоский список (…, …)
+                    self.expect_kw('НАБОРАМ')
+                    self.expect_op('(')
+                    sets = []
+                    while True:
+                        if self.accept_op('('):
+                            sets += self.parse_expr_list()
+                            self.expect_op(')')
+                        else:
+                            sets.append(self.parse_expr())
+                        if not self.accept_op(','):
+                            break
+                    self.expect_op(')')
+                    node['group'] = sets
+                else:
+                    node['group'] = self.parse_expr_list()
+            elif self.is_kw('СГРУППИРОВАНО'):
+                # каноническое ключевое слово 1С — СГРУППИРОВАТЬ ПО
+                raise self.error('в языке запросов 1С используется '
+                                 'СГРУППИРОВАТЬ ПО, а не СГРУППИРОВАНО')
             elif self.accept_kw('ИМЕЮЩИЕ'):
                 node['having'] = self.parse_expr()
             elif self.accept_kw('ИТОГИ'):
@@ -197,8 +232,18 @@ class _Parser:
             elif self.accept_kw('ИНДЕКСИРОВАТЬ'):
                 self.expect_kw('ПО')
                 self.parse_expr_list()
+            elif self.accept_kw('АВТОУПОРЯДОЧИВАНИЕ'):
+                node['autoorder'] = True
             elif self.accept_kw('ДЛЯ'):
                 self.expect_kw('ИЗМЕНЕНИЯ')
+                if self.accept_kw('OF'):
+                    # ДЛЯ ИЗМЕНЕНИЯ [OF <Список таблиц верхнего уровня>]
+                    while True:
+                        self.next()
+                        while self.accept_op('.'):
+                            self.next()
+                        if not self.accept_op(','):
+                            break
             elif self.is_kw('ОБЪЕДИНИТЬ'):
                 self.next()
                 union_all = bool(self.accept_kw('ВСЕ'))
@@ -259,10 +304,7 @@ class _Parser:
         if self.accept_op('*'):
             return ('star',)
         expr = self.parse_expr()
-        alias = None
-        if self.accept_kw('КАК'):
-            alias = self.next()[1]
-        return ('expr', expr, alias)
+        return ('expr', expr, self._parse_alias_tail())
 
     def parse_expr_list(self):
         exprs = [self.parse_expr()]
@@ -275,7 +317,11 @@ class _Parser:
         while True:
             expr = self.parse_expr()
             direction = 'asc'
-            if self.accept_kw('ВОЗР'):
+            if self.accept_kw('ИЕРАРХИЯ'):
+                # упорядочивание по иерархии: ВОЗР неявно, УБЫВ опционально
+                if self.accept_kw('УБЫВ'):
+                    direction = 'desc'
+            elif self.accept_kw('ВОЗР'):
                 direction = 'asc'
             elif self.accept_kw('УБЫВ'):
                 direction = 'desc'
@@ -284,11 +330,57 @@ class _Parser:
                 return order
 
     def parse_totals(self):
-        aggregates = self.parse_expr_list()
+        # ИТОГИ [<итоговые поля>] ПО [ОБЩИЕ] <контрольные точки>;
+        # форма «ИТОГИ ОБЩИЕ» допускает отсутствие ПО
+        aggregates = None
+        if not (self.is_kw('ПО') or self.is_kw('ОБЩИЕ')):
+            aggregates = [self.parse_total_point()]
+            while self.accept_op(','):
+                aggregates.append(self.parse_total_point())
+        self.accept_kw('ПО')
+        self.accept_kw('ОБЩИЕ')
         fields = None
-        if self.accept_kw('ПО'):
-            fields = self.parse_expr_list()
+        if self.peek()[0] not in ('eof',) and not self._at_clause_boundary():
+            fields = [self.parse_total_point()]
+            while self.accept_op(','):
+                fields.append(self.parse_total_point())
         return {'aggregates': aggregates, 'fields': fields}
+
+    def _at_clause_boundary(self):
+        """Следующий токен начинает новое предложение/секцию или конец."""
+        tok = self.peek()
+        if tok[0] == 'op' and tok[1] in (';', '}'):
+            return True
+        return tok[0] == 'id' and tok[1].upper() in (
+            'ИЗ', 'ГДЕ', 'СГРУППИРОВАТЬ', 'ИМЕЮЩИЕ', 'ИТОГИ', 'ПОРЯДОК',
+            'УПОРЯДОЧИТЬ', 'ИНДЕКСИРОВАТЬ', 'АВТОУПОРЯДОЧИВАНИЕ', 'ДЛЯ',
+            'ОБЪЕДИНИТЬ', 'УНИЧТОЖИТЬ', 'ВЫБРАТЬ')
+
+    def parse_total_point(self):
+        """<Выражение> [[ТОЛЬКО] ИЕРАРХИЯ | ПЕРИОДАМИ(…)] [[КАК] псевдоним]."""
+        expr = self.parse_expr()
+        if self.accept_kw('ТОЛЬКО'):
+            self.expect_kw('ИЕРАРХИЯ')
+        elif self.accept_kw('ИЕРАРХИЯ'):
+            pass
+        elif self.accept_kw('ПЕРИОДАМИ'):
+            self.expect_op('(')
+            self.expect_kw('СЕКУНДА', 'МИНУТА', 'ЧАС', 'ДЕНЬ', 'НЕДЕЛЯ',
+                           'МЕСЯЦ', 'КВАРТАЛ', 'ГОД', 'ДЕКАДА', 'ПОЛУГОДИЕ')
+            while self.accept_op(','):
+                self.parse_expr()
+            self.expect_op(')')
+        self._parse_alias_tail()
+        return expr
+
+    def _parse_alias_tail(self):
+        """Псевдоним: КАК обязателен лишь явно; платформа допускает [КАК]."""
+        if self.accept_kw('КАК'):
+            return self.next()[1]
+        tok = self.peek()
+        if tok[0] == 'id' and tok[1].upper() not in _KW:
+            return self.next()[1]
+        return None
 
     # -- источники ---------------------------------------------------------
     def parse_sources(self):
@@ -395,9 +487,7 @@ class _Parser:
         return expr
 
     def _parse_alias(self):
-        if self.accept_kw('КАК'):
-            return self.next()[1]
-        return None
+        return self._parse_alias_tail()
 
     # -- выражения ---------------------------------------------------------
     def parse_expr(self):
@@ -436,23 +526,36 @@ class _Parser:
                 self.next()
                 left = ('op', tok[1], left, self.parse_add())
                 continue
+            # НЕ перед В/МЕЖДУ/ПОДОБНО — отрицание оператора принадлежности
+            neg = False
+            if tok[0] == 'id' and tok[1].upper() == 'НЕ':
+                nxt = self.peek(1)
+                if nxt[0] == 'id' and nxt[1].upper() in ('В', 'МЕЖДУ', 'ПОДОБНО'):
+                    self.next()
+                    neg = True
+                    tok = self.peek()
             if tok[0] == 'id' and tok[1].upper() == 'В':
                 self.next()
-                if self.accept_op('('):
-                    if self.is_kw('ВЫБРАТЬ'):
-                        sub = self.parse_select()
-                        self.expect_op(')')
-                        left = ('in', left, ('query', sub))
-                    else:
-                        items = self.parse_expr_list()
-                        self.expect_op(')')
-                        left = ('in', left, ('list', items))
+                self.accept_kw('ИЕРАРХИИ')  # В ИЕРАРХИИ (…/запрос/&параметр)
+                self.expect_op('(')
+                if self.is_kw('ВЫБРАТЬ'):
+                    sub = self.parse_select()
+                    self.expect_op(')')
+                    node = ('in', left, ('query', sub))
                 else:
-                    left = ('in', left, self.parse_add())
+                    items = self.parse_expr_list()
+                    self.expect_op(')')
+                    node = ('in', left, ('list', items))
+                left = ('not', node) if neg else node
                 continue
             if tok[0] == 'id' and tok[1].upper() == 'ПОДОБНО':
                 self.next()
-                left = ('like', left, self.parse_add())
+                pattern = self.parse_add()
+                spec = None
+                if self.accept_kw('СПЕЦСИМВОЛ'):
+                    spec = self.parse_add()  # спецсимвол экранирования
+                node = ('like', left, pattern, spec)
+                left = ('not', node) if neg else node
                 continue
             if tok[0] == 'id' and tok[1].upper() == 'ССЫЛКА':
                 # X ССЫЛКА Документ.Х — сравнение ссылки с таблицей
@@ -467,17 +570,16 @@ class _Parser:
                 low = self.parse_add()
                 self.expect_kw('И')
                 high = self.parse_add()
-                left = ('between', left, low, high)
+                node = ('between', left, low, high)
+                left = ('not', node) if neg else node
                 continue
             if tok[0] == 'id' and tok[1].upper() == 'ЕСТЬ':
                 self.next()
                 neg = bool(self.accept_kw('НЕ'))
                 if self.accept_kw('NULL'):
                     left = ('isnull', left, not neg)
-                elif self.accept_kw('ИЕРАРХИЯ'):
-                    left = ('ishierarchy', left)
                 else:
-                    raise self.error('Ожидалось NULL или ИЕРАРХИЯ после ЕСТЬ')
+                    raise self.error('Ожидалось NULL после ЕСТЬ')
                 continue
             return left
 
@@ -489,8 +591,9 @@ class _Parser:
         return left
 
     def parse_mul(self):
+        # бинарные операции языка запросов: + - * / (без остатка от деления)
         left = self.parse_unary()
-        while self.peek()[0] == 'op' and self.peek()[1] in ('*', '/', '%'):
+        while self.peek()[0] == 'op' and self.peek()[1] in ('*', '/'):
             op = self.next()[1]
             left = ('op', op, left, self.parse_unary())
         return left
@@ -806,7 +909,8 @@ def _check_select(node, ctx, temp, errors):
     for expr, _ in (node['order'] or []):
         _check_expr(expr, ctx, scope, errors)
     if node['totals']:
-        for expr in node['totals']['aggregates'] + (node['totals']['fields'] or []):
+        for expr in (node['totals']['aggregates'] or []) + \
+                (node['totals']['fields'] or []):
             _check_expr(expr, ctx, scope, errors)
     for _, sub in node['union']:
         _check_select(sub, ctx, temp, errors)
@@ -890,7 +994,10 @@ def _check_expr(expr, ctx, scope, errors):
         _check_expr(expr[1], ctx, scope, errors)
     elif kind == 'castref':
         _check_castref(expr, ctx, errors)
-    elif kind in ('like', 'isnull', 'ishierarchy'):
+    elif kind == 'like':
+        _check_expr(expr[1], ctx, scope, errors)
+        _check_expr(expr[2], ctx, scope, errors)  # шаблон может быть выражением
+    elif kind == 'isnull':
         _check_expr(expr[1], ctx, scope, errors)
 
 

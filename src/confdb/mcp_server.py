@@ -85,7 +85,7 @@ DATABASE SCHEMA (for the sql tool; path columns store the legacy slash form 'Cat
 - skd_query(object_id, ord, query) — report queries in the 1C query language (Russian keywords ВЫБРАТЬ/ИЗ/ГДЕ/СОЕДИНЕНИЕ/ОБЪЕДИНИТЬ).
 - enum_value(object_id, ord, name) — enum values; predefined(object_id, ord, name, code, display) — predefined elements; common_target(common_id, target_id) — objects a common attribute is attached to; subsystem_content — subsystem composition; source, file.
 
-1C QUERY LANGUAGE: Russian keywords, dotted paths, table names 'Справочник.Имя', 'Документ.Имя', 'РегистрСведений.Имя', 'РегистрНакопления.Имя.Обороты' (virtual tables: Остатки, Обороты, СрезПоследних…). Example: ВЫБРАТЬ Т.Запасы.Номенклатура.Наименование ИЗ Документ.ЗаказПокупателя КАК Т ГДЕ Т.Сумма > 0.
+1C QUERY LANGUAGE: Russian keywords, dotted paths, table names 'Справочник.Имя', 'Документ.Имя', 'РегистрСведений.Имя', 'РегистрНакопления.Имя.Обороты' (virtual tables: Остатки, Обороты, СрезПоследних…). Grouping clause is 'СГРУППИРОВАТЬ ПО' — the form 'СГРУППИРОВАНО' does NOT exist in the 1C query language. Example: ВЫБРАТЬ Т.Запасы.Номенклатура.Наименование ИЗ Документ.ЗаказПокупателя КАК Т ГДЕ Т.Сумма > 0.
 
 RECOMMENDED WORKFLOW to write a query or 1C code: 1) find_objects to locate objects; 2) object_card for its fields, sections and references; 3) skd_of / find_skd to see how THIS configuration queries the same tables (best examples); 4) find_methods + get_method to reuse existing code instead of inventing; 5) check_query to validate your query before use.
 
@@ -661,6 +661,13 @@ def serve_http(db_path, host='127.0.0.1', port=8765):
 
 
 def main(argv=None):
+    # stdio-транспорт MCP обязан быть UTF-8; на Windows в пайпе stdout/stdin
+    # по умолчанию cp1251 — клиенты (Claude Code и др.) получали кракозябры
+    for stream in (sys.stdin, sys.stdout):
+        try:
+            stream.reconfigure(encoding='utf-8')
+        except Exception:  # noqa: BLE001
+            pass
     parser = argparse.ArgumentParser(
         prog='1confdb-knw',
         description='MCP-сервер знаний по конфигурации 1С и BSL '
