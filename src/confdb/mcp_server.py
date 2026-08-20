@@ -74,6 +74,66 @@ def ru_type_str(text):
         return text
     return _TYPE_SLASH_RE.sub(lambda m: TYPE_RU[m.group(0)[:-1]] + '.', text)
 
+
+# страница пагинации (строк) для очень длинных тел методов и оглавлений модулей
+_METHOD_PAGE = 250
+_OUTLINE_PAGE = 300
+
+# суффиксы в пути модуля, которые модели передают вместо code_name:
+# 'Документ.Х.mgr', 'Документ.Х.МодульМенеджера', 'Документ.Х.obj.bsl'
+_CODE_ALIASES = {
+    'obj': 'obj', 'mgr': 'mgr', 'val': 'val', 'recordset': 'val',
+    'seance': 'seance', 'app': 'app', '802': '802', 'con': 'con',
+    'модульобъекта': 'obj', 'модульменеджера': 'mgr',
+    'модульнаборазаписей': 'val', 'модуль': 'obj',
+}
+
+
+def split_module_path(path, code_name):
+    """Нормализует путь модуля к виду (путь объекта, code_name).
+
+    Понимает: 'Документ.Х.mgr', 'Документ.Х.obj.bsl', 'Документ.Х.МодульМенеджера'
+    (суффикс переносится в code_name) и полные пути файлов дампа
+    'Document/Х/Document.mgr.bsl' (маппятся на объект и code_name).
+    """
+    path = (path or '').strip()
+    code_name = (code_name or 'obj').strip() or 'obj'
+    norm = path.replace('\\', '/')
+    if norm.endswith('.bsl') and '/' in norm:
+        # путь файла дампа: объект и code_name возьмём из таблиц file/module
+        return path, code_name, True
+    parts = path.split('.')
+    if len(parts) >= 2:
+        with_ext = parts[-1].lower() == 'bsl' and len(parts) >= 3
+        tail = parts[-2].lower() if with_ext else parts[-1].lower()
+        if tail in _CODE_ALIASES:
+            cut = 2 if with_ext else 1
+            return '.'.join(parts[:-cut]), _CODE_ALIASES[tail], False
+    return path, code_name, False
+
+
+def _paginate_lines(text, offset, limit, default_page, header=''):
+    """Постраничный вывод текста: строки offset..offset+limit (0-нумерация).
+
+    limit=0 — страница по умолчанию, если текст длиннее неё, иначе весь текст.
+    Всегда видно, сколько строк показано и как получить продолжение —
+    содержимое не обрезается молча.
+    """
+    lines = text.split('\n')
+    total = len(lines)
+    offset = max(0, offset)
+    page = limit if limit > 0 else (default_page if total > default_page else total)
+    chunk = lines[offset:offset + page]
+    shown_end = offset + len(chunk)
+    prefix = f'{header}: ' if header else ''
+    out = [f'{prefix}строки {offset + 1}-{shown_end} из {total}',
+           '\n'.join(chunk)]
+    if shown_end < total:
+        out.append(f'… продолжение: offset={shown_end}' +
+                   (f', limit={page}' if limit > 0 else ''))
+    return '\n'.join(out)
+
+
 PRIMER = """1confdb-knw: MCP server over a knowledge base of a 1C:Enterprise 8 configuration — metadata, BSL code and SKD queries, extracted from a binary .cf file into SQLite. 1C is a Russian business-automation platform; a configuration contains metadata objects, their fields, modules of 1C-language code (Russian keywords) and SKD report queries. All object/field names are in Russian.
 
 GLOSSARY: Catalog=справочник (directory), Document=документ, InformationRegister/AccumulationRegister=регистры, Enum=перечисление, DataProcessor=обработка, Report=отчет, DefinedType=определяемый тип, CommonAttribute=общий реквизит, CommonModule=общий модуль. Tabular section (табличная часть) = row table of an object (e.g. Документ.ЗаказПокупателя has section Запасы with fields Номенклатура, Цена…).
@@ -187,7 +247,7 @@ class McpServer:
             'code': -32601, 'message': f'method not found: {method}'}}
 
     # -- инструменты ---------------------------------------------------------
-    def find_objects(self, mask, type=None, limit=20):  # noqa: A002
+    def find_objects(self, mask='', type=None, limit=20):  # noqa: A002
         like = f'%{mask}%'
         # имена в 1С пишутся Слитно, а маски часто приходят с пробелами
         # и в другой раскладке регистра
@@ -237,6 +297,26 @@ class McpServer:
         if mods:
             out.append('Модули: ' + ', '.join(
                 c + (f' [{x}]' if x else '') for c, x in mods))
+        if row[0] == 'Enum':
+            vals = [v[0] for v in q(
+                'SELECT name FROM enum_value WHERE object_id=? '
+                'ORDER BY ord LIMIT 60', (oid,))]
+            cnt = q('SELECT COUNT(*) FROM enum_value WHERE object_id=?',
+                    (oid,)).fetchone()[0]
+            if vals:
+                extra = f' (всего {cnt})' if cnt > len(vals) else ''
+                out.append('Значения перечисления' + extra + ': ' +
+                           ', '.join(vals))
+        elif row[0] == 'Catalog':
+            pre = q('SELECT name, code FROM predefined WHERE object_id=? '
+                    'ORDER BY ord LIMIT 60', (oid,)).fetchall()
+            cnt = q('SELECT COUNT(*) FROM predefined WHERE object_id=?',
+                    (oid,)).fetchone()[0]
+            if pre:
+                extra = f' (всего {cnt})' if cnt > len(pre) else ''
+                out.append('Предопределённые элементы' + extra + ': ' +
+                           ', '.join(n + (f' [{c}]' if c else '')
+                                     for n, c in pre))
         nskd = q('SELECT COUNT(*) FROM skd_query WHERE object_id=?',
                  (oid,)).fetchone()[0]
         if nskd:
@@ -330,17 +410,36 @@ class McpServer:
                        if rows else '—'))
         return '\n'.join(out)
 
-    def module_outline(self, path, code_name='obj'):
-        path = self.resolve_path(path)
+    def _module_target(self, path, code_name):
+        """(путь объекта, code_name) из разных форм записи пути модуля:
+        'Объект.mgr', 'Объект.obj.bsl', 'Объект.МодульМенеджера' или путь
+        файла дампа 'Document/Х/Document.mgr.bsl'."""
+        p, cn, is_file = split_module_path(path, code_name)
+        if is_file:
+            row = self.conn().execute(
+                "SELECT o.path, m.code_name FROM file f "
+                "JOIN meta_object o ON o.id=f.object_id "
+                "JOIN module m ON m.object_id=f.object_id "
+                "WHERE f.kind='bsl' AND f.path=? "
+                "AND f.path LIKE '%.' || m.code_name || '.bsl'",
+                (p.replace('\\', '/'),)).fetchone()
+            if row:
+                return row[0], row[1]
+            return p, cn
+        return self.resolve_path(p), cn
+
+    def module_outline(self, path, code_name='obj', offset=0, limit=0):
+        path, code_name = self._module_target(path, code_name)
         row = self.conn().execute(
             'SELECT m.body FROM module m JOIN meta_object o ON o.id=m.object_id '
             'WHERE o.path=? AND m.code_name=?', (path, code_name)).fetchone()
         if not row or not row[0]:
             return f'модуль не найден: {path} ({code_name})'
-        return row[0]
+        return _paginate_lines(row[0], int(offset or 0), int(limit or 0),
+                               _OUTLINE_PAGE)
 
-    def get_method(self, path, code_name, name):
-        path = self.resolve_path(path)
+    def get_method(self, path, code_name, name, offset=0, limit=0):
+        path, code_name = self._module_target(path, code_name)
         row = self.conn().execute(
             'SELECT mt.kind, mt.name, mt.signature, mt.directives, '
             'mt.description, mt.body, mt.is_export FROM method mt '
@@ -356,10 +455,15 @@ class McpServer:
             parts.append('директивы: ' + row[3])
         if row[4]:
             parts.append('описание:\n' + row[4])
-        parts.append('тело:\n' + row[5])
+        body = row[5] or ''
+        total = body.count('\n') + 1
+        parts.append(_paginate_lines(body, int(offset or 0), int(limit or 0),
+                                     _METHOD_PAGE, header='тело'))
+        if total > _METHOD_PAGE and int(offset or 0) + _METHOD_PAGE < total:
+            parts.append('метод длинный — листай: offset/limit')
         return '\n'.join(parts)
 
-    def find_methods(self, mask, path=None, limit=20):
+    def find_methods(self, mask='', path=None, limit=20):
         path = self.resolve_path(path) if path else None
         like = f'%{mask}%'
         like_ns = f'%{mask.replace(" ", "").lower()}%'
@@ -442,6 +546,19 @@ class McpServer:
             out.append(' | '.join(cells))
         return '\n'.join(out)
 
+    def db_schema(self):
+        conn = self.conn()
+        tables = [r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name NOT LIKE 'sqlite_%' ORDER BY name")]
+        out = []
+        for name in tables:
+            cols = [r[1] for r in conn.execute(f'PRAGMA table_info("{name}")')]
+            cnt = conn.execute(f'SELECT COUNT(*) FROM "{name}"').fetchone()[0]
+            out.append(f'{name} ({cnt} строк): ' + ', '.join(cols))
+        return ('Таблицы базы знаний (используй в sql; повторно схему не '
+                'запрашивай):\n' + '\n'.join(out))
+
 
 class Tool:
     def __init__(self, name, description, schema, fn):
@@ -470,9 +587,10 @@ TOOLS = [
          'Search metadata objects by name or path substring. Returns '
          "configurator-style dotted paths ('Справочник.Имя') with Russian and "
          'English type labels. First step for anything: locate '
-         'справочник/документ/регистр by its Russian name.',
+         'справочник/документ/регистр by its Russian name. mask is optional: '
+         'omit it to browse all objects of a given type.',
          _schema({'mask': _STR, 'type': _STR,
-                  'limit': _INT}, ('mask',)),
+                  'limit': _INT}),
          McpServer.find_objects),
     Tool('object_card',
          "Full 'passport' of one object in a single call: type, header "
@@ -498,21 +616,33 @@ TOOLS = [
          McpServer.refs_of),
     Tool('module_outline',
          'Table of contents of a 1C module: signatures, comments, #Если '
-         "regions, WITHOUT method bodies. code_name: 'obj' (object module), "
-         "'mgr' (manager module) etc. Cheap way to inspect a module.",
-         _schema({'path': _STR, 'code_name': _STR}, ('path',)),
+         "regions, WITHOUT method bodies. path — object path ('Документ.Х' "
+         "or 'Document/Х'); code_name: 'obj' (object module), 'mgr' (manager "
+         'module) etc. Path forms are also accepted: Документ.Х.mgr, '
+         'Документ.Х.obj.bsl, Document/Х/Document.mgr.bsl. '
+         'For very long modules use offset/limit (0-based lines) to page.',
+         _schema({'path': _STR, 'code_name': _STR,
+                  'offset': _INT, 'limit': _INT}, ('path',)),
          McpServer.module_outline),
     Tool('get_method',
          'Full source of one procedure/function: signature, directives '
          '(&НаСервере…), description comment and body. Use after '
-         'find_methods/module_outline.',
-         _schema({'path': _STR, 'code_name': _STR, 'name': _STR},
+         'find_methods/module_outline. Path forms are also accepted: '
+         'Документ.Х.mgr, Документ.Х.obj.bsl, Document/Х/Document.mgr.bsl. '
+         'Long methods are paginated: the '
+         'response shows which lines are given and how to fetch the rest '
+         '(offset/limit, 0-based lines) — nothing is silently truncated.',
+         _schema({'path': _STR, 'code_name': _STR, 'name': _STR,
+                  'offset': _INT, 'limit': _INT},
                  ('path', 'code_name', 'name')),
          McpServer.get_method),
     Tool('find_methods',
          'Search 1C methods by name/signature/description substring '
-         "(e.g. 'ПриПроведении'). Reuse existing code instead of inventing.",
-         _schema({'mask': _STR, 'path': _STR, 'limit': _INT}, ('mask',)),
+         "(e.g. 'ПриПроведении'). Reuse existing code instead of inventing. "
+         'mask is optional: with only path it lists all methods of the object. '
+         'Not sure about the exact name — give a partial mask (piece of the '
+         'name), do not guess the full name.',
+         _schema({'mask': _STR, 'path': _STR, 'limit': _INT}),
          McpServer.find_methods),
     Tool('skd_of',
          'All SKD (report) queries of an object — the best examples of how '
@@ -530,9 +660,16 @@ TOOLS = [
          'run it on a query you wrote before using it.',
          _schema({'text': _STR}, ('text',)),
          McpServer.check_query),
+    Tool('schema',
+         'Knowledge base schema reference: all tables, their columns and row '
+         'counts. Call it ONCE before writing sql — do not guess column names, '
+         'do not query sqlite_master/PRAGMA.',
+         _schema({}),
+         McpServer.db_schema),
     Tool('sql',
          'Read-only SELECT escape hatch for anything not covered by the '
-         'dedicated tools. Non-SELECT is rejected; LIMIT 200 enforced.',
+         'dedicated tools. Call `schema` first if unsure about tables/columns. '
+         'Non-SELECT is rejected; LIMIT 200 enforced.',
          _schema({'query': _STR}, ('query',)),
          McpServer.sql),
 ]
