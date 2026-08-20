@@ -1,37 +1,40 @@
 @echo off
-rem Настройка окружения confdb: создание .venv и установка пакета.
-rem Запускать двойным кликом или из консоли: setup.bat
+rem confdb environment setup: create .venv and install the package.
+rem Run by double-click or from a console: setup.bat
+rem Pure ASCII: readable in any console code page (866/1251/65001); all other
+rem user-facing text is printed by the Python layer in UTF-8.
 setlocal
 cd /d "%~dp0"
 
 if exist ".venv\Scripts\python.exe" (
-    echo venv уже существует: .venv
+    echo venv already exists: .venv
     goto install
 )
 
-echo Создаю виртуальное окружение в .venv ...
+echo Creating virtual environment in .venv ...
 python -m venv .venv 2>nul
 if not exist ".venv\Scripts\python.exe" py -3 -m venv .venv 2>nul
 if not exist ".venv\Scripts\python.exe" (
-    echo Ошибка: Python 3.9+ не найден в PATH. Установите Python и повторите.
+    echo Error: Python 3.9+ not found in PATH. Install Python and re-run.
     exit /b 1
 )
 
 :install
-echo Устанавливаю confdb в venv ...
+echo Installing confdb into venv ...
 ".venv\Scripts\python.exe" -m pip install --upgrade pip
 ".venv\Scripts\python.exe" -m pip install .
 if errorlevel 1 (
-    echo Повторяю установку без изоляции сборки ...
+    echo Retrying install without build isolation ...
     ".venv\Scripts\python.exe" -m pip install --no-build-isolation .
 )
 if errorlevel 1 (
-    echo Ошибка установки пакета.
+    echo Package installation failed.
     exit /b 1
 )
 
 echo.
-echo Готово. Запуск:
-echo   confdb.bat extract файл.cf --db out.sqlite [--dump каталог]
-echo   confdb-ui.bat              текстовый консольный интерфейс
+echo Done. Usage:
+echo   confdb.bat extract file.cf --db out.sqlite [--dump dir]
+echo   confdb-ui.bat              text console interface
+echo   1confdb-knw.bat out.db     MCP server for LLM clients
 endlocal

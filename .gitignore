@@ -6,3 +6,6 @@ _tmp/
 *.db
 *.sqlite
 *.cf
+.pytest_cache/
+build/
+*.egg-info/
