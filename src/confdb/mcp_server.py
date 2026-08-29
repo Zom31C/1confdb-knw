@@ -20,11 +20,14 @@
 *.db/*.sqlite в текущем каталоге, db/ и _out/ (и в корне установки,
 если запуск из venv). Свежая установка с привезённой базой работает
 без ручной правки конфига.
+
+Баз можно открыть несколько одновременно (например, основная
+конфигурация + расширения/обработки): перечислите несколько путей
+при запуске либо открывайте базы инструментом db_open уже на ходу;
+активная база переключается инструментом db_use.
 """
 import argparse
-import base64
 import glob
-import hashlib
 import json
 import os
 import queue
@@ -34,7 +37,7 @@ import sys
 import threading
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, quote as urllib_quote, urlparse
+from urllib.parse import parse_qs, urlparse
 
 from .config import load_config
 from .db.writer import TYPE_RU
@@ -76,67 +79,7 @@ def ru_type_str(text):
         return text
     return _TYPE_SLASH_RE.sub(lambda m: TYPE_RU[m.group(0)[:-1]] + '.', text)
 
-
-# страница пагинации (строк) для очень длинных тел методов и оглавлений модулей
-_METHOD_PAGE = 250
-_OUTLINE_PAGE = 300
-
-# суффиксы в пути модуля, которые модели передают вместо code_name:
-# 'Документ.Х.mgr', 'Документ.Х.МодульМенеджера', 'Документ.Х.obj.bsl'
-_CODE_ALIASES = {
-    'obj': 'obj', 'mgr': 'mgr', 'val': 'val', 'recordset': 'val',
-    'seance': 'seance', 'app': 'app', '802': '802', 'con': 'con',
-    'модульобъекта': 'obj', 'модульменеджера': 'mgr',
-    'модульнаборазаписей': 'val', 'модуль': 'obj',
-}
-
-
-def split_module_path(path, code_name):
-    """Нормализует путь модуля к виду (путь объекта, code_name).
-
-    Понимает: 'Документ.Х.mgr', 'Документ.Х.obj.bsl', 'Документ.Х.МодульМенеджера'
-    (суффикс переносится в code_name) и полные пути файлов дампа
-    'Document/Х/Document.mgr.bsl' (маппятся на объект и code_name).
-    """
-    path = (path or '').strip()
-    code_name = (code_name or 'obj').strip() or 'obj'
-    norm = path.replace('\\', '/')
-    if norm.endswith('.bsl') and '/' in norm:
-        # путь файла дампа: объект и code_name возьмём из таблиц file/module
-        return path, code_name, True
-    parts = path.split('.')
-    if len(parts) >= 2:
-        with_ext = parts[-1].lower() == 'bsl' and len(parts) >= 3
-        tail = parts[-2].lower() if with_ext else parts[-1].lower()
-        if tail in _CODE_ALIASES:
-            cut = 2 if with_ext else 1
-            return '.'.join(parts[:-cut]), _CODE_ALIASES[tail], False
-    return path, code_name, False
-
-
-def _paginate_lines(text, offset, limit, default_page, header=''):
-    """Постраничный вывод текста: строки offset..offset+limit (0-нумерация).
-
-    limit=0 — страница по умолчанию, если текст длиннее неё, иначе весь текст.
-    Всегда видно, сколько строк показано и как получить продолжение —
-    содержимое не обрезается молча.
-    """
-    lines = text.split('\n')
-    total = len(lines)
-    offset = max(0, offset)
-    page = limit if limit > 0 else (default_page if total > default_page else total)
-    chunk = lines[offset:offset + page]
-    shown_end = offset + len(chunk)
-    prefix = f'{header}: ' if header else ''
-    out = [f'{prefix}строки {offset + 1}-{shown_end} из {total}',
-           '\n'.join(chunk)]
-    if shown_end < total:
-        out.append(f'… продолжение: offset={shown_end}' +
-                   (f', limit={page}' if limit > 0 else ''))
-    return '\n'.join(out)
-
-
-PRIMER = """1confdb-knw: MCP server over a knowledge base of a 1C:Enterprise 8 configuration — metadata, BSL code and SKD queries, extracted from a binary .cf file into SQLite. 1C is a Russian business-automation platform; a configuration contains metadata objects, their fields, modules of 1C-language code (Russian keywords) and SKD report queries. All object/field names are in Russian.
+PRIMER = """1confdb-knw: MCP server over one or several knowledge bases of a 1C:Enterprise 8 configuration — metadata, BSL code and SKD queries, extracted from binary .cf/.cfe/.epf files into SQLite. 1C is a Russian business-automation platform; a configuration contains metadata objects, their fields, modules of 1C-language code (Russian keywords) and SKD report queries. All object/field names are in Russian.
 
 GLOSSARY: Catalog=справочник (directory), Document=документ, InformationRegister/AccumulationRegister=регистры, Enum=перечисление, DataProcessor=обработка, Report=отчет, DefinedType=определяемый тип, CommonAttribute=общий реквизит, CommonModule=общий модуль. Tabular section (табличная часть) = row table of an object (e.g. Документ.ЗаказПокупателя has section Запасы with fields Номенклатура, Цена…).
 
@@ -145,6 +88,8 @@ OBJECT PATHS: tools return and accept configurator-style Russian dotted paths: '
 COMMON MODULES: in BSL code a common module is called by its bare name: 'ИмяМодуля.Функция(...)'. Prefixes like 'ОбщийМодуль.', 'Общий модуль.', 'ОбщМодуль.' are NOT valid code — never write them. The dotted 'Общий модуль.Имя' form only identifies the object in this knowledge base.
 
 DATABASE FILE: the SQLite file is internal to the server. Do NOT search for it, open it, read it from disk, or ask the user for its location — you have no filesystem access to it. Everything is available through the tools below; the sql tool runs arbitrary read-only SELECTs.
+
+MULTIPLE DATABASES: the server can hold several knowledge bases at once — typically the MAIN configuration plus extensions/data processors (.cfe/.epf extracted into their own .db files). Each open base has an alias. All tools query the ACTIVE base; to query a specific base without switching, pass its alias as the db parameter (e.g. find_objects(mask=…, db='расш_интеграция')). Management tools: db_list (what is open, which is active), db_open (open another base file while the server runs — the path comes from the user), db_use (switch the active base), db_close. An extension usually adds/overrides objects of the main configuration — if something is not found in one base, check the other.
 
 DATABASE SCHEMA (for the sql tool; path columns store the legacy slash form 'Catalog/Имя', but string literals in the Russian dotted form ('Справочник.Имя') are auto-converted — either form works in WHERE path = …):
 - meta_object(id, path, type, type_ru, name, uuid, comment, parent_id, ord). path like 'Catalog/Номенклатура'; type = English stem (Catalog, Document, InformationRegister, Enum, CommonModule, DefinedType…); type_ru = Russian label as in the configurator.
@@ -164,32 +109,115 @@ All tools are read-only. Prefer the dedicated tools over raw sql; use sql only f
 
 
 class McpServer:
-    """Обработчик JSON-RPC сообщений MCP поверх базы SQLite (read-only)."""
+    """Обработчик JSON-RPC сообщений MCP поверх баз SQLite (read-only).
 
-    def __init__(self, db_path):
-        self.db_path = db_path
-        self._conn = None
-        self._ctx = None
+    Держит несколько баз одновременно (например, основная конфигурация
+    плюс расширения/обработки): каждая видна под алиасом, инструменты
+    работают с активной базой либо с явно указанной параметром db.
+    """
+
+    def __init__(self, db_paths=None):
+        self.dbs = {}      # алиас -> {'path':…, 'conn':…, 'ctx':…}
+        self.active = None
+        if isinstance(db_paths, str):
+            db_paths = [db_paths]
+        for path in db_paths or ():
+            # активна первая указанная база, а не последняя
+            self.open_db(path, activate=False)
+
+    # -- реестр баз ----------------------------------------------------------
+    def _make_alias(self, path):
+        base = os.path.splitext(os.path.basename(path))[0] or 'db'
+        alias, num = base, 1
+        while alias in self.dbs:
+            num += 1
+            alias = f'{base}_{num}'
+        return alias
+
+    def open_db(self, path, alias=None, activate=True):
+        """Открывает базу и возвращает её алиас.
+
+        Файл проверяется: должен существовать и содержать таблицу
+        meta_object (база знаний confdb). Повторное открытие того же
+        файла просто возвращает прежний алиас.
+        """
+        path = os.path.abspath(path)
+        known = next((a for a, d in self.dbs.items()
+                      if os.path.abspath(d['path']) == path), None)
+        if known is not None:
+            if activate:
+                self.active = known
+            return known
+        if not os.path.isfile(path):
+            raise ValueError(f'файл базы не найден: {path}')
+        if alias is not None:
+            if not str(alias).strip():
+                raise ValueError('алиас не может быть пустым')
+            alias = str(alias).strip()
+            if alias.lower() in (a.lower() for a in self.dbs):
+                raise ValueError(f'алиас уже занят: {alias}')
+        conn = sqlite3.connect(
+            f'file:{path}?mode=ro', uri=True,
+            check_same_thread=False)  # HTTP-транспорт: потоки под блокировкой
+        # sqlite-LOWER не знает кириллицу — регистрируем питоний lower
+        conn.create_function(
+            'lower_ru', 1, lambda v: v.lower() if isinstance(v, str) else v)
+        try:
+            conn.execute('SELECT COUNT(*) FROM meta_object').fetchone()
+        except sqlite3.Error:
+            conn.close()
+            raise ValueError(
+                f'это не база знаний confdb (нет таблицы meta_object): {path}')
+        if alias is None:
+            alias = self._make_alias(path)
+        self.dbs[alias] = {'path': path, 'conn': conn, 'ctx': None}
+        if activate or self.active is None:
+            self.active = alias
+        return alias
+
+    def close_db(self, alias=None):
+        """Закрывает базу (по умолчанию активную); возвращает её алиас."""
+        alias = self._alias(alias)
+        info = self.dbs.pop(alias)
+        info['conn'].close()
+        if self.active == alias:
+            self.active = next(iter(self.dbs), None)
+        return alias
+
+    def _alias(self, alias=None):
+        """Разрешает алиас (None = активная база); ValueError, если не найден."""
+        if not alias:
+            if self.active is None:
+                raise ValueError('нет открытых баз — укажите путь в db_open')
+            return self.active
+        for key in self.dbs:
+            if key.lower() == str(alias).strip().lower():
+                return key
+        raise ValueError(
+            f'база не открыта: {alias}' +
+            ('; открыты: ' + ', '.join(self.dbs) if self.dbs
+             else ' — откройте через db_open'))
+
+    def db_stats(self, alias=None):
+        """(объекты, модули, методы) базы — для отчётов пользователю."""
+        return self.conn(alias).execute(
+            'SELECT (SELECT COUNT(*) FROM meta_object), '
+            '(SELECT COUNT(*) FROM module), '
+            '(SELECT COUNT(*) FROM method)').fetchone()
 
     # -- инфраструктура ----------------------------------------------------
-    def conn(self):
-        if self._conn is None:
-            self._conn = sqlite3.connect(
-                f'file:{self.db_path}?mode=ro', uri=True,
-                check_same_thread=False)  # HTTP-транспорт: потоки под блокировкой
-            # sqlite-LOWER не знает кириллицу — регистрируем питоний lower
-            self._conn.create_function(
-                'lower_ru', 1,
-                lambda v: v.lower() if isinstance(v, str) else v)
-        return self._conn
+    def conn(self, db=None):
+        return self.dbs[self._alias(db)]['conn']
 
-    def ctx(self):
-        if self._ctx is None:
+    def ctx(self, db=None):
+        alias = self._alias(db)
+        info = self.dbs[alias]
+        if info['ctx'] is None:
             from .query_lang import MetaContext
-            self._ctx = MetaContext(self.conn())
-        return self._ctx
+            info['ctx'] = MetaContext(info['conn'])
+        return info['ctx']
 
-    def resolve_path(self, value):
+    def resolve_path(self, value, db=None):
         """Русский точечный путь ('Справочник.Х.Форма') -> внутренний слэш-путь."""
         value = (value or '').strip()
         if not value or '/' in value or '.' not in value:
@@ -198,14 +226,15 @@ class McpServer:
         stems = _RU2TYPES.get(parts[0])
         if not stems:
             return value
-        row = self.conn().execute(
+        conn = self.conn(db)
+        row = conn.execute(
             'SELECT id, path FROM meta_object WHERE name=? AND type IN (%s)'
             % ','.join('?' * len(stems)), [parts[1]] + stems).fetchone()
         if not row:
             return value
         oid, path = row
         for name in parts[2:]:
-            row = self.conn().execute(
+            row = conn.execute(
                 'SELECT id, path FROM meta_object '
                 'WHERE parent_id=? AND name=? ORDER BY ord', (oid, name)).fetchone()
             if not row:
@@ -249,7 +278,7 @@ class McpServer:
             'code': -32601, 'message': f'method not found: {method}'}}
 
     # -- инструменты ---------------------------------------------------------
-    def find_objects(self, mask='', type=None, limit=20):  # noqa: A002
+    def find_objects(self, mask, type=None, limit=20, db=None):  # noqa: A002
         like = f'%{mask}%'
         # имена в 1С пишутся Слитно, а маски часто приходят с пробелами
         # и в другой раскладке регистра
@@ -264,14 +293,14 @@ class McpServer:
             params += [type, type]
         sql += ' ORDER BY length(path), path LIMIT ?'
         params.append(int(limit))
-        rows = self.conn().execute(sql, params).fetchall()
+        rows = self.conn(db).execute(sql, params).fetchall()
         if not rows:
             return 'ничего не найдено'
         return '\n'.join(f'{ru_path(p)} — {ru} ({t})' for p, t, ru, _ in rows)
 
-    def object_card(self, path):
-        path = self.resolve_path(path)
-        q = self.conn().execute
+    def object_card(self, path, db=None):
+        path = self.resolve_path(path, db)
+        q = self.conn(db).execute
         row = q('SELECT type, type_ru, name, comment FROM meta_object '
                 'WHERE path=?', (path,)).fetchone()
         if not row:
@@ -299,26 +328,6 @@ class McpServer:
         if mods:
             out.append('Модули: ' + ', '.join(
                 c + (f' [{x}]' if x else '') for c, x in mods))
-        if row[0] == 'Enum':
-            vals = [v[0] for v in q(
-                'SELECT name FROM enum_value WHERE object_id=? '
-                'ORDER BY ord LIMIT 60', (oid,))]
-            cnt = q('SELECT COUNT(*) FROM enum_value WHERE object_id=?',
-                    (oid,)).fetchone()[0]
-            if vals:
-                extra = f' (всего {cnt})' if cnt > len(vals) else ''
-                out.append('Значения перечисления' + extra + ': ' +
-                           ', '.join(vals))
-        elif row[0] == 'Catalog':
-            pre = q('SELECT name, code FROM predefined WHERE object_id=? '
-                    'ORDER BY ord LIMIT 60', (oid,)).fetchall()
-            cnt = q('SELECT COUNT(*) FROM predefined WHERE object_id=?',
-                    (oid,)).fetchone()[0]
-            if pre:
-                extra = f' (всего {cnt})' if cnt > len(pre) else ''
-                out.append('Предопределённые элементы' + extra + ': ' +
-                           ', '.join(n + (f' [{c}]' if c else '')
-                                     for n, c in pre))
         nskd = q('SELECT COUNT(*) FROM skd_query WHERE object_id=?',
                  (oid,)).fetchone()[0]
         if nskd:
@@ -341,9 +350,9 @@ class McpServer:
             out.append('На него ссылаются: ' + ', '.join(ru_path(p) for p in rev))
         return '\n'.join(out)
 
-    def object_tree(self, path='', depth=2):
-        path = self.resolve_path(path)
-        rows = self.conn().execute(
+    def object_tree(self, path='', depth=2, db=None):
+        path = self.resolve_path(path, db)
+        rows = self.conn(db).execute(
             'SELECT id, parent_id, path, type_ru FROM meta_object '
             'ORDER BY ord').fetchall()
         children = {}
@@ -371,10 +380,10 @@ class McpServer:
         walk(root_id, 1)
         return '\n'.join(out)
 
-    def find_field(self, name, limit=20):
+    def find_field(self, name, limit=20, db=None):
         like = f'%{name}%'
         like_ns = f'%{name.replace(" ", "").lower()}%'
-        rows = self.conn().execute(
+        rows = self.conn(db).execute(
             'SELECT o.path, a.name, a.tabular, a.type_str FROM meta_attribute a '
             'JOIN meta_object o ON o.id=a.object_id '
             "WHERE a.name LIKE ? OR lower_ru(REPLACE(a.name, ' ', '')) LIKE ? "
@@ -387,9 +396,9 @@ class McpServer:
             (f' [табчасть {s}]' if s else '')
             for p, n, s, t in rows)
 
-    def refs_of(self, path, direction='both', limit=30):
-        path = self.resolve_path(path)
-        q = self.conn().execute
+    def refs_of(self, path, direction='both', limit=30, db=None):
+        path = self.resolve_path(path, db)
+        q = self.conn(db).execute
         out = []
         if direction in ('both', 'forward'):
             rows = q(
@@ -412,37 +421,18 @@ class McpServer:
                        if rows else '—'))
         return '\n'.join(out)
 
-    def _module_target(self, path, code_name):
-        """(путь объекта, code_name) из разных форм записи пути модуля:
-        'Объект.mgr', 'Объект.obj.bsl', 'Объект.МодульМенеджера' или путь
-        файла дампа 'Document/Х/Document.mgr.bsl'."""
-        p, cn, is_file = split_module_path(path, code_name)
-        if is_file:
-            row = self.conn().execute(
-                "SELECT o.path, m.code_name FROM file f "
-                "JOIN meta_object o ON o.id=f.object_id "
-                "JOIN module m ON m.object_id=f.object_id "
-                "WHERE f.kind='bsl' AND f.path=? "
-                "AND f.path LIKE '%.' || m.code_name || '.bsl'",
-                (p.replace('\\', '/'),)).fetchone()
-            if row:
-                return row[0], row[1]
-            return p, cn
-        return self.resolve_path(p), cn
-
-    def module_outline(self, path, code_name='obj', offset=0, limit=0):
-        path, code_name = self._module_target(path, code_name)
-        row = self.conn().execute(
+    def module_outline(self, path, code_name='obj', db=None):
+        path = self.resolve_path(path, db)
+        row = self.conn(db).execute(
             'SELECT m.body FROM module m JOIN meta_object o ON o.id=m.object_id '
             'WHERE o.path=? AND m.code_name=?', (path, code_name)).fetchone()
         if not row or not row[0]:
             return f'модуль не найден: {path} ({code_name})'
-        return _paginate_lines(row[0], int(offset or 0), int(limit or 0),
-                               _OUTLINE_PAGE)
+        return row[0]
 
-    def get_method(self, path, code_name, name, offset=0, limit=0):
-        path, code_name = self._module_target(path, code_name)
-        row = self.conn().execute(
+    def get_method(self, path, code_name, name, db=None):
+        path = self.resolve_path(path, db)
+        row = self.conn(db).execute(
             'SELECT mt.kind, mt.name, mt.signature, mt.directives, '
             'mt.description, mt.body, mt.is_export FROM method mt '
             'JOIN module m ON m.id=mt.module_id '
@@ -457,16 +447,11 @@ class McpServer:
             parts.append('директивы: ' + row[3])
         if row[4]:
             parts.append('описание:\n' + row[4])
-        body = row[5] or ''
-        total = body.count('\n') + 1
-        parts.append(_paginate_lines(body, int(offset or 0), int(limit or 0),
-                                     _METHOD_PAGE, header='тело'))
-        if total > _METHOD_PAGE and int(offset or 0) + _METHOD_PAGE < total:
-            parts.append('метод длинный — листай: offset/limit')
+        parts.append('тело:\n' + row[5])
         return '\n'.join(parts)
 
-    def find_methods(self, mask='', path=None, limit=20):
-        path = self.resolve_path(path) if path else None
+    def find_methods(self, mask, path=None, limit=20, db=None):
+        path = self.resolve_path(path, db) if path else None
         like = f'%{mask}%'
         like_ns = f'%{mask.replace(" ", "").lower()}%'
         sql = ('SELECT o.path, m.code_name, mt.kind, mt.name, mt.signature, '
@@ -482,7 +467,7 @@ class McpServer:
             params.append(path)
         sql += ' LIMIT ?'
         params.append(int(limit))
-        rows = self.conn().execute(sql, params).fetchall()
+        rows = self.conn(db).execute(sql, params).fetchall()
         if not rows:
             return 'ничего не найдено'
         out = []
@@ -495,9 +480,9 @@ class McpServer:
             out.append(line)
         return '\n'.join(out)
 
-    def skd_of(self, path):
-        path = self.resolve_path(path)
-        rows = self.conn().execute(
+    def skd_of(self, path, db=None):
+        path = self.resolve_path(path, db)
+        rows = self.conn(db).execute(
             'SELECT q.query FROM skd_query q JOIN meta_object o '
             'ON o.id=q.object_id WHERE o.path=? ORDER BY q.ord',
             (path,)).fetchall()
@@ -505,8 +490,8 @@ class McpServer:
             return f'у объекта нет запросов СКД: {path}'
         return ('\n;\n'.join(r[0] for r in rows))[:20000]
 
-    def find_skd(self, mask, limit=10):
-        rows = self.conn().execute(
+    def find_skd(self, mask, limit=10, db=None):
+        rows = self.conn(db).execute(
             'SELECT q.id, o.path, q.query FROM skd_query q '
             'JOIN meta_object o ON o.id=q.object_id '
             'WHERE q.query LIKE ? LIMIT ?',
@@ -520,21 +505,21 @@ class McpServer:
             out.append(f'[{rid}] {ru_path(path)} … {snippet} …')
         return '\n'.join(out)
 
-    def check_query(self, text):
+    def check_query(self, text, db=None):
         from .query_lang import check_query as _check
-        errs = _check(text, self.ctx())
+        errs = _check(text, self.ctx(db))
         if not errs:
             return 'OK: синтаксис корректен, таблицы/поля/цепочки существуют'
         return 'Ошибки:\n' + '\n'.join(errs)
 
-    def sql(self, query):
+    def sql(self, query, db=None):
         stripped = _sql_rewrite(query).strip().rstrip(';')
         head = stripped.upper()
         if not (head.startswith('SELECT') or head.startswith('WITH')):
             raise ValueError('разрешены только SELECT/WITH (read-only)')
         if ' LIMIT ' not in head:
             stripped += ' LIMIT 200'
-        cur = self.conn().execute(stripped)
+        cur = self.conn(db).execute(stripped)
         cols = [c[0] for c in cur.description] if cur.description else []
         rows = cur.fetchall()
         if not rows:
@@ -548,18 +533,35 @@ class McpServer:
             out.append(' | '.join(cells))
         return '\n'.join(out)
 
-    def db_schema(self):
-        conn = self.conn()
-        tables = [r[0] for r in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' "
-            "AND name NOT LIKE 'sqlite_%' ORDER BY name")]
+    # -- управление базами ---------------------------------------------------
+    def db_list(self):
+        if not self.dbs:
+            return 'нет открытых баз — откройте через db_open'
         out = []
-        for name in tables:
-            cols = [r[1] for r in conn.execute(f'PRAGMA table_info("{name}")')]
-            cnt = conn.execute(f'SELECT COUNT(*) FROM "{name}"').fetchone()[0]
-            out.append(f'{name} ({cnt} строк): ' + ', '.join(cols))
-        return ('Таблицы базы знаний (используй в sql; повторно схему не '
-                'запрашивай):\n' + '\n'.join(out))
+        for alias, info in self.dbs.items():
+            nobj, nmod, nmeth = self.db_stats(alias)
+            mark = '*' if alias == self.active else ' '
+            out.append(f'{mark} {alias} — {info["path"]} '
+                       f'(объектов: {nobj}, модулей: {nmod}, методов: {nmeth})')
+        return 'Открытые базы (* — активная):\n' + '\n'.join(out)
+
+    def db_open(self, path, alias=None):
+        alias = self.open_db(path, alias)
+        nobj, nmod, nmeth = self.db_stats(alias)
+        return (f'база открыта: {alias} — {self.dbs[alias]["path"]} '
+                f'(объектов: {nobj}, модулей: {nmod}, методов: {nmeth}); '
+                'сделана активной')
+
+    def db_use(self, alias):
+        alias = self._alias(alias)
+        self.active = alias
+        return f'активная база: {alias} — {self.dbs[alias]["path"]}'
+
+    def db_close(self, alias=None):
+        alias = self.close_db(alias)
+        if not self.dbs:
+            return f'база {alias} закрыта; открытых баз не осталось'
+        return f'база {alias} закрыта; активная: {self.active}'
 
 
 class Tool:
@@ -583,124 +585,116 @@ def _schema(props, required=()):
 
 _STR = {'type': 'string'}
 _INT = {'type': 'integer'}
+_DB = {'type': 'string',
+       'description': 'Alias of the knowledge base to query INSTEAD of the '
+                      'active one (see db_list). Omit to use the active base.'}
 
 TOOLS = [
     Tool('find_objects',
          'Search metadata objects by name or path substring. Returns '
          "configurator-style dotted paths ('Справочник.Имя') with Russian and "
          'English type labels. First step for anything: locate '
-         'справочник/документ/регистр by its Russian name. mask is optional: '
-         'omit it to browse all objects of a given type.',
+         'справочник/документ/регистр by its Russian name.',
          _schema({'mask': _STR, 'type': _STR,
-                  'limit': _INT}),
+                  'limit': _INT, 'db': _DB}, ('mask',)),
          McpServer.find_objects),
     Tool('object_card',
          "Full 'passport' of one object in a single call: type, header "
          'attributes with types, tabular sections with their fields, modules, '
          'SKD query count, forward/reverse references. Use right after '
          'find_objects.',
-         _schema({'path': _STR}, ('path',)),
+         _schema({'path': _STR, 'db': _DB}, ('path',)),
          McpServer.object_card),
     Tool('object_tree',
          "Browse the metadata tree 'as in the configurator' (subsystems, "
          'nested forms/commands). path empty = configuration root.',
-         _schema({'path': _STR, 'depth': _INT}),
+         _schema({'path': _STR, 'depth': _INT, 'db': _DB}),
          McpServer.object_tree),
     Tool('find_field',
          'Reverse search: which objects contain a field/tabular-section field '
          'with this name. Use to discover join paths between tables.',
-         _schema({'name': _STR, 'limit': _INT}, ('name',)),
+         _schema({'name': _STR, 'limit': _INT, 'db': _DB}, ('name',)),
          McpServer.find_field),
     Tool('refs_of',
          "Reference links of an object via attribute types: forward ('on what "
          "it references') and reverse ('who references it') — impact analysis.",
-         _schema({'path': _STR, 'direction': _STR, 'limit': _INT}, ('path',)),
+         _schema({'path': _STR, 'direction': _STR, 'limit': _INT, 'db': _DB},
+                 ('path',)),
          McpServer.refs_of),
     Tool('module_outline',
          'Table of contents of a 1C module: signatures, comments, #Если '
-         "regions, WITHOUT method bodies. path — object path ('Документ.Х' "
-         "or 'Document/Х'); code_name: 'obj' (object module), 'mgr' (manager "
-         'module) etc. Path forms are also accepted: Документ.Х.mgr, '
-         'Документ.Х.obj.bsl, Document/Х/Document.mgr.bsl. '
-         'For very long modules use offset/limit (0-based lines) to page.',
-         _schema({'path': _STR, 'code_name': _STR,
-                  'offset': _INT, 'limit': _INT}, ('path',)),
+         "regions, WITHOUT method bodies. code_name: 'obj' (object module), "
+         "'mgr' (manager module) etc. Cheap way to inspect a module.",
+         _schema({'path': _STR, 'code_name': _STR, 'db': _DB}, ('path',)),
          McpServer.module_outline),
     Tool('get_method',
          'Full source of one procedure/function: signature, directives '
          '(&НаСервере…), description comment and body. Use after '
-         'find_methods/module_outline. Path forms are also accepted: '
-         'Документ.Х.mgr, Документ.Х.obj.bsl, Document/Х/Document.mgr.bsl. '
-         'Long methods are paginated: the '
-         'response shows which lines are given and how to fetch the rest '
-         '(offset/limit, 0-based lines) — nothing is silently truncated.',
-         _schema({'path': _STR, 'code_name': _STR, 'name': _STR,
-                  'offset': _INT, 'limit': _INT},
+         'find_methods/module_outline.',
+         _schema({'path': _STR, 'code_name': _STR, 'name': _STR, 'db': _DB},
                  ('path', 'code_name', 'name')),
          McpServer.get_method),
     Tool('find_methods',
          'Search 1C methods by name/signature/description substring '
-         "(e.g. 'ПриПроведении'). Reuse existing code instead of inventing. "
-         'mask is optional: with only path it lists all methods of the object. '
-         'Not sure about the exact name — give a partial mask (piece of the '
-         'name), do not guess the full name.',
-         _schema({'mask': _STR, 'path': _STR, 'limit': _INT}),
+         "(e.g. 'ПриПроведении'). Reuse existing code instead of inventing.",
+         _schema({'mask': _STR, 'path': _STR, 'limit': _INT, 'db': _DB},
+                 ('mask',)),
          McpServer.find_methods),
     Tool('skd_of',
          'All SKD (report) queries of an object — the best examples of how '
          'THIS configuration queries its own tables.',
-         _schema({'path': _STR}, ('path',)),
+         _schema({'path': _STR, 'db': _DB}, ('path',)),
          McpServer.skd_of),
     Tool('find_skd',
          'Search across all SKD query texts (e.g. a table name like '
          "'РегистрНакопления.Запасы'). Returns snippets around the match.",
-         _schema({'mask': _STR, 'limit': _INT}, ('mask',)),
+         _schema({'mask': _STR, 'limit': _INT, 'db': _DB}, ('mask',)),
          McpServer.find_skd),
     Tool('check_query',
          'Validate a 1C query: syntax (Russian keywords) + existence of '
          'tables/fields/reference chains against this configuration. ALWAYS '
          'run it on a query you wrote before using it.',
-         _schema({'text': _STR}, ('text',)),
+         _schema({'text': _STR, 'db': _DB}, ('text',)),
          McpServer.check_query),
-    Tool('schema',
-         'Knowledge base schema reference: all tables, their columns and row '
-         'counts. Call it ONCE before writing sql — do not guess column names, '
-         'do not query sqlite_master/PRAGMA.',
-         _schema({}),
-         McpServer.db_schema),
     Tool('sql',
          'Read-only SELECT escape hatch for anything not covered by the '
-         'dedicated tools. Call `schema` first if unsure about tables/columns. '
-         'Non-SELECT is rejected; LIMIT 200 enforced.',
-         _schema({'query': _STR}, ('query',)),
+         'dedicated tools. Non-SELECT is rejected; LIMIT 200 enforced.',
+         _schema({'query': _STR, 'db': _DB}, ('query',)),
          McpServer.sql),
+    Tool('db_list',
+         'List the knowledge bases open on this server: alias, file path, '
+         'object/module/method counts; * marks the ACTIVE base that the other '
+         'tools query by default.',
+         _schema({}),
+         McpServer.db_list),
+    Tool('db_open',
+         'Open one more knowledge base file while the server is running '
+         '(e.g. an extension or a data processor extracted next to the main '
+         'configuration) and make it active. path = path to the .db/.sqlite '
+         'file given by the user; alias = optional short name (default: the '
+         'file name without extension).',
+         _schema({'path': _STR, 'alias': _STR}, ('path',)),
+         McpServer.db_open),
+    Tool('db_use',
+         'Switch the ACTIVE knowledge base — the one all other tools query '
+         'when the db parameter is omitted.',
+         _schema({'alias': _STR}, ('alias',)),
+         McpServer.db_use),
+    Tool('db_close',
+         'Close a knowledge base. alias omitted = the active one. The other '
+         'open bases keep working.',
+         _schema({'alias': _STR}),
+         McpServer.db_close),
 ]
 
 
 def make_handler(server):
-    """HTTP-обработчик MCP: Streamable HTTP (POST /mcp), legacy SSE (/sse)
-    и минимальный OAuth 2.1 для клиентов, которым он нужен (Claude Code).
-
-    OAuth реализован по спецификации MCP (RFC 9728/8414/7591, authorization
-    code + PKCE) с автоматическим одобрением: сервер локальный, база
-    отдаётся read-only, реальная авторизация не требуется — поток нужен
-    только чтобы клиенты, ожидающие OAuth, могли подключиться.
-    """
-    state = {'lock': threading.Lock(), 'sessions': {},
-             'oauth_clients': {}, 'oauth_codes': {}, 'oauth_tokens': set()}
+    """HTTP-обработчик MCP: Streamable HTTP (POST /mcp) и legacy SSE (/sse)."""
+    state = {'lock': threading.Lock(), 'sessions': {}}
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = 'HTTP/1.1'
         server_version = '1confdb-knw'
-
-        def handle(self):
-            # MCP-клиенты часто закрывают соединение сразу после ответа
-            # (новый коннект на каждый запрос) — обрыв на keep-alive не ошибка
-            try:
-                super().handle()
-            except (ConnectionResetError, ConnectionAbortedError,
-                    BrokenPipeError, TimeoutError):
-                self.close_connection = True
 
         def _send(self, code, body=None, extra=None):
             data = None if body is None else (
@@ -715,171 +709,25 @@ def make_handler(server):
             if data:
                 self.wfile.write(data)
 
-        def _base_url(self):
-            return 'http://' + (self.headers.get('Host') or 'localhost')
-
-        def _read_body_bytes(self):
-            if 'chunked' in (self.headers.get('Transfer-Encoding') or '').lower():
-                return self._read_chunked()
-            length = int(self.headers.get('Content-Length') or 0)
-            return self.rfile.read(length) if length > 0 else b''
-
-        def _drain_body(self):
-            """Дочитать тело запроса, чтобы keep-alive соединение не съехало."""
-            self._read_body_bytes()
-
         def _read_msg(self):
-            if 'chunked' in (self.headers.get('Transfer-Encoding') or '').lower():
-                body = self._read_chunked()
-            else:
-                length = int(self.headers.get('Content-Length') or 0)
-                body = self.rfile.read(length)
+            length = int(self.headers.get('Content-Length') or 0)
             try:
-                return json.loads(body)
+                return json.loads(self.rfile.read(length))
             except ValueError:
                 return None
 
-        def _read_chunked(self):
-            """Тело запроса в chunked-кодировке (так шлют Node-клиенты,
-            например Claude Code)."""
-            parts = []
-            while True:
-                size_line = self.rfile.readline(65536)
-                if not size_line:
-                    break
-                size_token = size_line.strip().split(b';')[0]
-                if not size_token:
-                    continue
-                try:
-                    size = int(size_token, 16)
-                except ValueError:
-                    break
-                if size == 0:
-                    # финальный блок: дочитать трейлеры до пустой строки
-                    while True:
-                        trailer = self.rfile.readline(65536)
-                        if trailer in (b'\r\n', b'\n', b''):
-                            break
-                    break
-                parts.append(self.rfile.read(size))
-                self.rfile.readline(65536)  # CRLF после чанка
-            return b''.join(parts)
-
-        # -- OAuth 2.1 (авто-одобрение) -------------------------------------
-
-        def _oauth_resource_metadata(self):
-            base = self._base_url()
-            return self._send(200, {
-                'resource': base + '/mcp',
-                'authorization_servers': [base]})
-
-        def _oauth_server_metadata(self):
-            base = self._base_url()
-            return self._send(200, {
-                'issuer': base,
-                'authorization_endpoint': base + '/oauth/authorize',
-                'token_endpoint': base + '/oauth/token',
-                'registration_endpoint': base + '/oauth/register',
-                'response_types_supported': ['code'],
-                'grant_types_supported': ['authorization_code',
-                                          'refresh_token'],
-                'code_challenge_methods_supported': ['S256'],
-                'token_endpoint_auth_methods_supported': ['none']})
-
-        def _oauth_register(self):
-            try:
-                meta = json.loads(self._read_body_bytes() or b'{}')
-            except ValueError:
-                meta = {}
-            client_id = uuid.uuid4().hex
-            with state['lock']:
-                state['oauth_clients'][client_id] = meta
-            resp = {'client_id': client_id,
-                    'token_endpoint_auth_method': 'none'}
-            for key in ('client_name', 'redirect_uris', 'grant_types',
-                        'response_types'):
-                if meta.get(key) is not None:
-                    resp[key] = meta[key]
-            return self._send(201, resp)
-
-        def _oauth_authorize(self, qs):
-            params = parse_qs(qs)
-            redirect_uri = params.get('redirect_uri', [''])[0]
-            if not redirect_uri:
-                self._drain_body()
-                return self._send(400, {'error': 'redirect_uri required'})
-            code = uuid.uuid4().hex
-            with state['lock']:
-                state['oauth_codes'][code] = {
-                    'client_id': params.get('client_id', [''])[0],
-                    'redirect_uri': redirect_uri,
-                    'challenge': params.get('code_challenge', [''])[0]}
-            location = redirect_uri + ('&' if '?' in redirect_uri else '?') \
-                + 'code=' + code
-            if params.get('state'):
-                location += '&state=' + urllib_quote(params['state'][0])
-            self.send_response(302)
-            self.send_header('Location', location)
-            self.send_header('Content-Length', '0')
-            self.end_headers()
-
-        def _oauth_token(self):
-            params = parse_qs(self._read_body_bytes().decode('utf-8', 'replace'))
-            grant = params.get('grant_type', [''])[0]
-            if grant == 'refresh_token':
-                token = uuid.uuid4().hex
-                with state['lock']:
-                    state['oauth_tokens'].add(token)
-                return self._send(200, {'access_token': token,
-                                        'token_type': 'Bearer',
-                                        'expires_in': 3600,
-                                        'refresh_token': uuid.uuid4().hex})
-            code = params.get('code', [''])[0]
-            with state['lock']:
-                stored = state['oauth_codes'].pop(code, None)
-            if stored is None:
-                return self._send(400, {'error': 'invalid_grant'})
-            challenge = stored.get('challenge') or ''
-            if challenge:
-                verifier = params.get('code_verifier', [''])[0]
-                digest = hashlib.sha256(verifier.encode('ascii', 'ignore')).digest()
-                expect = base64.urlsafe_b64encode(digest).rstrip(b'=').decode()
-                if expect != challenge:
-                    return self._send(400, {'error': 'invalid_grant'})
-            token = uuid.uuid4().hex
-            with state['lock']:
-                state['oauth_tokens'].add(token)
-            return self._send(200, {'access_token': token,
-                                    'token_type': 'Bearer',
-                                    'expires_in': 3600,
-                                    'refresh_token': uuid.uuid4().hex})
-
-        # -- маршрутизация ----------------------------------------------------
-
         def do_OPTIONS(self):
             self._send(204, extra={
-                'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
-                'Access-Control-Allow-Headers':
-                    'Content-Type, Mcp-Session-Id, Mcp-Protocol-Version, '
-                    'Authorization'})
+                'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+                'Access-Control-Allow-Headers': 'Content-Type, Mcp-Session-Id'})
 
         def do_GET(self):
             path = urlparse(self.path)
             if path.path in ('/sse', '/mcp'):
                 return self._sse_stream()
-            if path.path in ('/.well-known/oauth-protected-resource',
-                             '/.well-known/oauth-protected-resource/mcp'):
-                return self._oauth_resource_metadata()
-            if path.path in ('/.well-known/oauth-authorization-server',
-                             '/.well-known/oauth-authorization-server/mcp'):
-                return self._oauth_server_metadata()
-            if path.path == '/oauth/authorize':
-                return self._oauth_authorize(path.query)
-            self._drain_body()
             return self._send(404, {'error': f'not found: {path.path}'})
 
         def do_DELETE(self):
-            self._drain_body()
             self._send(405, {'error': 'сессии не сохраняются'},
                        extra={'Allow': 'GET, POST'})
 
@@ -919,12 +767,7 @@ def make_handler(server):
 
         def do_POST(self):
             path = urlparse(self.path)
-            if path.path in ('/oauth/register', '/register'):
-                return self._oauth_register()
-            if path.path == '/oauth/token':
-                return self._oauth_token()
             if path.path not in ('/mcp', '/messages'):
-                self._drain_body()
                 return self._send(404, {'error': f'not found: {path.path}'})
             msg = self._read_msg()
             if msg is None:
@@ -946,20 +789,9 @@ def make_handler(server):
     return Handler
 
 
-class _QuietThreadingHTTPServer(ThreadingHTTPServer):
-    """Не печатает traceback на штатные обрывы связи со стороны клиента."""
-
-    def handle_error(self, request, client_address):
-        exc = sys.exc_info()[1]
-        if isinstance(exc, (ConnectionResetError, ConnectionAbortedError,
-                            BrokenPipeError, TimeoutError)):
-            return
-        super().handle_error(request, client_address)
-
-
 def start_http_server(server, host='127.0.0.1', port=0):
     """Поднимает ThreadingHTTPServer; возвращает (httpd, фактический порт)."""
-    httpd = _QuietThreadingHTTPServer((host, port), make_handler(server))
+    httpd = ThreadingHTTPServer((host, port), make_handler(server))
     httpd.daemon_threads = True
     return httpd, httpd.server_address[1]
 
@@ -998,6 +830,25 @@ def resolve_db(db):
         print(f'Файл базы не найден: {db}', file=sys.stderr)
         print('Укажите существующий путь к базе SQLite.', file=sys.stderr)
         raise SystemExit(2)
+    return _find_single_db()
+
+
+def resolve_dbs(dbs):
+    """Список баз к открытию: проверяет явные пути; без путей — автопоиск одной."""
+    if not dbs:
+        return [_find_single_db()]
+    resolved = []
+    for path in dbs:
+        if not os.path.isfile(path):
+            print(f'Файл базы не найден: {path}', file=sys.stderr)
+            print('Укажите существующий путь к базе SQLite.', file=sys.stderr)
+            raise SystemExit(2)
+        resolved.append(path)
+    return resolved
+
+
+def _find_single_db():
+    """last_db из конфига либо автопоиск единственной базы; SystemExit(2)."""
     last = load_config().get('last_db') or ''
     if last and os.path.isfile(last):
         print(f'База из ~/.confdb/config.json (last_db): {last}', file=sys.stderr)
@@ -1018,11 +869,22 @@ def resolve_db(db):
     raise SystemExit(2)
 
 
-def serve_http(db_path, host='127.0.0.1', port=8765):
-    if not os.path.isfile(db_path):
-        print(f'Файл базы не найден: {db_path}', file=sys.stderr)
-        return 2
-    server = McpServer(db_path)
+def _print_dbs(server):
+    """Сообщает открытые базы и алиасы (в stderr — не в поток протокола)."""
+    for alias, info in server.dbs.items():
+        mark = '*' if alias == server.active else ' '
+        print(f' {mark} база {alias}: {info["path"]}', file=sys.stderr)
+
+
+def serve_http(db_paths, host='127.0.0.1', port=8765):
+    if isinstance(db_paths, str):
+        db_paths = [db_paths]
+    for path in db_paths:
+        if not os.path.isfile(path):
+            print(f'Файл базы не найден: {path}', file=sys.stderr)
+            return 2
+    server = McpServer(db_paths)
+    _print_dbs(server)
     httpd, real_port = start_http_server(server, host, port)
     print(f'1confdb-knw: слушаю http://{host}:{real_port}/mcp '
           f'(legacy SSE: /sse); остановка — Ctrl+C.')
@@ -1055,20 +917,24 @@ def main(argv=None):
     parser = argparse.ArgumentParser(
         prog='1confdb-knw',
         description='MCP-сервер знаний по конфигурации 1С и BSL '
-                    '(stdio по умолчанию; --port — HTTP для SSH-туннеля)')
+                    '(stdio по умолчанию; --port — HTTP для SSH-туннеля). '
+                    'Можно открыть несколько баз сразу (основная конфигурация '
+                    '+ расширения/обработки) — остальные через db_open на ходу.')
     parser.add_argument(
-        'db', nargs='?', default=None,
-        help='путь к базе SQLite; без пути — last_db из ~/.confdb/config.json '
-             'или автопоиск *.db/*.sqlite (текущий каталог, db/, _out/)')
+        'db', nargs='*', default=None,
+        help='пути к базам SQLite (можно несколько); без путей — last_db из '
+             '~/.confdb/config.json или автопоиск *.db/*.sqlite '
+             '(текущий каталог, db/, _out/)')
     parser.add_argument('--host', default='127.0.0.1',
                         help='адрес для HTTP-режима (по умолчанию 127.0.0.1)')
     parser.add_argument('--port', type=int, default=0,
                         help='порт HTTP-режима (без него — stdio)')
     args = parser.parse_args(argv)
-    db = resolve_db(args.db)
+    dbs = resolve_dbs(args.db)
     if args.port:
-        return serve_http(db, args.host, args.port)
-    server = McpServer(db)
+        return serve_http(dbs, args.host, args.port)
+    server = McpServer(dbs)
+    _print_dbs(server)
     for line in sys.stdin:
         line = line.strip()
         if not line:
