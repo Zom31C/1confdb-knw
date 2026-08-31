@@ -37,10 +37,11 @@ pytest — только в dev-extras). Windows-ориентированный �
 - `_vendor/v8unpack/` — исходник-эталон (MIT) для сверки семантики; не модифицировать
 - `_tmp/` — рабочие/сравнительные скрипты (`compare_decoders.py`, `compare_dumps.py`,
   `check_db.py`); игнорируется git'ом
-- `SmallBusinessKz_3_0_4_4_cf.cf` — тестовый файл 885 МБ («УправлениеНебольшойФирмойДляКазахстана»);
-  пользователь перемещает его между корнем репозитория и `cf\` развёрнутой копии
-  `D:\Projects\1confdb-knw-main` (в git не входит, `*.cf` в .gitignore);
-  используется для end-to-end проверок
+- тестовые `.cf` лежат в `cf\` (на 2026-08-31: `SmallBusinessKz_3_0_4_4_cf.cf` 844 МБ
+  «УправлениеНебольшойФирмойДляКазахстана» и `БП_РФ.cf` 878 МБ
+  «БухгалтерияПредприятияКОРП»); пользователь перемещает файлы — перед прогоном
+  проверять корень и `cf\` (в git не входят, `*.cf` в .gitignore);
+  используются для end-to-end проверок
 - `.venv/` — venv проекта; **не удалять**
 - `qwen-code-export-*.md/.json` — экспорты прошлых сессий (история договорённостей)
 
@@ -61,6 +62,9 @@ confdb-ui.bat                 :: = .venv\Scripts\python.exe -m confdb.tui
 
 :: проверка запросов СКД (на тестовой конфигурации 375/375)
 confdb.bat check out.db
+
+:: подбор числа процессов под железо (результат в ~/.confdb/config.json)
+confdb.bat bench config.cf
 
 :: MCP-сервер: stdio по умолчанию; --port — HTTP для SSH-туннеля
 1confdb-knw.bat out.db --port 8765
@@ -90,7 +94,9 @@ confdb.bat check out.db
   в `finally` (кроме `--keep-temp`).
 - venv создан из MS Store Python: запущенный `.venv\Scripts\python.exe` — лаунчер, реальный
   рабочий процесс — дочерний `python3.10.exe` (CPU/память смотреть у него).
-- В окружении машины **нет git** (`git` не в PATH) — команды git недоступны.
+- Git доступен (2.55+, в PATH); корень проекта не репозиторий — публикуемая
+  копия в `dist\1confdb-knw` (remote `Zom31C/1confdb-knw`), вариант для
+  BSL-интеграции — `dist\1confdb-knw-lsp`.
 
 ## Соглашения разработки
 

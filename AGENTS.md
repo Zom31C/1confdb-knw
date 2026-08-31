@@ -19,7 +19,8 @@ section=табличная часть (row table of an object).
 - Python >= 3.9, **runtime stdlib only** (pytest is the only dev extra).
 - Windows-oriented: `.bat` wrappers in repo root; venv in `.venv` (MS Store Python:
   `.venv\Scripts\python.exe` is a launcher, the real worker is a child process).
-- **No git on this machine** — git commands are unavailable.
+- Git is available (2.55+); the project root is **not** a repo — the published
+  repo lives in `dist\1confdb-knw` (remote `Zom31C/1confdb-knw`).
 - Comments, docstrings and user-facing text are in **Russian**.
 - The 885 MB test file `SmallBusinessKz_3_0_4_4_cf.cf` lives in `cf/` (or repo root);
   never commit it; a full extract takes ~2.5 min with `--workers 8` — keep it out of
@@ -30,8 +31,11 @@ section=табличная часть (row table of an object).
 
 - `src/confdb/extract.py` — pipeline stages 0/1/3 (containers → inflate → decode).
 - `src/confdb/__main__.py` — CLI: `extract`, `check`, `1confdb-knw`.
-- `src/confdb/mcp_server.py` — MCP server `1confdb-knw <db>` (12 tools, read-only;
+- `src/confdb/mcp_server.py` — MCP server `1confdb-knw <db…>` (16 tools, read-only;
   self-describing: schema primer + glossary + workflow in `initialize.instructions`).
+  Multi-database: several knowledge bases open at once (main configuration +
+  extensions/data processors), each under an alias; tools take an optional `db`
+  alias parameter; `db_list`/`db_open`/`db_use`/`db_close` manage them at runtime.
   Transports: stdio by default; `--port N` — HTTP (Streamable HTTP `POST /mcp`,
   legacy SSE `/sse`) for SSH-tunnel access (`ssh -L N:127.0.0.1:N`).
 - `src/confdb/tui.py` — console UI (user chose console over GUI; do not suggest tkinter).
@@ -50,7 +54,7 @@ section=табличная часть (row table of an object).
 
 ```bat
 .venv\Scripts\python.exe -m pip install -e ".[dev]"   :: once
-test.bat                                              :: pytest (54 tests)
+test.bat                                              :: pytest (78 tests)
 confdb.bat extract <file.cf> --db out.db --workers 8
 confdb.bat check out.db                               :: validate all SKD queries
 confdb.bat bench <file.cf>                            :: tune workers to hardware
@@ -59,10 +63,12 @@ confdb.bat bench <file.cf>                            :: tune workers to hardwar
 .venv\Scripts\python.exe -m compileall -q src\confdb  :: static check
 ```
 
-Deployed copies used by the user: `dist\confdb` and `D:\Projects\1confdb-knw-main`
-(the latter also has a real copy in `.venv\Lib\site-packages\confdb` — sync it too)
-(sync with `robocopy src\confdb <dest>\src\confdb /MIR /XD __pycache__` + README/bats
-after changing `src`).
+Deployed copies used by the user: `dist\1confdb-knw` (published repo,
+remote `Zom31C/1confdb-knw`) and `dist\1confdb-knw-lsp` (BSL-LS variant,
+remote `Zom31C/1confdb-knw-lsp`). The first copy's venv executes a real
+copy in `.venv\Lib\site-packages\confdb` (no editable `.pth` despite
+`setup.bat`) — sync it too (`robocopy src\confdb <dest>\src\confdb /MIR
+/XD __pycache__` + into `site-packages` + README/bats after changing `src`).
 
 ## Database schema (quick map)
 
