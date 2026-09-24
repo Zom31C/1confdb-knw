@@ -43,9 +43,18 @@ def test_tools_list(tmp_path_factory):
     resp = server.handle({'jsonrpc': '2.0', 'id': 1, 'method': 'tools/list'})
     names = {t['name'] for t in resp['result']['tools']}
     assert names == {'find_objects', 'object_card', 'object_tree', 'find_field',
-                     'refs_of', 'module_outline', 'get_method', 'find_methods',
+                     'refs_of', 'module_outline', 'get_method',
+                     'find_method_context', 'method_dependencies',
+                     'method_result_schema', 'find_methods',
                      'skd_of', 'find_skd', 'check_query', 'sql',
+                     'compare_object', 'extension_diff', 'configuration_info',
                      'db_list', 'db_open', 'db_use', 'db_close'}
+    # проверку синтаксиса модулей делает BSL Language Server (1confdb-knw-lsp),
+    # в mainline её быть не должно
+    assert 'check_bsl' not in names
+    # каждый инструмент указывает функцию-обработчик и схему
+    for tool in resp['result']['tools']:
+        assert tool['description'] and tool['inputSchema']['type'] == 'object'
 
 
 def test_find_objects_and_card(tmp_path_factory):
@@ -109,6 +118,161 @@ def test_refs_and_skd_empty(tmp_path_factory):
     assert 'Ссылается на' in refs
     skd = _call(server, 'skd_of', path='Catalog/Справочник1')['content'][0]['text']
     assert 'нет запросов' in skd
+
+
+# -- регистры, формы и паспорт конфигурации ---------------------------------
+
+def test_object_card_register_groups(tmp_path_factory):
+    server = _server(tmp_path_factory)
+    card = _call(server, 'object_card',
+                 path='РегистрСведений.РегистрСведений1')['content'][0]['text']
+    assert 'Периодичность: день' in card
+    assert 'Режим записи: подчинение регистратору' in card
+    # измерения/ресурсы/реквизиты — отдельными группами, а не плоским списком
+    assert 'Измерения: Измерение1: Ссылка: Справочник.Справочник1' in card
+    assert 'Ресурсы: Ресурс1: Число' in card
+    assert 'Реквизиты: Реквизит1: Строка(10)' in card
+    assert card.index('Измерения:') < card.index('Ресурсы:') < card.index('Реквизиты:')
+
+    acc = _call(server, 'object_card',
+                path='РегистрНакопления.РегистрНакопления1')['content'][0]['text']
+    # у регистра накопления периодичности не бывает — и строки о ней нет
+    assert 'Периодичность' not in acc
+    assert 'Режим записи: подчинение регистратору' in acc
+    assert 'Измерения: ИзмерениеНакопления' in acc
+    assert 'Ресурсы: РесурсНакопления: Число' in acc
+
+
+def test_object_card_children_and_plain_attributes(tmp_path_factory):
+    server = _server(tmp_path_factory)
+    card = _call(server, 'object_card',
+                 path='Справочник.Справочник1')['content'][0]['text']
+    assert 'Формы: ФормаЭлемента' in card
+    # у справочника групп регистра нет: реквизиты одним списком, как раньше
+    assert 'Измерения:' not in card
+    assert card.count('Реквизиты:') == 1
+
+
+def test_path_type_is_case_insensitive(tmp_path_factory):
+    server = _server(tmp_path_factory)
+    # форма языка запросов и форма конфигуратора ведут к одному объекту
+    query_form = _call(server, 'object_card',
+                       path='РегистрНакопления.РегистрНакопления1')
+    card_form = _call(server, 'object_card',
+                      path='Регистр накопления.РегистрНакопления1')
+    assert query_form['content'][0]['text'] == card_form['content'][0]['text']
+    assert 'Измерения:' in query_form['content'][0]['text']
+
+
+def test_configuration_info(tmp_path_factory):
+    server = _server(tmp_path_factory)
+    info = _call(server, 'configuration_info')['content'][0]['text']
+    assert 'Конфигурация: ТестКонф (Тестовая конфигурация)' in info
+    assert 'Версия конфигурации: 1.2.3.4' in info
+    assert 'Режим совместимости: 8.3.21' in info
+    assert 'Версия платформы: в файле конфигурации не хранится' in info
+    assert 'Источник выгрузки: t.cf' in info
+    assert 'запросов СКД' in info
+    # db_list кратко повторяет версию и режим совместимости
+    lst = _call(server, 'db_list')['content'][0]['text']
+    assert '1.2.3.4' in lst and '8.3.21' in lst
+
+
+# -- инструменты работы с кодом ---------------------------------------------
+
+CM = 'CommonModule/ОбщийМодуль1'
+
+
+def test_find_method_context(tmp_path_factory):
+    server = _server(tmp_path_factory)
+    out = _call(server, 'find_method_context', path=CM, code_name='obj',
+                name='Экспортная', match='Выгрузить', before=1,
+                after=1)['content'][0]['text']
+    assert '>>' in out and 'Маркеры вставки' in out
+    assert 'следующий оператор:  КонецФункции' in out
+    # номера строк — модуля, а не тела метода
+    assert 'строки модуля' in out
+    miss = _call(server, 'find_method_context', path=CM, code_name='obj',
+                 name='Экспортная', match='ЧегоНетВКоде')['content'][0]['text']
+    assert 'не найдено' in miss and 'get_method' in miss
+    nomatch = _call(server, 'find_method_context', path=CM, code_name='obj',
+                    name='Закрытая')['content'][0]['text']
+    assert 'match не задан' in nomatch
+
+
+def test_method_dependencies(tmp_path_factory):
+    server = _server(tmp_path_factory)
+    out = _call(server, 'method_dependencies', path=CM, code_name='obj',
+                name='Экспортная')['content'][0]['text']
+    assert 'Параметры: Парам' in out
+    assert 'Справочник.Справочник1' in out      # таблица запроса из кода
+    assert 'Справочник1.СсылкаАтрибут' in out   # поле запроса
+    assert 'ошибок 0' in out
+
+
+def test_method_result_schema(tmp_path_factory):
+    server = _server(tmp_path_factory)
+    table = _call(server, 'method_result_schema', path=CM, code_name='obj',
+                  name='Закрытая')['content'][0]['text']
+    assert 'Сотрудник' in table and 'Колонка' in table
+    assert 'таблиц значений: 1' in table
+    assert 'эвристика' in table
+    query = _call(server, 'method_result_schema', path=CM, code_name='obj',
+                  name='Экспортная')['content'][0]['text']
+    assert 'Колонка запроса' in query and 'Ссылка' in query
+    assert 'Выгрузить' in query
+    empty = _call(server, 'method_result_schema', path='Catalog/Справочник1',
+                  code_name='obj', name='Тест')['content'][0]['text']
+    assert 'не найдено' in empty
+
+
+def test_analyze_resolves_modules_and_context(tmp_path_factory):
+    """Разрешение вызовов: общие модули, метаданные, контекст клиент/сервер.
+
+    Синтаксис модуля не проверяется — это делает BSL Language Server в варианте
+    1confdb-knw-lsp, поэтому здесь только ссылки на метаданные и общие модули.
+    """
+    from confdb.bsl_analyzer import analyze, caller_context
+    server = _server(tmp_path_factory)
+    code = ('Процедура П(Данные)\n'
+            '    ОбщийМодуль1.Экспортная(Данные);\n'
+            '    ОбщийМодуль1.Закрытая();\n'
+            '    ОбщийМодуль1.НетТакого();\n'
+            '    Справочники.Справочник1.НайтиПоКоду("1");\n'
+            '    Справочники.НетТакого.Создать();\n'
+            '    Таблица = Новый ТаблицаЗначений;\n'
+            '    Таблица.Колонки.Добавить("Сотрудник");\n'
+            'КонецПроцедуры\n')
+    report = analyze(code, server.bsl_ctx(), params=[],
+                     caller_context=caller_context('&НаКлиенте', None))
+    states = {(mod, name): state for mod, name, _line, state
+              in report['modules']}
+    assert states[('ОбщийМодуль1', 'Экспортная')] == 'ok'
+    assert 'не Экспорт' in states[('ОбщийМодуль1', 'Закрытая')]
+    assert 'не найден' in states[('ОбщийМодуль1', 'НетТакого')]
+    meta = {(mgr, name): path for mgr, name, _line, path in report['metadata']}
+    assert meta[('Справочники', 'Справочник1')] == 'Catalog/Справочник1'
+    assert meta[('Справочники', 'НетТакого')] is None
+    # цепочка Таблица.Колонки.Добавить() и параметр Данные — не «не разрешено»
+    assert report['unknown'] == []
+    # общий модуль с контекстом «Сервер» вызывается из клиентского кода
+    assert report['context_warnings']
+    assert 'серверный общий модуль' in report['context_warnings'][0]
+
+
+def test_error_categories(tmp_path_factory):
+    server = _server(tmp_path_factory)
+    denied = _call(server, 'sql', query='DELETE FROM meta_object')
+    assert denied.get('isError')
+    assert 'ошибка [BAD_REQUEST]' in denied['content'][0]['text']
+    # неизвестный аргумент — BAD_ARGS, а не INTERNAL
+    bad_args = _call(server, 'find_objects', mask='Х', несуществующийПараметр=1)
+    assert bad_args.get('isError')
+    assert 'ошибка [BAD_ARGS]' in bad_args['content'][0]['text']
+    # неизвестная база — BAD_REQUEST
+    bad_db = _call(server, 'find_objects', mask='Х', db='неттакой')
+    assert bad_db.get('isError')
+    assert 'ошибка [BAD_REQUEST]' in bad_db['content'][0]['text']
 
 
 def test_jsonrpc_roundtrip(tmp_path_factory):
@@ -293,6 +457,60 @@ def test_db_star_queries_every_base_at_once(tmp_path_factory):
     _call(server, 'db_close', alias='расширение')
     err = _call(server, 'find_objects', mask='Тест', db='*')
     assert err.get('isError') and 'нет открытых баз' in err['content'][0]['text']
+
+
+def test_compare_object(tmp_path_factory):
+    main_db, ext_db = _two_dbs(tmp_path_factory)
+    server = McpServer([main_db, ext_db])
+    same = _call(server, 'compare_object', path='Catalog/Справочник1',
+                 db_left='основная',
+                 db_right='расширение')['content'][0]['text']
+    assert 'Различий нет' in same
+    only = _call(server, 'compare_object', path='DataProcessor/ДопОбработка',
+                 db_left='основная',
+                 db_right='расширение')['content'][0]['text']
+    assert 'объект есть только в базе «расширение»' in only
+    miss = _call(server, 'compare_object', path='Catalog/НетТакого',
+                 db_left='основная',
+                 db_right='расширение')['content'][0]['text']
+    assert 'не найден ни в базе «основная»' in miss
+    # неизвестный алиас — ошибка, а не пустой отчёт
+    bad = _call(server, 'compare_object', path='Catalog/Справочник1',
+                db_left='основная', db_right='неттакой')
+    assert bad.get('isError') and 'не открыта' in bad['content'][0]['text']
+
+
+def test_compare_object_shows_field_and_type_diff(tmp_path_factory):
+    main_db, ext_db = _two_dbs(tmp_path_factory)
+    conn = sqlite3.connect(ext_db)
+    oid = conn.execute("SELECT id FROM meta_object "
+                       "WHERE path='Catalog/Справочник1'").fetchone()[0]
+    conn.execute('INSERT INTO meta_attribute (object_id, ord, name, type_str) '
+                 'VALUES (?, 99, ?, ?)', (oid, 'лст_НовыйРеквизит', 'Строка(20)'))
+    conn.execute("UPDATE meta_attribute SET type_str='Число' "
+                 "WHERE object_id=? AND name='СсылкаАтрибут'", (oid,))
+    conn.commit()
+    conn.close()
+    server = McpServer([main_db, ext_db])
+    out = _call(server, 'compare_object', path='Справочник.Справочник1',
+                db_left='основная',
+                db_right='расширение')['content'][0]['text']
+    assert 'только в базе «расширение»: лст_НовыйРеквизит: Строка(20)' in out
+    # тип показан в русской точечной форме, как в остальных инструментах
+    assert 'тип Ссылка: Справочник.Справочник1 -> Число' in out
+
+
+def test_extension_diff(tmp_path_factory):
+    main_db, ext_db = _two_dbs(tmp_path_factory)
+    server = McpServer([main_db, ext_db])
+    out = _call(server, 'extension_diff', extension_db='расширение',
+                base_db='основная')['content'][0]['text']
+    assert 'Новые объекты расширения (1)' in out
+    assert 'Обработка.ДопОбработка' in out
+    assert 'Заимствованные объекты' in out
+    assert 'Справочник.Справочник1' in out
+    # корень тестовой базы — конфигурация, а не расширение: честное предупреждение
+    assert 'не расширение конфигурации' in out
 
 
 def test_db_management_tools(tmp_path_factory):

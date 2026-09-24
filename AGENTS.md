@@ -31,15 +31,34 @@ section=табличная часть (row table of an object).
 
 - `src/confdb/extract.py` — pipeline stages 0/1/3 (containers → inflate → decode).
 - `src/confdb/__main__.py` — CLI: `extract`, `check`, `1confdb-knw`.
-- `src/confdb/mcp_server.py` — MCP server `1confdb-knw <db…>` (16 tools, read-only;
+- `src/confdb/mcp_server.py` — MCP server `1confdb-knw <db…>` (22 tools, read-only;
   self-describing: schema primer + glossary + workflow in `initialize.instructions`).
   Multi-database: several knowledge bases open at once (main configuration +
   extensions/data processors), each under an alias; tools take an optional `db`
   alias parameter; `db_list`/`db_open`/`db_use`/`db_close` manage them at runtime.
+  Cross-base tools take explicit aliases instead of `db`: `compare_object(path,
+  db_left, db_right)`, `extension_diff(extension_db, base_db)`. Tool errors come
+  back categorized (`error_text`: BAD_ARGS/BAD_REQUEST/DB_LOCKED/DB_SCHEMA/
+  DB_ERROR/IO_ERROR/INTERNAL) and `SQLITE_BUSY` is retried (`call_with_retry`).
   Transports: stdio by default; `--port N` — HTTP (Streamable HTTP `POST /mcp`,
   legacy SSE `/sse`) for SSH-tunnel access (`ssh -L N:127.0.0.1:N`).
 - `src/confdb/tui.py` — console UI (user chose console over GUI; do not suggest tkinter).
 - `src/confdb/bsl_parser.py` — splits BSL modules into procedures/functions.
+- `src/confdb/bsl_analyzer.py` — lexical analysis of BSL code for the MCP tools
+  (`method_dependencies`, `method_result_schema`): string/comment masking that
+  understands 1C multi-line literals with `|`, query extraction + validation via
+  `query_lang`, common-module/metadata resolution, client-vs-server context.
+  **It deliberately does NOT check module syntax** — BSL Language Server does
+  that, and it only exists in the `1confdb-knw-lsp` variant; do not add a
+  `check_bsl`-style syntax checker here.
+- `src/confdb/header_props.py` — reads `meta_object.header_json` without
+  re-extracting: configuration version/synonym/compatibility mode/extension name
+  prefix, and register dimension/resource/attribute collections by their
+  canonical uuid + periodicity and write-mode flags. Positions and uuids are
+  verified facts, see the `register-header-structure` and
+  `configuration-header-props` pages of the project knowledge base.
+- `src/confdb/compare.py` — object snapshots and cross-database diff
+  (`compare_object`, `extension_diff`); method/module bodies compared by sha1.
 - `src/confdb/query_lang.py` — 1C query language lexer/parser/semantic validator.
 - `src/confdb/db/writer.py` — SQLite schema + dump writer (batched inserts; BSL
   parsing parallelized via `workers`).
@@ -54,7 +73,7 @@ section=табличная часть (row table of an object).
 
 ```bat
 .venv\Scripts\python.exe -m pip install -e ".[dev]"   :: once
-test.bat                                              :: pytest (84 tests)
+test.bat                                              :: pytest (114 tests)
 confdb.bat extract <file.cf> --db out.db --workers 8
 confdb.bat check out.db                               :: validate all SKD queries
 confdb.bat bench <file.cf>                            :: tune workers to hardware
