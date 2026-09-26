@@ -42,7 +42,9 @@ section=табличная часть (row table of an object).
   DB_ERROR/IO_ERROR/INTERNAL) and `SQLITE_BUSY` is retried (`call_with_retry`).
   Transports: stdio by default; `--port N` — HTTP (Streamable HTTP `POST /mcp`,
   legacy SSE `/sse`) for SSH-tunnel access (`ssh -L N:127.0.0.1:N`).
-- `src/confdb/tui.py` — console UI (user chose console over GUI; do not suggest tkinter).
+- `src/confdb/tui.py` — console UI (user chose console over GUI; do not suggest
+  tkinter). In the file/db pickers a number selects a list item and ANY other
+  text is taken as a typed path (the `p` item is kept for habit).
 - `src/confdb/bsl_parser.py` — splits BSL modules into procedures/functions.
 - `src/confdb/bsl_analyzer.py` — lexical analysis of BSL code for the MCP tools
   (`method_dependencies`, `method_result_schema`): string/comment masking that
@@ -53,9 +55,11 @@ section=табличная часть (row table of an object).
   `check_bsl`-style syntax checker here.
 - `src/confdb/header_props.py` — reads `meta_object.header_json` without
   re-extracting: configuration version/synonym/compatibility mode/extension name
-  prefix, and register dimension/resource/attribute collections by their
-  canonical uuid + periodicity and write-mode flags. Positions and uuids are
-  verified facts, see the `register-header-structure` and
+  prefix, the kind of the loaded file, and register dimension/resource/attribute
+  collections by their canonical uuid + periodicity and write-mode flags. The
+  file kind comes from the extension of `source.file`, NOT from the root type:
+  `.erf` and `.epf` both decode into `ExternalDataProcessor`. Positions and
+  uuids are verified facts, see the `register-header-structure` and
   `configuration-header-props` pages of the project knowledge base.
 - `src/confdb/compare.py` — object snapshots and cross-database diff
   (`compare_object`, `extension_diff`); method/module bodies compared by sha1.
