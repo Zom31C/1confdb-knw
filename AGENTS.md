@@ -31,7 +31,7 @@ section=табличная часть (row table of an object).
 
 - `src/confdb/extract.py` — pipeline stages 0/1/3 (containers → inflate → decode).
 - `src/confdb/__main__.py` — CLI: `extract`, `check`, `1confdb-knw`.
-- `src/confdb/mcp_server.py` — MCP server `1confdb-knw <db…>` (22 tools, read-only;
+- `src/confdb/mcp_server.py` — MCP server `1confdb-knw <db…>` (24 tools, read-only;
   self-describing: schema primer + glossary + workflow in `initialize.instructions`).
   Multi-database: several knowledge bases open at once (main configuration +
   extensions/data processors), each under an alias; tools take an optional `db`
@@ -58,9 +58,15 @@ section=табличная часть (row table of an object).
   prefix, the kind of the loaded file, and register dimension/resource/attribute
   collections by their canonical uuid + periodicity and write-mode flags. The
   file kind comes from the extension of `source.file`, NOT from the root type:
-  `.erf` and `.epf` both decode into `ExternalDataProcessor`. Positions and
-  uuids are verified facts, see the `register-header-structure` and
-  `configuration-header-props` pages of the project knowledge base.
+  `.erf` and `.epf` both decode into `ExternalDataProcessor`. It also reads the
+  target namespace of an XDTO package. Positions and uuids are verified facts,
+  see the `register-header-structure` and `configuration-header-props` pages of
+  the project knowledge base.
+- `src/confdb/xdto.py` — parses `XDTOPackage.bin` (plain UTF-8 XML with a BOM,
+  no binary reverse engineering) into the `xdto_*` tables: imported namespaces,
+  object/value types with base type, facets and enumeration values, properties
+  with obligatoriness/list/form, and nested anonymous types. Verified against
+  all 334 packages of the test configuration.
 - `src/confdb/compare.py` — object snapshots and cross-database diff
   (`compare_object`, `extension_diff`); method/module bodies compared by sha1.
 - `src/confdb/query_lang.py` — 1C query language lexer/parser/semantic validator.
@@ -77,7 +83,7 @@ section=табличная часть (row table of an object).
 
 ```bat
 .venv\Scripts\python.exe -m pip install -e ".[dev]"   :: once
-test.bat                                              :: pytest (121 tests)
+test.bat                                              :: pytest (146 tests)
 confdb.bat extract <file.cf> --db out.db --workers 8
 confdb.bat check out.db                               :: validate all SKD queries
 confdb.bat bench <file.cf>                            :: tune workers to hardware
@@ -100,8 +106,17 @@ copy in `.venv\Lib\site-packages\confdb` (no editable `.pth` despite
 - `meta_attribute(object_id, ord, name, type_str, tabular)` — fields; `tabular`
   names the tabular section a field belongs to. `type_str`: `Строка(50)`,
   `Ссылка: Catalog/Х`, `ОпределяемыйТип: DefinedType/Х (…)`, composites with ` | `.
+  Unresolved forms are distinct: a bare `Ссылка` is a generic platform type
+  (`ЛюбаяСсылка`, `Характеристика`) whose uuid matches no object — NOT an
+  extraction failure; `Ссылка: Имя (объект не найден в базе)` means the name is
+  known from the `.10` table but the object is not in this base; `NULL` means
+  the header carries no type description at all.
 - `meta_tabular(object_id, ord, name)`; `attribute_ref(attribute_id, uuid, object_id)`
   — field-type → object links (joins/impact analysis).
+- `xdto_type(name, kind, base, base_ns, facets, enum_values)`,
+  `xdto_property(type_id, name, type, lower_bound, upper_bound, nillable, form,
+  extra, nested_type_id)`, `xdto_import(namespace)` — contents of XDTO packages;
+  `type_id IS NULL` marks a property the package declares outside any type.
 - `module(object_id, code_name, context, body)` — body = module text WITHOUT method
   bodies; `method(…, kind, name, signature, directives, description, body)` —
   body strictly `Процедура/Функция … Конец…`.
@@ -113,6 +128,11 @@ copy in `.venv\Lib\site-packages\confdb` (no editable `.pth` despite
 - SQLite writes: keep the rollback journal; **never** `PRAGMA journal_mode=MEMORY`
   (an interrupted write otherwise leaves a "valid-looking" near-empty file).
 - The brace-file parser returns numbers as **strings** — compare via `str(x)`.
+- Field names are unique **within a tabular section**, not within an object:
+  dedup by `(section, name)`. A `seen` set shared by the whole object silently
+  dropped 2601 field records across 361 objects of the test configuration (up to
+  a third of a document's fields), and `object_card` printed the emptied sections
+  as `None: ?`.
 - Reference uuids inside type descriptors are NOT object uuids: resolved via the
   root `.10` stream table, DefinedType headers (`header[0][1][1]`) and
   `attribute_ref`.
