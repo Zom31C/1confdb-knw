@@ -43,7 +43,7 @@ from urllib.parse import parse_qs, urlparse
 from . import compare
 from . import header_props
 from .config import load_config
-from .db.writer import TYPE_RU, tabular_field_counts
+from .db.writer import FTS_TABLE, TYPE_RU, tabular_field_counts
 
 PROTOCOL_VERSION = '2024-11-05'
 
@@ -369,17 +369,18 @@ class McpServer:
             conn.close()
             raise ValueError(
                 f'это не база знаний confdb (нет таблицы meta_object): {path}')
-        # Проверяем наличие FTS5 индекса по телам методов
-        has_fts = False
+        # FTS5-индекс по телам методов. Пустой не считается: сборку могли прервать
+        # (или база собрана с --no-fts), и тогда поиск по телам должен уйти на
+        # body_has, а не молча вернуть ноль
+        fts = None
         try:
-            conn.execute('SELECT COUNT(*) FROM method_fts LIMIT 1').fetchone()
-            has_fts = True
+            if conn.execute(f'SELECT rowid FROM {FTS_TABLE} LIMIT 1').fetchone():
+                fts = FTS_TABLE
         except sqlite3.Error:
-            pass  # method_fts нет — будет fallback на body_has
+            pass  # индекса нет — будет fallback на body_has
         if alias is None:
             alias = self._make_alias(path)
-        self.dbs[alias] = {'path': path, 'conn': conn, 'ctx': None,
-                           'has_fts': has_fts}
+        self.dbs[alias] = {'path': path, 'conn': conn, 'ctx': None, 'fts': fts}
         if activate or self.active is None:
             self.active = alias
         return alias
@@ -1161,12 +1162,13 @@ class McpServer:
         params = [like, like, like, like_ns]
         conn = self.conn(db)
         db_info = self.dbs[self._alias(db)]
-        use_fts = db_info.get('has_fts', False) and text and len(text) >= 3
+        fts = db_info.get('fts')
+        use_fts = bool(fts) and text and len(text) >= 3
         if text:
             if use_fts:
                 # FTS5 trigram индекс — быстрый поиск подстроки
                 # Оборачиваем в кавычки для экранирования специальных символов
-                cond += ' AND mt.id IN (SELECT rowid FROM method_fts WHERE method_fts MATCH ?)'
+                cond += f' AND mt.id IN (SELECT rowid FROM {fts} WHERE {fts} MATCH ?)'
                 params.append(f'"{text}"')
             else:
                 # body_has — своя SQL-функция, регистронезависимая в обе стороны:

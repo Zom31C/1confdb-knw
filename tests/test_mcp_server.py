@@ -163,9 +163,94 @@ def test_object_card_tabular_sections(tmp_path_factory):
     # одноимённое поле другой ТЧ — своя запись, а не отброшенный дубликат
     assert 'Табличная часть Оплата: НомерЗаказа: Строка(11)' in card
     # у секции без извлечённых полей состав называется отсутствующим,
-    # а не печатается полем с именем None
-    assert 'Табличная часть Доставка: полей не извлечено' in card
+    # а не печатается полем с именем None; конфигурация не объявила в ней
+    # ни одного поля — это факт, а не пробел извлечения
+    assert 'Табличная часть Доставка: полей не объявлено' in card
     assert 'None' not in card
+
+
+def test_object_card_sees_unextracted_tabular_fields(tmp_path_factory):
+    # секция объявляет поля, но в базе их нет: паспорт называет это пробелом
+    # извлечения и не выдаёт за пустую секцию конфигурации
+    dump = str(tmp_path_factory.mktemp('dump'))
+    make_dump(dump)
+    db = str(tmp_path_factory.mktemp('db') / 't.sqlite')
+    write_db(dump, db, source_file='t.cf')
+    conn = sqlite3.connect(db)
+    conn.execute("DELETE FROM meta_attribute WHERE tabular='Оплата'")
+    conn.commit()
+    conn.close()
+    card = _call(McpServer(db), 'object_card',
+                 path='Документ.ЗаказПокупателя')['content'][0]['text']
+    assert 'Табличная часть Оплата: полей не извлечено' in card
+    assert 'Табличная часть Доставка: полей не объявлено' in card
+
+
+def test_object_card_header_names_type_in_russian(tmp_path_factory):
+    server = _server(tmp_path_factory)
+    card = _call(server, 'object_card',
+                 path='Справочник.Справочник1')['content'][0]['text']
+    # тип в паспорте — как в конфигураторе, без английского stem
+    assert ('Справочник.Справочник1 — Справочник, имя Справочник1'
+            in card.splitlines())
+    assert '(Catalog)' not in card
+    # в списке find_objects stem остаётся: это значение фильтра type= и
+    # колонки meta_object.type для sql
+    listed = _call(server, 'find_objects',
+                   mask='Справочник1')['content'][0]['text']
+    assert 'Справочник.Справочник1 — Справочник (Catalog)' in listed
+
+
+def test_object_card_event_subscription(tmp_path_factory):
+    server = _server(tmp_path_factory)
+    card = _call(server, 'object_card',
+                 path='Подписка на событие.ПодпискаТест')['content'][0]['text']
+    # имя события — как в конфигураторе, без внутреннего английского имени
+    assert 'Событие: ПередЗаписью' in card
+    assert 'BeforeWrite' not in card
+    assert 'Обработчик: Общий модуль.ОбщийМодуль1.Экспортная' in card
+    # один источник распознан, второго в базе нет — и это сказано, а не потеряно
+    assert ('Источники (2): Определяемый тип.ТипТест; '
+            '1 из 2 не распознано') in card
+
+
+def test_object_card_shows_subscriptions_of_a_source(tmp_path_factory):
+    server = _server(tmp_path_factory)
+    card = _call(server, 'object_card',
+                 path='Определяемый тип.ТипТест')['content'][0]['text']
+    assert ('Подписки на события: ПередЗаписью → '
+            'Общий модуль.ОбщийМодуль1.Экспортная') in card
+    # у объекта, на который ничего не подписано, такой строки нет
+    other = _call(server, 'object_card',
+                  path='Документ.ЗаказПокупателя')['content'][0]['text']
+    assert 'Подписки на события' not in other
+
+
+def test_get_method_names_event_subscriptions(tmp_path_factory):
+    server = _server(tmp_path_factory)
+    text = _call(server, 'get_method', path='Общий модуль.ОбщийМодуль1',
+                 code_name='obj', name='Экспортная')['content'][0]['text']
+    # обработчик подписки вызывает платформа: вызова в коде нет, поэтому
+    # без этой строки метод выглядит неиспользуемым
+    assert ('вызывается подписками на события: ПередЗаписью — '
+            'Подписка на событие.ПодпискаТест (источников: 2)') in text
+    other = _call(server, 'get_method', path='Общий модуль.ОбщийМодуль1',
+                  code_name='obj', name='Закрытая')['content'][0]['text']
+    assert 'вызывается подписками на события' not in other
+
+
+def test_object_card_exchange_plan_content(tmp_path_factory):
+    server = _server(tmp_path_factory)
+    card = _call(server, 'object_card',
+                 path='План обмена.ПланОбмена1')['content'][0]['text']
+    # состав плана — объекты, которые он синхронизирует; uuid в info обычные
+    # meta_object.uuid, поэтому имена определяются, а не угадываются
+    assert ('Состав плана обмена (2): Справочник.Справочник1, '
+            'Определяемый тип.ТипТест') in card
+    # у объекта, который не план обмена, такой строки нет
+    other = _call(server, 'object_card',
+                  path='Справочник.Справочник1')['content'][0]['text']
+    assert 'Состав плана обмена' not in other
 
 
 def test_object_card_names_why_a_type_is_unresolved(tmp_path_factory):
@@ -227,6 +312,16 @@ def test_find_xdto(tmp_path_factory):
     assert 'Пакет XDTO.ПакетТест — тип Товар (базовый d2p1:БазовыйТовар)' in by_type
     assert 'в пакетах XDTO ничего не найдено по «НетТакогоСвойства»' in \
         _call(server, 'find_xdto', mask='НетТакогоСвойства')['content'][0]['text']
+
+
+def test_characteristic_type_stem_is_translated():
+    # класс декодера — ChartOfCharacteristicType, в единственном числе: при
+    # множественном ключе в TYPE_RU тип печатался по-английски (и type_ru в
+    # базе оказывался равен stem), а русское имя не находило объект
+    assert mcp_server.ru_path('ChartOfCharacteristicType/Свойства') \
+        == 'План видов характеристик.Свойства'
+    assert 'ChartOfCharacteristicType' in \
+        mcp_server._RU2TYPES_LOW['планвидовхарактеристик']
 
 
 def test_path_type_is_case_insensitive(tmp_path_factory):
@@ -393,6 +488,45 @@ def test_analyze_resolves_modules_and_context(tmp_path_factory):
     assert 'серверный общий модуль' in report['context_warnings'][0]
 
 
+def test_analyze_detects_dynamic_calls(tmp_path_factory):
+    """Вычислить/Выполнить со строковыми литералами — динамические вызовы.
+
+    Анализатор должен найти строковые литералы, переданные в Вычислить() и
+    Выполнить(), и попытаться разрешить их как имена методов/модулей/объектов.
+    """
+    from confdb.bsl_analyzer import analyze
+    server = _server(tmp_path_factory)
+    code = ('Процедура Тест()\n'
+            '    Вычислить("ОбщийМодуль1.Экспортная");\n'
+            '    Вычислить("ОбщийМодуль1.Закрытая");\n'
+            '    Вычислить("ОбщийМодуль1.НетТакого");\n'
+            '    Вычислить("Справочники.Справочник1");\n'
+            '    Вычислить("Справочники.НетТакого");\n'
+            '    Вычислить("Неизвестный.Метод");\n'
+            '    Вычислить("ОбщийМодуль1");\n'
+            '    Выполнить("1 + 1");\n'
+            'КонецПроцедуры\n')
+    report = analyze(code, server.bsl_ctx())
+    dynamic = report['dynamic_calls']
+    # Литерал "1 + 1" не похож на идентификатор — не попадает
+    by_literal = {lit: (func, res) for _line, func, lit, res in dynamic}
+    assert 'ОбщийМодуль1.Экспортная' in by_literal
+    assert 'ok' in by_literal['ОбщийМодуль1.Экспортная'][1]
+    assert 'ОбщийМодуль1.Закрытая' in by_literal
+    assert 'не Экспорт' in by_literal['ОбщийМодуль1.Закрытая'][1]
+    assert 'ОбщийМодуль1.НетТакого' in by_literal
+    assert 'не найден' in by_literal['ОбщийМодуль1.НетТакого'][1]
+    assert 'Справочники.Справочник1' in by_literal
+    assert 'объект метаданных' in by_literal['Справочники.Справочник1'][1]
+    assert 'Справочники.НетТакого' in by_literal
+    assert 'не найден' in by_literal['Справочники.НетТакого'][1]
+    assert 'Неизвестный.Метод' in by_literal
+    assert 'не разрешено' in by_literal['Неизвестный.Метод'][1]
+    assert 'ОбщийМодуль1' in by_literal
+    assert 'общий модуль' in by_literal['ОбщийМодуль1'][1]
+    assert '1 + 1' not in by_literal  # не идентификатор
+
+
 def test_find_methods_searches_bodies(tmp_path_factory):
     """text ищет подстроку внутри тел методов — того, чего mask дать не может."""
     server = _server(tmp_path_factory)
@@ -414,6 +548,58 @@ def test_find_methods_body_search_ignores_case(tmp_path_factory):
         out = _call(server, 'find_methods',
                     text=needle)['content'][0]['text']
         assert 'ОбщийМодуль1' in out, needle
+
+
+def _server_no_fts(tmp_path_factory):
+    """Сервер над базой, собранной без FTS-индекса (extract --no-fts)."""
+    dump = str(tmp_path_factory.mktemp('dump'))
+    make_dump(dump)
+    db = str(tmp_path_factory.mktemp('db') / 't.sqlite')
+    write_db(dump, db, source_file='t.cf', build_fts=False)
+    return McpServer(db), db
+
+
+def test_find_methods_without_fts_falls_back_to_body_has(tmp_path_factory):
+    """Без индекса поиск по телам работает (медленно), а не молча возвращает ноль."""
+    server, _db = _server_no_fts(tmp_path_factory)
+    assert server.dbs[server.active]['fts'] is None
+    out = _call(server, 'find_methods',
+                text='Справочник.Справочник1')['content'][0]['text']
+    assert 'ОбщийМодуль1' in out
+
+
+def test_find_methods_same_result_after_late_fts_build(tmp_path_factory):
+    """Индекс, собранный позже (confdb fts), даёт ту же выдачу, что body_has."""
+    from confdb.db.writer import FTS_TABLE, build_fts_index
+    server, db = _server_no_fts(tmp_path_factory)
+    plain = _call(server, 'find_methods',
+                  text='Справочник.Справочник1')['content'][0]['text']
+    server.close_db()
+
+    build_fts_index(db)
+    server = McpServer(db)
+    assert server.dbs[server.active]['fts'] == FTS_TABLE
+    indexed = _call(server, 'find_methods',
+                    text='Справочник.Справочник1')['content'][0]['text']
+    # порядок строк без ORDER BY зависит от плана запроса — сравниваем состав
+    assert sorted(indexed.splitlines()) == sorted(plain.splitlines())
+
+
+def test_empty_fts_index_is_not_used(tmp_path_factory):
+    """Пустой индекс (сборку прервали) — не повод молча вернуть ноль."""
+    from confdb.db.writer import FTS_TABLE
+    server, db = _server_no_fts(tmp_path_factory)
+    server.close_db()
+    conn = sqlite3.connect(db)
+    conn.execute(f'CREATE VIRTUAL TABLE {FTS_TABLE} USING fts5(body, tokenize=trigram)')
+    conn.commit()
+    conn.close()
+
+    server = McpServer(db)
+    assert server.dbs[server.active]['fts'] is None
+    out = _call(server, 'find_methods',
+                text='Справочник.Справочник1')['content'][0]['text']
+    assert 'ОбщийМодуль1' in out
 
 
 def test_find_methods_path_is_a_real_filter(tmp_path_factory):

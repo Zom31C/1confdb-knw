@@ -81,6 +81,8 @@ project; it is NOT shipped inside `dist\`), one `page {"op":"get","id":…}` awa
 .venv\Scripts\python.exe -m pip install -e ".[dev]"   :: once
 test.bat                                              :: pytest
 confdb.bat extract <file.cf> --db out.db --workers 8
+confdb.bat extract <file.cf> --db out.db --no-fts      :: 2.3x faster write, no body index
+confdb.bat fts out.db                                  :: build that index later
 confdb.bat check out.db                               :: validate all SKD queries
 confdb.bat bench <file.cf>                            :: tune workers to hardware
 1confdb-knw.bat out.db                                :: MCP server (stdio)
