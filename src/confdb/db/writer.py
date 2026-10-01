@@ -886,6 +886,8 @@ def write_db(dump_dir, db_path, *, source_file=None, store_blobs=False, workers=
         # но журнал оставляем rollback (не MEMORY) — прерванная запись должна
         # откатываться к согласованному состоянию, а не оставлять «полупустой» файл
         conn.execute('PRAGMA synchronous=OFF')
+        # увеличиваем кэш страниц с 2 МБ до 256 МБ — меньше чтений с диска при вставке
+        conn.execute('PRAGMA cache_size=-262144')
         conn.executescript(SCHEMA)
         conn.execute('BEGIN')
         cur = conn.execute(
