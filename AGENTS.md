@@ -14,68 +14,64 @@ Domain glossary: 1C = Russian business-automation platform; BSL = its built-in
 (Information/Accumulation)Register=регистр, Enum=перечисление, tabular
 section=табличная часть (row table of an object).
 
+Detail is not repeated here — it lives in the project knowledge base (state3 of the root
+project; it is NOT shipped inside `dist\`), one `page {"op":"get","id":…}` away: `project`,
+`db-schema`, `mcp-server-1confdb-knw`, `extraction-pipeline`, `query-validator`,
+`tui-console`, `bsl-ls-integration`, `gotchas`, `publication-two-repos`, `test-data`,
+`metadata-extraction-gaps`, `onboarding`.
+
 ## Hard constraints
 
-- Python >= 3.9, **runtime stdlib only** (pytest is the only dev extra).
+- Python >= 3.9, **runtime stdlib only** (pytest is the only dev extra). All three venvs
+  are 3.10, so green tests do NOT prove 3.9 compatibility — check new syntax by eye.
 - Windows-oriented: `.bat` wrappers in repo root; venv in `.venv` (MS Store Python:
   `.venv\Scripts\python.exe` is a launcher, the real worker is a child process).
 - Git is available (2.55+); the project root is **not** a repo — the published
   repo lives in `dist\1confdb-knw` (remote `Zom31C/1confdb-knw`).
 - Comments, docstrings and user-facing text are in **Russian**.
-- The 885 MB test file `SmallBusinessKz_3_0_4_4_cf.cf` lives in `cf/` (or repo root);
-  never commit it; a full extract takes ~2.5 min with `--workers 8` — keep it out of
-  unit tests (tests use small synthetic fixtures).
+- The test configuration `SmallBusinessKz_3_0_4_4_cf.cf` (885 MB = 844 MiB) lives in `cf/`
+  (or repo root); never commit it and keep it out of unit tests — tests use small synthetic
+  fixtures. Full-extract timings and the `bench` tuning: page `extraction-pipeline`; ready-made
+  knowledge bases: page `test-data`.
 - Keep the decoder equivalent to `_vendor/v8unpack`; comparison helpers in `_tmp/`.
 
 ## Layout
 
 - `src/confdb/extract.py` — pipeline stages 0/1/3 (containers → inflate → decode).
 - `src/confdb/__main__.py` — CLI: `extract`, `check`, `1confdb-knw`.
-- `src/confdb/mcp_server.py` — MCP server `1confdb-knw <db…>` (24 tools, read-only;
-  self-describing: schema primer + glossary + workflow in `initialize.instructions`).
-  Multi-database: several knowledge bases open at once (main configuration +
-  extensions/data processors), each under an alias; tools take an optional `db`
-  alias parameter; `db_list`/`db_open`/`db_use`/`db_close` manage them at runtime.
-  Cross-base tools take explicit aliases instead of `db`: `compare_object(path,
-  db_left, db_right)`, `extension_diff(extension_db, base_db)`. Tool errors come
-  back categorized (`error_text`: BAD_ARGS/BAD_REQUEST/DB_LOCKED/DB_SCHEMA/
-  DB_ERROR/IO_ERROR/INTERNAL) and `SQLITE_BUSY` is retried (`call_with_retry`).
-  Transports: stdio by default; `--port N` — HTTP (Streamable HTTP `POST /mcp`,
-  legacy SSE `/sse`) for SSH-tunnel access (`ssh -L N:127.0.0.1:N`).
-- `src/confdb/tui.py` — console UI (user chose console over GUI; do not suggest
-  tkinter). In the file/db pickers a number selects a list item and ANY other
-  text is taken as a typed path (the `p` item is kept for habit).
+- `src/confdb/mcp_server.py` — MCP server `1confdb-knw <db…>`: 24 read-only tools,
+  self-describing (schema primer + glossary + workflow in `initialize.instructions`).
+  Multi-database (alias per base, optional `db` parameter, `db='*'` fan-out); cross-base tools
+  take explicit aliases (`compare_object`, `extension_diff`); errors are categorized
+  (`error_text`) and `SQLITE_BUSY` is retried (`call_with_retry`); stdio by default,
+  `--port N` for HTTP/SSE. Inventory and behaviour: page `mcp-server-1confdb-knw`.
+- `src/confdb/tui.py` — console UI (the user chose console over GUI; do not suggest tkinter).
+  In the file/db pickers a number selects a list item and ANY other text is a typed path.
+  Menus and base groups: page `tui-console`.
 - `src/confdb/bsl_parser.py` — splits BSL modules into procedures/functions.
-- `src/confdb/bsl_analyzer.py` — lexical analysis of BSL code for the MCP tools
-  (`method_dependencies`, `method_result_schema`): string/comment masking that
-  understands 1C multi-line literals with `|`, query extraction + validation via
-  `query_lang`, common-module/metadata resolution, client-vs-server context.
-  **It deliberately does NOT check module syntax** — BSL Language Server does
-  that, and it only exists in the `1confdb-knw-lsp` variant; do not add a
+- `src/confdb/bsl_analyzer.py` — lexical analysis of BSL for `method_dependencies` and
+  `method_result_schema`: string/comment masking that understands 1C multi-line literals with
+  `|`, query extraction + validation via `query_lang`, common-module/metadata resolution,
+  client-vs-server context. **It deliberately does NOT check module syntax** — BSL Language
+  Server does that, and it only exists in the `1confdb-knw-lsp` variant; do not add a
   `check_bsl`-style syntax checker here.
-- `src/confdb/header_props.py` — reads `meta_object.header_json` without
-  re-extracting: configuration version/synonym/compatibility mode/extension name
-  prefix, the kind of the loaded file, and register dimension/resource/attribute
-  collections by their canonical uuid + periodicity and write-mode flags. The
-  file kind comes from the extension of `source.file`, NOT from the root type:
-  `.erf` and `.epf` both decode into `ExternalDataProcessor`. It also reads the
-  target namespace of an XDTO package. Positions and uuids are verified facts,
-  see the `register-header-structure` and `configuration-header-props` pages of
-  the project knowledge base.
-- `src/confdb/xdto.py` — parses `XDTOPackage.bin` (plain UTF-8 XML with a BOM,
-  no binary reverse engineering) into the `xdto_*` tables: imported namespaces,
-  object/value types with base type, facets and enumeration values, properties
-  with obligatoriness/list/form, and nested anonymous types. Verified against
-  all 334 packages of the test configuration.
-- `src/confdb/compare.py` — object snapshots and cross-database diff
-  (`compare_object`, `extension_diff`); method/module bodies compared by sha1.
-- `src/confdb/query_lang.py` — 1C query language lexer/parser/semantic validator.
-- `src/confdb/db/writer.py` — SQLite schema + dump writer (batched inserts; BSL
-  parsing parallelized via `workers`).
-- `src/confdb/bench.py` — hardware benchmark: non-linear object sample (stride over
-  the whole top-level list + one object of every type) timed through stage 3 + DB
-  write at 1/2/4/8/CPU processes; best `workers` saved to `~/.confdb/config.json`
-  (`src/confdb/config.py` — shared user config, also used by the TUI).
+- `src/confdb/header_props.py` — reads `meta_object.header_json` without re-extracting:
+  configuration version/synonym/compatibility mode/extension prefix, register
+  dimension/resource/attribute collections with periodicity and write-mode flags, the target
+  namespace of an XDTO package, and the kind of the loaded file — from the extension of
+  `source.file`, NOT from the root type (`.erf` and `.epf` both decode into
+  `ExternalDataProcessor`). Verified positions and uuids: pages `register-header-structure`,
+  `configuration-header-props`.
+- `src/confdb/xdto.py` — parses `XDTOPackage.bin` (plain UTF-8 XML with a BOM) into the
+  `xdto_*` tables; verified against all 334 packages of the test configuration.
+- `src/confdb/compare.py` — object snapshots and cross-database diff (`compare_object`,
+  `extension_diff`); method/module bodies compared by sha1.
+- `src/confdb/query_lang.py` — 1C query language lexer/parser/semantic validator
+  (page `query-validator`).
+- `src/confdb/db/writer.py` — SQLite schema + dump writer (batched inserts; BSL parsing
+  parallelized via `workers`). Schema and write contracts: page `db-schema`.
+- `src/confdb/bench.py` — hardware benchmark, saves the best `workers` to
+  `~/.confdb/config.json` (`src/confdb/config.py` — shared user config, also used by the TUI).
 - `src/confdb/v8/` — ported unpack core.
 - `tests/` — fast tests (`test.bat`); `_tmp/` — throwaway probes (gitignored).
 
@@ -83,7 +79,7 @@ section=табличная часть (row table of an object).
 
 ```bat
 .venv\Scripts\python.exe -m pip install -e ".[dev]"   :: once
-test.bat                                              :: pytest (146 tests)
+test.bat                                              :: pytest
 confdb.bat extract <file.cf> --db out.db --workers 8
 confdb.bat check out.db                               :: validate all SKD queries
 confdb.bat bench <file.cf>                            :: tune workers to hardware
@@ -92,53 +88,31 @@ confdb.bat bench <file.cf>                            :: tune workers to hardwar
 .venv\Scripts\python.exe -m compileall -q src\confdb  :: static check
 ```
 
-Deployed copies used by the user: `dist\1confdb-knw` (published repo,
-remote `Zom31C/1confdb-knw`) and `dist\1confdb-knw-lsp` (BSL-LS variant,
-remote `Zom31C/1confdb-knw-lsp`). The first copy's venv executes a real
-copy in `.venv\Lib\site-packages\confdb` (no editable `.pth` despite
-`setup.bat`) — sync it too (`robocopy src\confdb <dest>\src\confdb /MIR
-/XD __pycache__` + into `site-packages` + README/bats after changing `src`).
+Deployed copies used by the user: `dist\1confdb-knw` (published repo) and
+`dist\1confdb-knw-lsp` (BSL-LS variant, remote `Zom31C/1confdb-knw-lsp`). The mainline venv
+executes a real copy in `.venv\Lib\site-packages\confdb` (no editable `.pth` despite
+`setup.bat`), so a `src` change has three destinations, not one. Sync order, what must never be
+copied from the root, and how to check a copy without pytest: page `publication-two-repos`.
 
-## Database schema (quick map)
+## Database schema
 
-- `meta_object(path, type, type_ru, name, uuid, parent_id, ord)` — path like
-  `Catalog/Контрагенты` or nested `…/CatalogForm/ФормаЭлемента`.
-- `meta_attribute(object_id, ord, name, type_str, tabular)` — fields; `tabular`
-  names the tabular section a field belongs to. `type_str`: `Строка(50)`,
-  `Ссылка: Catalog/Х`, `ОпределяемыйТип: DefinedType/Х (…)`, composites with ` | `.
-  Unresolved forms are distinct: a bare `Ссылка` is a generic platform type
-  (`ЛюбаяСсылка`, `Характеристика`) whose uuid matches no object — NOT an
-  extraction failure; `Ссылка: Имя (объект не найден в базе)` means the name is
-  known from the `.10` table but the object is not in this base; `NULL` means
-  the header carries no type description at all.
-- `meta_tabular(object_id, ord, name)`; `attribute_ref(attribute_id, uuid, object_id)`
-  — field-type → object links (joins/impact analysis).
-- `xdto_type(name, kind, base, base_ns, facets, enum_values)`,
-  `xdto_property(type_id, name, type, lower_bound, upper_bound, nillable, form,
-  extra, nested_type_id)`, `xdto_import(namespace)` — contents of XDTO packages;
-  `type_id IS NULL` marks a property the package declares outside any type.
-- `module(object_id, code_name, context, body)` — body = module text WITHOUT method
-  bodies; `method(…, kind, name, signature, directives, description, body)` —
-  body strictly `Процедура/Функция … Конец…`.
-- `enum_value`, `predefined`, `common_target`, `skd_query(query)`,
-  `subsystem_content`, `file`, `source`.
+Tables: `source`, `meta_object`, `meta_attribute`, `meta_tabular`, `attribute_ref`, `module`,
+`method`, `enum_value`, `predefined`, `common_target`, `subsystem_content`, `skd_query`,
+`xdto_import`/`xdto_type`/`xdto_property`, `file`. Column lists, the meaning of each
+`type_str` form (including the three kinds of unresolved reference), how reference uuids are
+resolved, and the SKD binary layout: page `db-schema`. Acceptance criterion for the query
+validator: **375/375** SKD queries of the test configuration pass (`confdb check`) — keep it
+green when touching `query_lang.py` / `writer.py`.
 
-## Gotchas learned the hard way
+## Gotchas
 
-- SQLite writes: keep the rollback journal; **never** `PRAGMA journal_mode=MEMORY`
-  (an interrupted write otherwise leaves a "valid-looking" near-empty file).
+The collection is the page `gotchas` (format, SQLite, Windows, MCP clients, query planner);
+proven extraction gaps and their measurements are the page `metadata-extraction-gaps`. Read
+the relevant one before changing the decoder, the writer or a query. Non-negotiable:
+
+- **Never** `PRAGMA journal_mode=MEMORY` — an interrupted write leaves a "valid-looking"
+  near-empty file.
 - The brace-file parser returns numbers as **strings** — compare via `str(x)`.
-- Field names are unique **within a tabular section**, not within an object:
-  dedup by `(section, name)`. A `seen` set shared by the whole object silently
-  dropped 2601 field records across 361 objects of the test configuration (up to
-  a third of a document's fields), and `object_card` printed the emptied sections
-  as `None: ?`.
-- Reference uuids inside type descriptors are NOT object uuids: resolved via the
-  root `.10` stream table, DefinedType headers (`header[0][1][1]`) and
-  `attribute_ref`.
-- Tabular section in a header = `[section record, '1', fields bag]` where the bag
-  starts with canonical uuid `888744e1-b616-11d4-9436-004095e12fc7`.
-- Acceptance criterion for the query validator: **375/375** SKD queries of the test
-  configuration pass (`confdb check`); keep it green when touching
-  `query_lang.py` / `writer.py`.
-- MCP server is read-only by design (`?mode=ro`, `sql` tool rejects non-SELECT).
+- Field names are unique **within a tabular section**, not within an object — dedup by
+  `(section, name)`.
+- MCP server is read-only by design (`?mode=ro`, the `sql` tool rejects non-SELECT).
