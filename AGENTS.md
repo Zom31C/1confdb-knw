@@ -88,6 +88,7 @@ confdb.bat bench <file.cf>                            :: tune workers to hardwar
 1confdb-knw.bat out.db                                :: MCP server (stdio)
 1confdb-knw.bat out.db --port 8765                    :: MCP over HTTP (SSH tunnel)
 .venv\Scripts\python.exe -m compileall -q src\confdb  :: static check
+check-sync.bat                                        :: root src/tests vs both dist copies
 ```
 
 Deployed copies used by the user: `dist\1confdb-knw` (published repo) and
@@ -99,7 +100,8 @@ copied from the root, and how to check a copy without pytest: page `publication-
 ## Database schema
 
 Tables: `source`, `meta_object`, `meta_attribute`, `meta_tabular`, `attribute_ref`, `module`,
-`method`, `enum_value`, `predefined`, `common_target`, `subsystem_content`, `skd_query`,
+`method`, `enum_value`, `predefined`, `predefined_subconto`, `common_target`,
+`subsystem_content`, `skd_query`,
 `xdto_import`/`xdto_type`/`xdto_property`, `file`. Column lists, the meaning of each
 `type_str` form (including the three kinds of unresolved reference), how reference uuids are
 resolved, and the SKD binary layout: page `db-schema`. Acceptance criterion for the query

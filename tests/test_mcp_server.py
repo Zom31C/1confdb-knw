@@ -14,7 +14,7 @@ import confdb.mcp_server as mcp_server  # noqa: E402
 from confdb.db.writer import write_db  # noqa: E402
 from confdb.mcp_server import McpServer, resolve_db, start_http_server  # noqa: E402
 
-from test_writer import make_dump  # noqa: E402
+from test_writer import make_chart_dump, make_dump  # noqa: E402
 
 
 def _server(tmp_path_factory):
@@ -167,6 +167,33 @@ def test_object_card_tabular_sections(tmp_path_factory):
     # ни одного поля — это факт, а не пробел извлечения
     assert 'Табличная часть Доставка: полей не объявлено' in card
     assert 'None' not in card
+
+
+def test_object_card_predefined_accounts(tmp_path_factory):
+    # предопределённые счета плана печатаются деревом, с видами субконто и их
+    # флагами; корневой узел «Счета» в отчёт не попадает, но входит в дерево
+    dump = str(tmp_path_factory.mktemp('dump'))
+    make_dump(dump)
+    make_chart_dump(dump)
+    db = str(tmp_path_factory.mktemp('db') / 't.sqlite')
+    write_db(dump, db, source_file='t.cf')
+    server = McpServer(db)
+    card = _call(server, 'object_card',
+                 path='ПланСчетов.ПланСчетов1')['content'][0]['text']
+    assert 'Предопределённые счета (3):' in card
+    assert '\n  01 ОсновныеСредства — Основные средства\n' in card
+    assert '\n    01.01 ОСвОрганизации — Основные средства в организации\n' in card
+    assert ('      субконто: Основные средства [Суммовой;Валютный;Количественный]'
+            in card)
+    assert ('  41 Товары\n'
+            '    субконто: Номенклатура [Суммовой;Валютный;Количественный];'
+            ' Основные средства') in card
+
+    # у справочника тот же блок называется «элементы» и идёт деревом
+    card_cat = _call(server, 'object_card',
+                     path='Справочник.Справочник1')['content'][0]['text']
+    assert 'Предопределённые элементы (1):' in card_cat
+    assert '  001 ПредЗначение — Предопределенное значение' in card_cat
 
 
 def test_object_card_sees_unextracted_tabular_fields(tmp_path_factory):
