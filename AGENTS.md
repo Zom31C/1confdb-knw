@@ -40,7 +40,9 @@ project; it is NOT shipped inside `dist\`), one `page {"op":"get","id":…}` awa
 
 ## Layout
 
-- `src/confdb/extract.py` — pipeline stages 0/1/3 (containers → inflate → decode).
+- `src/confdb/extract.py` — pipeline stages 0/1/3 (containers → inflate → decode); the work dir
+  defaults to the target's volume (`make_temp_dir`), not `%TEMP%`, and its cleanup is parallel
+  (`remove_tree`) — deleting ~125k files costs ~30 s on the system volume vs ~10 s elsewhere.
 - `src/confdb/__main__.py` — CLI: `extract`, `check`, `1confdb-knw`.
 - `src/confdb/mcp_server.py` — MCP server `1confdb-knw <db…>`: 24 read-only tools,
   self-describing (schema primer + glossary + workflow in `initialize.instructions`).
