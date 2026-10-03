@@ -33,7 +33,10 @@ project; it is NOT shipped inside `dist\`), one `page {"op":"get","id":…}` awa
   (or repo root); never commit it and keep it out of unit tests — tests use small synthetic
   fixtures. Full-extract timings and the `bench` tuning: page `extraction-pipeline`; ready-made
   knowledge bases: page `test-data`.
-- Keep the decoder equivalent to `_vendor/v8unpack`; comparison helpers in `_tmp/`.
+- `_vendor/v8unpack` is the port's origin, **not an invariant** (user decision 2026-10-03):
+  byte-identical dumps are not worth protecting — speed and completeness of the DB win.
+  Correctness = tests + `confdb check` 375/375 + DB contents; `--dump-indent` still
+  reproduces the v8unpack dump layout if a comparison is ever needed.
 
 ## Layout
 
