@@ -1,4 +1,4 @@
-# 1c-conf-db-extractor (confdb)
+# 1confdb-knw (confdb)
 
 Экстрактор конфигурации 1С:Предприятие 8 в базу данных SQLite.
 
