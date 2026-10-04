@@ -319,6 +319,8 @@ DATABASE FILE: the SQLite file is internal to the server. Do NOT search for it, 
 
 MULTIPLE DATABASES: the server can hold several knowledge bases at once — typically the MAIN configuration plus extensions/data processors (.cfe/.epf extracted into their own .db files). Each open base has an alias. All tools query the ACTIVE base; to query a specific base without switching, pass its alias as the db parameter (e.g. find_objects(mask=…, db='расш_интеграция')). Management tools: db_list (what is open, which is active), db_open (open another base file while the server runs — the path comes from the user), db_use (switch the active base), db_close. An extension usually adds/overrides objects of the main configuration — if something is not found in one base, check the other. Special db value '*': run a tool on every open base at once (the answer is sectioned per base) — one call to compare the main configuration with all extensions.
 
+CONFIGURATION GROUPS: a group bundles related databases (main configuration + extensions + data processors) as a single unit. Use groups to compare different configurations or their versions. Management tools: group_create (create an empty group), group_add_db (add an open database to a group), group_remove_db (remove a database from a group — the database itself stays open), group_list (list all groups with their databases), group_use (switch the active group), group_close (delete a group — databases are NOT closed). When you specify the group parameter in a data tool, it runs on ALL databases in that group (fan-out). Special group value '*': run on every group at once. Priority: group > db > active_group > active database. Response headers identify both the group and the database: '=== группа <имя> / база <алиас> (<путь>) ==='.
+
 DATABASE IDENTIFIER: every tool response includes a header line identifying the source database: '=== база <алиас> (<путь>) ==='. This lets you compare configurations (e.g. standard vs customized) or understand which base contains a method (main configuration vs extension). Use db='*' to query all bases at once and compare results side-by-side.
 
 COMPARING BASES: compare_object(path, db_left, db_right) diffs ONE object between two open bases in a single call — attributes and their types, tabular sections, register dimensions/resources, forms and commands, modules, methods (signature, directives, body), SKD queries. Use it for standard-vs-customized or release-to-release analysis instead of fetching two passports and diffing them by hand. extension_diff(extension_db, base_db) answers the task-level question 'what does this extension do': new objects (carrying the extension name prefix), borrowed objects, the extension methods and whether one REPLACES a stock method (&Вместо) or inserts code around it (&После/&Перед), the attributes it adds, and its external dependencies. configuration_info says WHICH configuration and release a base holds and WHAT KIND of file it came from — .cf configuration, .cfe extension, .epf external data processor, .erf external report (name, version, compatibility mode, source file, build date); db_list repeats the kind and the version in one line per open base. These three take explicit base aliases (db_left/db_right, extension_db/base_db), not the db parameter, and db='*' does not apply to them.
@@ -354,6 +356,8 @@ class McpServer:
     def __init__(self, db_paths=None):
         self.dbs = {}      # алиас -> {'path':…, 'conn':…, 'ctx':…}
         self.active = None
+        self.groups = {}   # имя_группы -> [алиас1, алиас2, ...]
+        self.active_group = None
         if isinstance(db_paths, str):
             db_paths = [db_paths]
         for path in db_paths or ():
@@ -374,12 +378,15 @@ class McpServer:
 
         Файл проверяется: должен существовать и содержать таблицу
         meta_object (база знаний confdb). Повторное открытие того же
-        файла просто возвращает прежний алиас.
+        файла без явного алиаса возвращает прежний алиас. Если alias
+        указан явно и отличается от существующего — создаётся новое
+        подключение (позволяет работать с одной базой под разными именами).
         """
         path = os.path.abspath(path)
         known = next((a for a, d in self.dbs.items()
                       if os.path.abspath(d['path']) == path), None)
-        if known is not None:
+        if known is not None and alias is None:
+            # Повторное открытие без явного алиаса — возвращаем существующий
             if activate:
                 self.active = known
             return known
@@ -472,6 +479,99 @@ class McpServer:
             'SELECT (SELECT COUNT(*) FROM meta_object), '
             '(SELECT COUNT(*) FROM module), '
             '(SELECT COUNT(*) FROM method)').fetchone()
+
+    # -- группы баз ----------------------------------------------------------
+    def create_group(self, name):
+        """Создаёт пустую группу баз. Имя группы уникально (регистр не важен)."""
+        if not name or not str(name).strip():
+            raise ValueError('имя группы не может быть пустым')
+        name = str(name).strip()
+        if name.lower() in (g.lower() for g in self.groups):
+            raise ValueError(f'группа уже существует: {name}')
+        self.groups[name] = []
+        if self.active_group is None:
+            self.active_group = name
+        return name
+
+    def add_db_to_group(self, group_name, db_alias):
+        """Добавляет базу в группу. База должна быть открыта."""
+        if not group_name or not str(group_name).strip():
+            raise ValueError('имя группы не может быть пустым')
+        group_name = str(group_name).strip()
+        # Поиск группы без учёта регистра
+        actual_group = next((g for g in self.groups if g.lower() == group_name.lower()), None)
+        if actual_group is None:
+            raise ValueError(f'группа не найдена: {group_name}')
+        alias = self._alias(db_alias)  # Проверит, что база открыта
+        if alias not in self.groups[actual_group]:
+            self.groups[actual_group].append(alias)
+        return actual_group, alias
+
+    def remove_db_from_group(self, group_name, db_alias):
+        """Убирает базу из группы. База не закрывается."""
+        if not group_name or not str(group_name).strip():
+            raise ValueError('имя группы не может быть пустым')
+        group_name = str(group_name).strip()
+        actual_group = next((g for g in self.groups if g.lower() == group_name.lower()), None)
+        if actual_group is None:
+            raise ValueError(f'группа не найдена: {group_name}')
+        alias = self._alias(db_alias)
+        if alias in self.groups[actual_group]:
+            self.groups[actual_group].remove(alias)
+        return actual_group, alias
+
+    def list_groups(self):
+        """Возвращает список групп с содержимым."""
+        result = []
+        for group_name, db_aliases in self.groups.items():
+            mark = '*' if group_name == self.active_group else ' '
+            dbs_info = []
+            for alias in db_aliases:
+                if alias in self.dbs:
+                    path = self.dbs[alias]['path']
+                    dbs_info.append(f'{alias} ({path})')
+            result.append({
+                'name': group_name,
+                'active': group_name == self.active_group,
+                'databases': dbs_info,
+                'mark': mark
+            })
+        return result
+
+    def use_group(self, group_name):
+        """Делает группу активной."""
+        if not group_name or not str(group_name).strip():
+            raise ValueError('имя группы не может быть пустым')
+        group_name = str(group_name).strip()
+        actual_group = next((g for g in self.groups if g.lower() == group_name.lower()), None)
+        if actual_group is None:
+            raise ValueError(f'группа не найдена: {group_name}')
+        self.active_group = actual_group
+        return actual_group
+
+    def close_group(self, group_name):
+        """Удаляет группу. Базы не закрываются."""
+        if not group_name or not str(group_name).strip():
+            raise ValueError('имя группы не может быть пустым')
+        group_name = str(group_name).strip()
+        actual_group = next((g for g in self.groups if g.lower() == group_name.lower()), None)
+        if actual_group is None:
+            raise ValueError(f'группа не найдена: {group_name}')
+        del self.groups[actual_group]
+        if self.active_group == actual_group:
+            self.active_group = next(iter(self.groups), None)
+        return actual_group
+
+    def get_group_dbs(self, group_name=None):
+        """Возвращает список алиасов баз в группе. None = активная группа."""
+        if group_name is None:
+            if self.active_group is None:
+                raise ValueError('нет активной группы — укажите имя группы')
+            group_name = self.active_group
+        actual_group = next((g for g in self.groups if g.lower() == str(group_name).lower()), None)
+        if actual_group is None:
+            raise ValueError(f'группа не найдена: {group_name}')
+        return self.groups[actual_group]
 
     # -- инфраструктура ----------------------------------------------------
     def conn(self, db=None):
@@ -1568,6 +1668,42 @@ class McpServer:
             return f'база {alias} закрыта; открытых баз не осталось'
         return f'база {alias} закрыта; активная: {self.active}'
 
+    # -- инструменты групп ---------------------------------------------------
+    def group_create(self, name):
+        name = self.create_group(name)
+        return f'группа создана: {name}'
+
+    def group_add_db(self, group, db):
+        group_name, alias = self.add_db_to_group(group, db)
+        return f'база {alias} добавлена в группу {group_name}'
+
+    def group_remove_db(self, group, db):
+        group_name, alias = self.remove_db_from_group(group, db)
+        return f'база {alias} удалена из группы {group_name}'
+
+    def group_list(self):
+        groups = self.list_groups()
+        if not groups:
+            return 'нет созданных групп — создайте через group_create'
+        out = []
+        for g in groups:
+            mark = g['mark']
+            out.append(f'{mark} {g["name"]} ({len(g["databases"])} баз):')
+            for db_info in g['databases']:
+                out.append(f'    {db_info}')
+        return 'Группы баз (* — активная):\n' + '\n'.join(out)
+
+    def group_use(self, group):
+        group_name = self.use_group(group)
+        dbs = self.groups[group_name]
+        return f'активная группа: {group_name} (баз: {len(dbs)})'
+
+    def group_close(self, group):
+        group_name = self.close_group(group)
+        if not self.groups:
+            return f'группа {group_name} удалена; групп не осталось'
+        return f'группа {group_name} удалена; активная: {self.active_group}'
+
 
 # Категории ошибок инструмента: клиенту нужен понятный код, а не «Unknown».
 LOCKED_RE = re.compile(r'lock|busy', re.I)
@@ -1625,8 +1761,54 @@ class Tool:
                 'inputSchema': self.schema}
 
     def run(self, server, **args):
-        if args.get('db') == '*' and 'db' in self.schema.get('properties', {}):
-            # db='*' — выполнить инструмент по всем открытым базам сразу
+        # Поддержка групп: приоритет group > db > active_group > active
+        group = args.get('group')
+        db = args.get('db')
+
+        # Инструменты управления группами не используют fan-out
+        is_group_management = self.name.startswith('group_')
+
+        # group='*' — fan-out по всем группам
+        if group == '*' and 'group' in self.schema.get('properties', {}) and not is_group_management:
+            if not server.groups:
+                raise ValueError('нет созданных групп — создайте через group_create')
+            parts = []
+            for group_name, db_aliases in server.groups.items():
+                group_parts = []
+                for alias in db_aliases:
+                    if alias in server.dbs:
+                        info = server.dbs[alias]
+                        # Убираем group из args, т.к. методы не принимают этот параметр
+                        call_args = {k: v for k, v in args.items() if k != 'group'}
+                        call_args['db'] = alias
+                        part = call_with_retry(self.fn, server, **call_args)
+                        group_parts.append(f'=== база {alias} ({info["path"]}) ===\n{part}')
+                if group_parts:
+                    parts.append(f'=== группа {group_name} ===\n' + '\n\n'.join(group_parts))
+            if not parts:
+                raise ValueError('группы не содержат открытых баз')
+            return '\n\n'.join(parts)
+
+        # Конкретная группа — fan-out по её базам
+        if group and 'group' in self.schema.get('properties', {}) and not is_group_management:
+            db_aliases = server.get_group_dbs(group)
+            if not db_aliases:
+                raise ValueError(f'группа {group} пуста — добавьте базы через group_add_db')
+            parts = []
+            for alias in db_aliases:
+                if alias in server.dbs:
+                    info = server.dbs[alias]
+                    # Убираем group из args, т.к. методы не принимают этот параметр
+                    call_args = {k: v for k, v in args.items() if k != 'group'}
+                    call_args['db'] = alias
+                    part = call_with_retry(self.fn, server, **call_args)
+                    parts.append(f'=== группа {group} / база {alias} ({info["path"]}) ===\n{part}')
+            if not parts:
+                raise ValueError(f'группа {group} не содержит открытых баз')
+            return '\n\n'.join(parts)
+
+        # db='*' — выполнить инструмент по всем открытым базам сразу
+        if db == '*' and 'db' in self.schema.get('properties', {}):
             parts = []
             for alias, info in server.dbs.items():
                 part = call_with_retry(self.fn, server, **dict(args, db=alias))
@@ -1642,7 +1824,11 @@ class Tool:
         if 'db' in self.schema.get('properties', {}):
             alias = server._alias(args.get('db'))  # разрешает None → активная база
             info = server.dbs[alias]
-            return f'=== база {alias} ({info["path"]}) ===\n{result}'
+            # Если есть активная группа и база в ней — добавляем имя группы
+            group_prefix = ''
+            if server.active_group and alias in server.groups.get(server.active_group, []):
+                group_prefix = f'группа {server.active_group} / '
+            return f'=== {group_prefix}база {alias} ({info["path"]}) ===\n{result}'
 
         return result
 
@@ -1658,6 +1844,12 @@ _DB = {'type': 'string',
                       'active one (see db_list). Omit to use the active base. '
                       "Special value '*': run the tool on EVERY open base at "
                       'once; the answer comes back sectioned per base.'}
+_GROUP = {'type': 'string',
+          'description': 'Name of the configuration group to query. A group '
+                         'bundles related databases (main config + extensions '
+                         '+ processors). When specified, the tool runs on ALL '
+                         "databases in the group. Special value '*': run on "
+                         'every group at once. Takes priority over db parameter.'}
 
 TOOLS = [
     Tool('find_objects',
@@ -1666,7 +1858,7 @@ TOOLS = [
          'English type labels. First step for anything: locate '
          'справочник/документ/регистр by its Russian name.',
          _schema({'mask': _STR, 'type': _STR,
-                  'limit': _INT, 'db': _DB}, ('mask',)),
+                  'limit': _INT, 'db': _DB, 'group': _GROUP}, ('mask',)),
          McpServer.find_objects),
     Tool('object_card',
          "Full 'passport' of one object in a single call: type, header "
@@ -1676,29 +1868,29 @@ TOOLS = [
          'EventSubscription: its event, handler module.method and source '
          'objects; for an ExchangePlan: the objects it synchronizes. '
          'Use right after find_objects.',
-         _schema({'path': _STR, 'db': _DB}, ('path',)),
+         _schema({'path': _STR, 'db': _DB, 'group': _GROUP}, ('path',)),
          McpServer.object_card),
     Tool('object_tree',
          "Browse the metadata tree 'as in the configurator' (subsystems, "
          'nested forms/commands). path empty = configuration root.',
-         _schema({'path': _STR, 'depth': _INT, 'db': _DB}),
+         _schema({'path': _STR, 'depth': _INT, 'db': _DB, 'group': _GROUP}),
          McpServer.object_tree),
     Tool('find_field',
          'Reverse search: which objects contain a field/tabular-section field '
          'with this name. Use to discover join paths between tables.',
-         _schema({'name': _STR, 'limit': _INT, 'db': _DB}, ('name',)),
+         _schema({'name': _STR, 'limit': _INT, 'db': _DB, 'group': _GROUP}, ('name',)),
          McpServer.find_field),
     Tool('refs_of',
          "Reference links of an object via attribute types: forward ('on what "
          "it references') and reverse ('who references it') — impact analysis.",
-         _schema({'path': _STR, 'direction': _STR, 'limit': _INT, 'db': _DB},
+         _schema({'path': _STR, 'direction': _STR, 'limit': _INT, 'db': _DB, 'group': _GROUP},
                  ('path',)),
          McpServer.refs_of),
     Tool('module_outline',
          'Table of contents of a 1C module: signatures, comments, #Если '
          "regions, WITHOUT method bodies. code_name: 'obj' (object module), "
          "'mgr' (manager module) etc. Cheap way to inspect a module.",
-         _schema({'path': _STR, 'code_name': _STR, 'db': _DB}, ('path',)),
+         _schema({'path': _STR, 'code_name': _STR, 'db': _DB, 'group': _GROUP}, ('path',)),
          McpServer.module_outline),
     Tool('get_method',
          'Full source of one procedure/function: signature, directives '
@@ -1706,7 +1898,7 @@ TOOLS = [
          'event-subscription handler, the answer names the subscriptions that '
          'call it — the platform calls those, so no call site exists in code. '
          'Use after find_methods/module_outline.',
-         _schema({'path': _STR, 'code_name': _STR, 'name': _STR, 'db': _DB},
+         _schema({'path': _STR, 'code_name': _STR, 'name': _STR, 'db': _DB, 'group': _GROUP},
                  ('path', 'code_name', 'name')),
          McpServer.get_method),
     Tool('find_method_context',
@@ -1716,7 +1908,7 @@ TOOLS = [
          'than get_method on a big method and the right way to pick a place '
          'to insert code. before/after = how many lines to show (default 20).',
          _schema({'path': _STR, 'code_name': _STR, 'name': _STR,
-                  'match': _STR, 'before': _INT, 'after': _INT, 'db': _DB},
+                  'match': _STR, 'before': _INT, 'after': _INT, 'db': _DB, 'group': _GROUP},
                  ('path', 'code_name', 'name')),
          McpServer.find_method_context),
     Tool('method_dependencies',
@@ -1730,7 +1922,7 @@ TOOLS = [
          'and the answer names the base each one was found in instead of just '
          'saying "not found". Use it before porting a customization to '
          'another configuration — it lists everything the code needs there.',
-         _schema({'path': _STR, 'code_name': _STR, 'name': _STR, 'db': _DB},
+         _schema({'path': _STR, 'code_name': _STR, 'name': _STR, 'db': _DB, 'group': _GROUP},
                  ('path', 'code_name', 'name')),
          McpServer.method_dependencies),
     Tool('method_result_schema',
@@ -1740,7 +1932,7 @@ TOOLS = [
          'function returns a temporary table and you need to know its columns '
          'without guessing. HEURISTIC: names built at runtime are reported as '
          'dynamic, and the answer says what it could not see.',
-         _schema({'path': _STR, 'code_name': _STR, 'name': _STR, 'db': _DB},
+         _schema({'path': _STR, 'code_name': _STR, 'name': _STR, 'db': _DB, 'group': _GROUP},
                  ('path', 'code_name', 'name')),
          McpServer.method_result_schema),
     Tool('find_methods',
@@ -1754,17 +1946,17 @@ TOOLS = [
          '(it is a real filter now). Body search is case-insensitive and scans '
          'every method, so it takes seconds on a large base.',
          _schema({'mask': _STR, 'text': _STR, 'path': _STR, 'limit': _INT,
-                  'db': _DB}),
+                  'db': _DB, 'group': _GROUP}),
          McpServer.find_methods),
     Tool('skd_of',
          'All SKD (report) queries of an object — the best examples of how '
          'THIS configuration queries its own tables.',
-         _schema({'path': _STR, 'db': _DB}, ('path',)),
+         _schema({'path': _STR, 'db': _DB, 'group': _GROUP}, ('path',)),
          McpServer.skd_of),
     Tool('find_skd',
          'Search across all SKD query texts (e.g. a table name like '
          "'РегистрНакопления.Запасы'). Returns snippets around the match.",
-         _schema({'mask': _STR, 'limit': _INT, 'db': _DB}, ('mask',)),
+         _schema({'mask': _STR, 'limit': _INT, 'db': _DB, 'group': _GROUP}, ('mask',)),
          McpServer.find_skd),
     Tool('xdto_of',
          'Contents of an XDTO package: target namespace, imported namespaces, '
@@ -1772,24 +1964,24 @@ TOOLS = [
          'attribute/element form) and nested anonymous types. This is the '
          'contract of web/HTTP services and of message-based exchange. '
          'Optional type= shows a single type.',
-         _schema({'path': _STR, 'type': _STR, 'db': _DB}, ('path',)),
+         _schema({'path': _STR, 'type': _STR, 'db': _DB, 'group': _GROUP}, ('path',)),
          McpServer.xdto_of),
     Tool('find_xdto',
          'Search type and property NAMES inside every XDTO package of the base '
          '(e.g. the field of a message an exchange contract defines). Each hit '
          'names its package and type.',
-         _schema({'mask': _STR, 'limit': _INT, 'db': _DB}, ('mask',)),
+         _schema({'mask': _STR, 'limit': _INT, 'db': _DB, 'group': _GROUP}, ('mask',)),
          McpServer.find_xdto),
     Tool('check_query',
          'Validate a 1C query: syntax (Russian keywords) + existence of '
          'tables/fields/reference chains against this configuration. ALWAYS '
          'run it on a query you wrote before using it.',
-         _schema({'text': _STR, 'db': _DB}, ('text',)),
+         _schema({'text': _STR, 'db': _DB, 'group': _GROUP}, ('text',)),
          McpServer.check_query),
     Tool('sql',
          'Read-only SELECT escape hatch for anything not covered by the '
          'dedicated tools. Non-SELECT is rejected; LIMIT 200 enforced.',
-         _schema({'query': _STR, 'db': _DB}, ('query',)),
+         _schema({'query': _STR, 'db': _DB, 'group': _GROUP}, ('query',)),
          McpServer.sql),
     Tool('compare_object',
          'Compare ONE metadata object between two open knowledge bases in a '
@@ -1824,7 +2016,7 @@ TOOLS = [
          'base was built, object/module/method counts. Call it first when you '
          'need to know WHICH configuration and which release you are looking '
          'at (e.g. before porting code between configurations).',
-         _schema({'db': _DB}),
+         _schema({'db': _DB, 'group': _GROUP}),
          McpServer.configuration_info),
     Tool('db_list',
          'List the knowledge bases open on this server: alias, file path, '
@@ -1851,6 +2043,37 @@ TOOLS = [
          'open bases keep working.',
          _schema({'alias': _STR}),
          McpServer.db_close),
+    # -- инструменты групп ---------------------------------------------------
+    Tool('group_create',
+         'Create a new configuration group. A group bundles related databases '
+         '(main configuration + extensions + data processors) as a single unit. '
+         'Use groups to compare different configurations or their versions.',
+         _schema({'name': _STR}, ('name',)),
+         McpServer.group_create),
+    Tool('group_add_db',
+         'Add an open database to a group. The database must be opened first '
+         'via db_open. A database can belong to multiple groups.',
+         _schema({'group': _STR, 'db': _STR}, ('group', 'db')),
+         McpServer.group_add_db),
+    Tool('group_remove_db',
+         'Remove a database from a group. The database itself is NOT closed.',
+         _schema({'group': _STR, 'db': _STR}, ('group', 'db')),
+         McpServer.group_remove_db),
+    Tool('group_list',
+         'List all configuration groups with their databases. * marks the '
+         'ACTIVE group that other tools query by default when group parameter '
+         'is omitted.',
+         _schema({}),
+         McpServer.group_list),
+    Tool('group_use',
+         'Switch the ACTIVE configuration group — the one all other tools '
+         'query by default when the group parameter is omitted.',
+         _schema({'group': _STR}, ('group',)),
+         McpServer.group_use),
+    Tool('group_close',
+         'Delete a configuration group. Databases in the group are NOT closed.',
+         _schema({'group': _STR}, ('group',)),
+         McpServer.group_close),
 ]
 
 

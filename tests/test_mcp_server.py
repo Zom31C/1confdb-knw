@@ -49,7 +49,9 @@ def test_tools_list(tmp_path_factory):
                      'skd_of', 'find_skd', 'xdto_of', 'find_xdto',
                      'check_query', 'sql',
                      'compare_object', 'extension_diff', 'configuration_info',
-                     'db_list', 'db_open', 'db_use', 'db_close'}
+                     'db_list', 'db_open', 'db_use', 'db_close',
+                     'group_create', 'group_add_db', 'group_remove_db',
+                     'group_list', 'group_use', 'group_close'}
     # проверку синтаксиса модулей делает BSL Language Server (1confdb-knw-lsp),
     # в mainline её быть не должно
     assert 'check_bsl' not in names
@@ -1135,3 +1137,152 @@ def test_find_db_candidates_dedup(tmp_path, monkeypatch):
     assert found == [str(tmp_path / 'a.db'),
                      str(tmp_path / 'db' / 'b.sqlite'),
                      str(tmp_path / '_out' / 'c.db')]
+
+
+# -- тесты групп конфигураций ------------------------------------------------
+
+def _get_text(result):
+    """Извлекает текст из результата вызова инструмента."""
+    if isinstance(result, dict) and 'content' in result:
+        return result['content'][0]['text']
+    return str(result)
+
+
+def test_group_create_and_list(tmp_path_factory):
+    server = _server(tmp_path_factory)
+    # Создаём группу
+    result = _call(server, 'group_create', name='тестовая группа')
+    text = _get_text(result)
+    assert 'группа создана' in text
+    assert 'тестовая группа' in text
+    # Список групп
+    groups = _call(server, 'group_list')
+    text = _get_text(groups)
+    assert 'тестовая группа' in text
+    assert '0 баз' in text
+
+
+def test_group_add_and_remove_db(tmp_path_factory):
+    server = _server(tmp_path_factory)
+    # Получаем реальный алиас базы
+    db_alias = list(server.dbs.keys())[0]
+    # Открываем ту же базу под вторым алиасом
+    db_path = server.dbs[db_alias]['path']
+    server.open_db(db_path, alias='db2')
+    # Создаём группу и добавляем базы
+    _call(server, 'group_create', name='группа1')
+    result = _call(server, 'group_add_db', group='группа1', db=db_alias)
+    text = _get_text(result)
+    assert 'добавлена в группу' in text
+    result = _call(server, 'group_add_db', group='группа1', db='db2')
+    text = _get_text(result)
+    assert 'добавлена в группу' in text
+    # Проверяем список
+    groups = _call(server, 'group_list')
+    text = _get_text(groups)
+    assert 'группа1 (2 баз)' in text
+    # Убираем одну базу
+    result = _call(server, 'group_remove_db', group='группа1', db='db2')
+    text = _get_text(result)
+    assert 'удалена из группы' in text
+    groups = _call(server, 'group_list')
+    text = _get_text(groups)
+    assert 'группа1 (1 баз)' in text
+
+
+def test_group_use(tmp_path_factory):
+    server = _server(tmp_path_factory)
+    _call(server, 'group_create', name='группа1')
+    _call(server, 'group_create', name='группа2')
+    # Первая созданная группа становится активной
+    groups = _call(server, 'group_list')
+    text = _get_text(groups)
+    assert '* группа1' in text
+    # Переключаем активную группу
+    result = _call(server, 'group_use', group='группа2')
+    text = _get_text(result)
+    assert 'активная группа: группа2' in text
+    groups = _call(server, 'group_list')
+    text = _get_text(groups)
+    assert '* группа2' in text
+
+
+def test_group_close(tmp_path_factory):
+    server = _server(tmp_path_factory)
+    _call(server, 'group_create', name='группа1')
+    _call(server, 'group_create', name='группа2')
+    result = _call(server, 'group_close', group='группа1')
+    text = _get_text(result)
+    assert 'группа группа1 удалена' in text
+    groups = _call(server, 'group_list')
+    text = _get_text(groups)
+    assert 'группа1' not in text
+    assert 'группа2' in text
+
+
+def test_group_fanout_in_tools(tmp_path_factory):
+    """Параметр group выполняет инструмент по всем базам группы."""
+    server = _server(tmp_path_factory)
+    db_alias = list(server.dbs.keys())[0]
+    # Открываем ту же базу под вторым алиасом
+    db_path = server.dbs[db_alias]['path']
+    server.open_db(db_path, alias='db2')
+    # Создаём группу с двумя базами
+    _call(server, 'group_create', name='все базы')
+    _call(server, 'group_add_db', group='все базы', db=db_alias)
+    _call(server, 'group_add_db', group='все базы', db='db2')
+    # Запрос с group — должен вернуть результаты из обеих баз
+    result = _call(server, 'find_objects', mask='Справочник', group='все базы')
+    text = _get_text(result)
+    assert 'группа все базы / база' in text
+    assert 'Справочник.Справочник1' in text
+
+
+def test_group_star_fanout(tmp_path_factory):
+    """group='*' выполняет инструмент по всем группам."""
+    server = _server(tmp_path_factory)
+    db_alias = list(server.dbs.keys())[0]
+    # Открываем ту же базу под вторым алиасом
+    db_path = server.dbs[db_alias]['path']
+    server.open_db(db_path, alias='db2')
+    # Создаём две группы
+    _call(server, 'group_create', name='группа1')
+    _call(server, 'group_add_db', group='группа1', db=db_alias)
+    _call(server, 'group_create', name='группа2')
+    _call(server, 'group_add_db', group='группа2', db='db2')
+    # Запрос с group='*'
+    result = _call(server, 'find_objects', mask='Справочник', group='*')
+    text = _get_text(result)
+    assert '=== группа группа1 ===' in text
+    assert '=== группа группа2 ===' in text
+    assert 'Справочник.Справочник1' in text
+
+
+def test_group_priority_over_db(tmp_path_factory):
+    """Параметр group имеет приоритет над db."""
+    server = _server(tmp_path_factory)
+    db_alias = list(server.dbs.keys())[0]
+    # Открываем ту же базу под вторым алиасом
+    db_path = server.dbs[db_alias]['path']
+    server.open_db(db_path, alias='db2')
+    _call(server, 'group_create', name='группа1')
+    _call(server, 'group_add_db', group='группа1', db=db_alias)
+    _call(server, 'group_add_db', group='группа1', db='db2')
+    # Указаны и group, и db — group должен победить
+    result = _call(server, 'find_objects', mask='Справочник', group='группа1', db=db_alias)
+    text = _get_text(result)
+    # Должны вернуться результаты из обеих баз группы, а не только из db
+    assert 'группа группа1 / база' in text
+
+
+def test_group_header_in_response(tmp_path_factory):
+    """Заголовки ответов идентифицируют группу при работе с группой."""
+    server = _server(tmp_path_factory)
+    db_alias = list(server.dbs.keys())[0]
+    _call(server, 'group_create', name='моя группа')
+    _call(server, 'group_add_db', group='моя группа', db=db_alias)
+    _call(server, 'group_use', group='моя группа')
+    # Запрос к активной группе
+    result = _call(server, 'find_objects', mask='Справочник')
+    text = _get_text(result)
+    assert 'группа моя группа / база' in text
