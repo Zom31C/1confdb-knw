@@ -43,6 +43,10 @@ project; it is NOT shipped inside `dist\`), one `page {"op":"get","id":…}` awa
 - `src/confdb/extract.py` — pipeline stages 0/1/3 (containers → inflate → decode); the work dir
   defaults to the target's volume (`make_temp_dir`), not `%TEMP%`, and its cleanup is parallel
   (`remove_tree`) — deleting ~125k files costs ~30 s on the system volume vs ~10 s elsewhere.
+  It also fingerprints the source file: `file_sha256` (1.7 s for 885 MB) is written to
+  `source.file_sha256`, and `check_same_source(src, db, force)` lets the CLI/TUI skip a
+  re-extraction of the very same file — old bases have no fingerprint, which reads as "unknown",
+  never as "different".
 - `src/confdb/__main__.py` — CLI: `extract`, `check`, `1confdb-knw`.
 - `src/confdb/mcp_server.py` — MCP server `1confdb-knw <db…>`: 24 read-only tools,
   self-describing (schema primer + glossary + workflow in `initialize.instructions`).
@@ -88,6 +92,7 @@ project; it is NOT shipped inside `dist\`), one `page {"op":"get","id":…}` awa
 .venv\Scripts\python.exe -m pip install -e ".[dev]"   :: once
 test.bat                                              :: pytest
 confdb.bat extract <file.cf> --db out.db --workers 8
+confdb.bat extract <file.cf> --db out.db --force       :: rebuild even if the SHA-256 matches
 confdb.bat extract <file.cf> --db out.db --no-fts      :: skip the body index (sidecar files)
 confdb.bat fts out.db --workers 8                      :: build it later: 8 shards, 7.5 s
 confdb.bat check out.db                               :: validate all SKD queries
@@ -106,7 +111,8 @@ copied from the root, and how to check a copy without pytest: page `publication-
 
 ## Database schema
 
-Tables: `source`, `meta_object`, `meta_attribute`, `meta_tabular`, `attribute_ref`, `module`,
+Tables: `source` (the file the base was built from, when, its size and SHA-256), `meta_object`,
+`meta_attribute`, `meta_tabular`, `attribute_ref`, `module`,
 `method`, `enum_value`, `predefined`, `predefined_subconto`, `common_target`,
 `subsystem_content`, `skd_query`,
 `xdto_import`/`xdto_type`/`xdto_property`, `file`. Column lists, the meaning of each
