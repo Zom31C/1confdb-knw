@@ -46,7 +46,9 @@ project; it is NOT shipped inside `dist\`), one `page {"op":"get","id":…}` awa
 - `src/confdb/__main__.py` — CLI: `extract`, `check`, `1confdb-knw`.
 - `src/confdb/mcp_server.py` — MCP server `1confdb-knw <db…>`: 24 read-only tools,
   self-describing (schema primer + glossary + workflow in `initialize.instructions`).
-  Multi-database (alias per base, optional `db` parameter, `db='*'` fan-out); cross-base tools
+  Multi-database (alias per base, optional `db` parameter, `db='*'` fan-out); the six search
+  tools page (`limit` 1..200 + `offset`; the last line names the total and the next offset —
+  `page_note`, `count_of` with a per-base cache); cross-base tools
   take explicit aliases (`compare_object`, `extension_diff`); errors are categorized
   (`error_text`) and `SQLITE_BUSY` is retried (`call_with_retry`); stdio by default,
   `--port N` for HTTP/SSE. Inventory and behaviour: page `mcp-server-1confdb-knw`.
