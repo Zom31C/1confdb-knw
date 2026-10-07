@@ -74,6 +74,11 @@ def build_parser():
                    help='адрес для HTTP-режима (по умолчанию 127.0.0.1)')
     m.add_argument('--port', type=int, default=0,
                    help='порт HTTP-режима (без него — stdio)')
+    m.add_argument('--group', action='append', default=None,
+                   metavar='ИМЯ=ПУТЬ',
+                   help='группа конфигураций (повторяемый): имя и путь к базе, '
+                        'несколько путей — через ";". Группы открываются '
+                        'одновременно и остаются раздельными')
     return parser
 
 
@@ -148,6 +153,8 @@ def main(argv=None):
         argv = list(args.db or ())
         if args.port:
             argv += ['--host', args.host, '--port', str(args.port)]
+        for spec in args.group or ():
+            argv += ['--group', spec]
         return mcp_main(argv)
 
     if args.cmd == 'bench':

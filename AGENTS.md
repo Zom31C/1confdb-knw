@@ -48,9 +48,12 @@ project; it is NOT shipped inside `dist\`), one `page {"op":"get","id":…}` awa
   re-extraction of the very same file — old bases have no fingerprint, which reads as "unknown",
   never as "different".
 - `src/confdb/__main__.py` — CLI: `extract`, `check`, `1confdb-knw`.
-- `src/confdb/mcp_server.py` — MCP server `1confdb-knw <db…>`: 24 read-only tools,
+- `src/confdb/mcp_server.py` — MCP server `1confdb-knw <db…>`: 30 read-only tools,
   self-describing (schema primer + glossary + workflow in `initialize.instructions`).
-  Multi-database (alias per base, optional `db` parameter, `db='*'` fan-out); the six search
+  Multi-database (alias per base, optional `db` parameter, `db='*'` fan-out); configuration
+  GROUPS — `--group NAME=PATH` (repeatable) opens several groups at once and keeps the
+  division explicit: `group=<name>` queries ONE group, `group='*'` all of them, and WITHOUT
+  `group` only the active base runs (`group_use` switches the active base too); the six search
   tools page (`limit` 1..200 + `offset`; the last line names the total and the next offset —
   `page_note`, `count_of` with a per-base cache); cross-base tools
   take explicit aliases (`compare_object`, `extension_diff`); errors are categorized
@@ -58,6 +61,9 @@ project; it is NOT shipped inside `dist\`), one `page {"op":"get","id":…}` awa
   `--port N` for HTTP/SSE. Inventory and behaviour: page `mcp-server-1confdb-knw`.
 - `src/confdb/tui.py` — console UI (the user chose console over GUI; do not suggest tkinter).
   In the file/db pickers a number selects a list item and ANY other text is a typed path.
+  The MCP launch selects SEVERAL base groups at once (they reach the server as `--group` in
+  stdio mode and as `McpServer(groups=…)` in network mode), and the running-server panel
+  adds / replaces all / removes / activates a group without a restart.
   Menus and base groups: page `tui-console`.
 - `src/confdb/bsl_parser.py` — splits BSL modules into procedures/functions.
 - `src/confdb/bsl_analyzer.py` — lexical analysis of BSL for `method_dependencies` and
@@ -99,6 +105,7 @@ confdb.bat check out.db                               :: validate all SKD querie
 confdb.bat bench <file.cf>                            :: tune workers to hardware
 1confdb-knw.bat out.db                                :: MCP server (stdio)
 1confdb-knw.bat out.db --port 8765                    :: MCP over HTTP (SSH tunnel)
+1confdb-knw.bat --group УНФ=unf.db --group БП=bp.db    :: several groups at once
 .venv\Scripts\python.exe -m compileall -q src\confdb  :: static check
 check-sync.bat                                        :: root src/tests vs both dist copies
 ```
