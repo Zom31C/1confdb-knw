@@ -85,8 +85,15 @@ project; it is NOT shipped inside `dist\`), one `page {"op":"get","id":…}` awa
   `extension_diff`); method/module bodies compared by sha1.
 - `src/confdb/query_lang.py` — 1C query language lexer/parser/semantic validator
   (page `query-validator`).
+- `src/confdb/rights.py` — parses the role rights file `Role/<name>/Role.0.c1brace`
+  (object rights, per-object RLS, RLS templates) for the writer; a format it does not
+  recognise raises `ValueError`, so one bad role never stops the write. The format, and
+  what a configuration does NOT hold (right names, the meaning of values): page
+  `role-rights-format`.
 - `src/confdb/db/writer.py` — SQLite schema + dump writer (batched inserts; BSL parsing
-  parallelized via `workers`). Schema and write contracts: page `db-schema`.
+  parallelized via `workers`); role rights are written after the objects and resolved
+  against object/attribute/tabular uuids (`_write_role_rights`, `_right_targets`).
+  Schema and write contracts: page `db-schema`.
 - `src/confdb/bench.py` — hardware benchmark, saves the best `workers` to
   `~/.confdb/config.json` (`src/confdb/config.py` — shared user config, also used by the TUI).
 - `src/confdb/v8/` — ported unpack core.
@@ -122,11 +129,15 @@ Tables: `source` (the file the base was built from, when, its size and SHA-256),
 `meta_attribute`, `meta_tabular`, `attribute_ref`, `module`,
 `method`, `enum_value`, `predefined`, `predefined_subconto`, `common_target`,
 `subsystem_content`, `skd_query`,
-`xdto_import`/`xdto_type`/`xdto_property`, `file`. Column lists, the meaning of each
-`type_str` form (including the three kinds of unresolved reference), how reference uuids are
-resolved, and the SKD binary layout: page `db-schema`. Acceptance criterion for the query
-validator: **375/375** SKD queries of the test configuration pass (`confdb check`) — keep it
-green when touching `query_lang.py` / `writer.py`.
+`role_right`/`role_rls_template`/`role_rights_state` (role object rights from
+`Role.0.c1brace`, sparse: no row means "the right is not set", never "denied"; a right
+targets an object, one of its attributes/fields or one of its tabular sections),
+`xdto_import`/`xdto_type`/`xdto_property`, `file`. `meta_attribute.uuid` and
+`meta_tabular.uuid` carry the sub-object ids that rights point at. Column lists, the meaning
+of each `type_str` form (including the three kinds of unresolved reference), how reference
+uuids are resolved, and the SKD binary layout: page `db-schema`. Acceptance criterion for the
+query validator: **375/375** SKD queries of the test configuration pass (`confdb check`) —
+keep it green when touching `query_lang.py` / `writer.py`.
 
 ## Gotchas
 
