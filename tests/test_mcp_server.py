@@ -2010,6 +2010,29 @@ def test_failure_note_marks_a_locked_base_as_transient():
     assert '[DB_SCHEMA]' in schema and 'можно повторить' not in schema
 
 
+def test_format_diagnostic_returns_structured_error():
+    """Единый формат диагностики: инструмент, база, ошибка, что сделать."""
+    err = sqlite3.OperationalError('no such table: role_rights_state')
+    diag = mcp_server.format_diagnostic('sql', 'test_db', err)
+    assert 'инструмент: sql' in diag
+    assert 'база: test_db' in diag
+    assert '[DB_SCHEMA]' in diag
+    assert 'что сделать:' in diag
+    assert 'пересоберите базу' in diag
+
+    # с сервером — добавляется путь
+    server = McpServer([])
+    server.dbs['mybase'] = {'path': '/path/to/db.sqlite'}
+    diag_with_path = mcp_server.format_diagnostic('find_objects', 'mybase', err, server)
+    assert 'база: mybase (/path/to/db.sqlite)' in diag_with_path
+
+    # DB_LOCKED — другая рекомендация
+    locked_err = sqlite3.OperationalError('database is locked')
+    diag_locked = mcp_server.format_diagnostic('sql', 'test_db', locked_err)
+    assert '[DB_LOCKED]' in diag_locked
+    assert 'повторите запрос' in diag_locked
+
+
 # -- потоки: соединения шардов FTS, общее соединение, temp._fts_hits ---------
 
 

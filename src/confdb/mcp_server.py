@@ -347,14 +347,14 @@ def page_note(total, offset, shown, detail=''):
 
 
 def _source_row(conn):
-    """Строка `source` базы как словарь: file, created, root_uuid, file_sha256, file_size."""
+    """Строка `source` базы как словарь: file, created, root_uuid, file_sha256, file_size, extractor_version."""
     row = conn.execute(
-        'SELECT file, created, root_uuid, file_sha256, file_size'
+        'SELECT file, created, root_uuid, file_sha256, file_size, extractor_version'
         ' FROM source ORDER BY id LIMIT 1').fetchone()
     if not row:
         return {}
     return dict(zip(('file', 'created', 'root_uuid', 'file_sha256',
-                     'file_size'), row))
+                     'file_size', 'extractor_version'), row))
 
 
 def sha_line(sha256, size=None):
@@ -402,6 +402,7 @@ DATABASE SCHEMA (for the sql tool; path columns store the legacy slash form 'Cat
 - skd_query(object_id, ord, query) — report queries in the 1C query language (Russian keywords ВЫБРАТЬ/ИЗ/ГДЕ/СОЕДИНЕНИЕ/ОБЪЕДИНИТЬ).
 - enum_value(object_id, ord, name) — enum values; predefined(object_id, ord, parent_ord, uuid, name, code, display) — predefined elements (catalog items, chart-of-accounts accounts, characteristic-chart values) in depth-first order: parent_ord is the ord of the parent, and NULL only for the root node ('Счета'/'Элементы'), which is not an element; uuid identifies the element and is what a subconto kind points at; predefined_subconto(predefined_id, ord, uuid, kind_id, flags) — the subconto kinds of a predefined account: kind_id → the predefined element of the characteristic chart that names the kind, flags = 'Суммовой;Валютный;Количественный'; common_target(common_id, target_id) — objects a common attribute is attached to; subsystem_content — subsystem composition; source(file, created, root_type/root_name/root_uuid, file_size, file_sha256) — which .cf/.cfe/.epf the base was built from, when, and the SHA-256 of that file: equal digests in two bases mean the very same source file, so nothing has to be re-extracted; file.
 - role_right(role_id, target_uuid, target_object_id, target_attr_id, target_tabular_id, sub_index, collection_uuid, target_flags, right_uuid, value, rls_text) — explicit role rights, SPARSE (no row = the right is not set); target_flags keeps the flags of the target record verbatim (their meaning is NOT confirmed — they only tell two targets sharing one uuid apart); role_rls_template(role_id, ord, name, text) — the role RLS templates; role_rights_state(role_id, version, parsed, targets, rights, rls_templates, error) — parsed=0 means the rights file could NOT be read (the reason is in error), which is not the same as a role without rights. Prefer role_rights / object_rights over querying these.
+- source(file, created, root_type/root_name/root_uuid, file_size, file_sha256, extractor_version) — which .cf/.cfe/.epf the base was built from, when, the SHA-256 of that file, and the extractor version (confdb.__version__); equal digests in two bases mean the very same source file, so nothing has to be re-extracted; file. extractor_version NULL = the base was built before revision 7 (2026-10-09).
 
 1C QUERY LANGUAGE: Russian keywords, dotted paths, table names 'Справочник.Имя', 'Документ.Имя', 'РегистрСведений.Имя', 'РегистрНакопления.Имя.Обороты' (virtual tables: Остатки, Обороты, СрезПоследних…). Grouping clause is 'СГРУППИРОВАТЬ ПО' — the form 'СГРУППИРОВАНО' does NOT exist in the 1C query language. Example: ВЫБРАТЬ Т.Запасы.Номенклатура.Наименование ИЗ Документ.ЗаказПокупателя КАК Т ГДЕ Т.Сумма > 0.
 
@@ -409,7 +410,7 @@ RECOMMENDED WORKFLOW to write a query or 1C code: 1) configuration_info to know 
 
 All tools are read-only. Prefer the dedicated tools over raw sql; use sql only for what is not covered. ANTI-LOOP: never issue more than two sql calls in a row — if sql did not answer the question, switch to the dedicated tools (find_objects, object_card, find_field, skd_of, refs_of). The schema is EXACTLY as documented above — never waste calls on PRAGMA / sqlite_master / schema guessing.
 
-SCHEMA REVISION: every base is stamped with the schema revision it was built with, and this server answers only bases of its own revision — db_list and db_open print it. A base of another revision is NOT read at all: every data tool answers 'база устарела: … --force' (or '… обновите 1confdb-knw' for a base built by a newer extractor). That is a fact about the file, not a fault of the query — do not retry with other tools or with sql, report the revision and the re-extract command to the user."""
+SCHEMA REVISION: every base is stamped with the schema revision it was built with (PRAGMA user_version) and the extractor version (source.extractor_version, revision 7+); this server answers only bases of its own revision — db_list and db_open print it, configuration_info shows both. A base of another revision is NOT read at all: every data tool answers 'база устарела: … --force' (or '… обновите 1confdb-knw' for a base built by a newer extractor). That is a fact about the file, not a fault of the query — do not retry with other tools or with sql, report the revision and the re-extract command to the user. Bases built before revision 7 (2026-10-09) have extractor_version NULL."""
 
 
 def _group_items(groups):
@@ -1153,6 +1154,36 @@ class McpServer:
                 out.append(f'База знаний собрана: {src["created"]}')
             if src.get('root_uuid'):
                 out.append(f'UUID корня: {src["root_uuid"]}')
+            # версия извлекателя: для баз до ревизии 7 (2026-10-09) будет None
+            if src.get('extractor_version'):
+                out.append(f'Версия извлекателя: {src["extractor_version"]}')
+            else:
+                out.append('Версия извлекателя: не сохранена (база собрана '
+                           'раньше, чем появился штамп; пересобрать — confdb extract --force)')
+        # ревизия схемы и доступные возможности
+        schema_rev = self.dbs[alias].get('schema', 0)
+        out.append(f'Ревизия схемы базы: {schema_rev}')
+        capabilities = []
+        conn = self.conn(db)
+        # права ролей
+        if conn.execute('SELECT name FROM sqlite_master WHERE type=? AND name=?',
+                        ('table', 'role_rights_state')).fetchone():
+            capabilities.append('права ролей')
+        # FTS по телам методов
+        if self.dbs[alias].get('fts') or self.dbs[alias].get('fts_shards'):
+            capabilities.append('FTS по телам методов')
+        # XDTO
+        if conn.execute('SELECT name FROM sqlite_master WHERE type=? AND name=?',
+                        ('table', 'xdto_import')).fetchone():
+            capabilities.append('XDTO')
+        # СКД
+        nskd_check = conn.execute('SELECT COUNT(*) FROM skd_query').fetchone()[0]
+        if nskd_check > 0:
+            capabilities.append(f'СКД ({nskd_check} запросов)')
+        if capabilities:
+            out.append('Доступные возможности: ' + ', '.join(capabilities))
+        else:
+            out.append('Доступные возможности: базовые (объекты, модули, атрибуты)')
         nobj, nmod, nmeth = self.db_stats(db)
         nskd = self.conn(db).execute(
             'SELECT COUNT(*) FROM skd_query').fetchone()[0]
@@ -2343,6 +2374,43 @@ def error_text(err):
         code = 'INTERNAL'
     detail = f'{type(err).__name__}: {err}' if code == 'INTERNAL' else str(err)
     return f'ошибка [{code}]: {detail}'
+
+
+def format_diagnostic(tool_name, alias, err, server=None):
+    """Единый формат диагностики отказа: инструмент, база, причина, что сделать.
+
+    Возвращает многострочный текст:
+      инструмент: <имя>
+      база: <алиас> (<путь>)
+      ошибка [КАТЕГОРИЯ]: <сообщение>
+      что сделать: <рекомендация>
+
+    Если server передан, добавляет путь базы. Если ошибка — schema_note,
+    добавляет команду пересборки.
+    """
+    lines = [f'инструмент: {tool_name}']
+    if server and alias in server.dbs:
+        path = server.dbs[alias]['path']
+        lines.append(f'база: {alias} ({path})')
+    else:
+        lines.append(f'база: {alias}')
+    lines.append(error_text(err))
+    # рекомендация по категории
+    if isinstance(err, sqlite3.OperationalError):
+        low = str(err).lower()
+        if LOCKED_RE.search(low):
+            lines.append('что сделать: база занята, повторите запрос через несколько секунд')
+        elif 'no such' in low:
+            lines.append('что сделать: таблица или колонка не найдена — пересоберите базу (confdb extract --force)')
+        else:
+            lines.append('что сделать: проверьте целостность базы данных')
+    elif isinstance(err, TypeError):
+        lines.append('что сделать: проверьте параметры вызова инструмента')
+    elif isinstance(err, ValueError):
+        lines.append('что сделать: проверьте запрос (алиас базы, имя объекта, синтаксис)')
+    else:
+        lines.append('что сделать: обратитесь к документации или сообщите об ошибке')
+    return '\n'.join(lines)
 
 
 # Ревизия схемы базы знаний: writer штампует её в PRAGMA user_version, сервер
