@@ -2,10 +2,10 @@
 
 ## What this project is
 
-`confdb` extracts a 1C:Enterprise 8 configuration (`.cf` / `.cfe` / `.epf`) into a
-SQLite knowledge base — metadata objects, attributes with resolved types, tabular
-sections, BSL modules/methods, SKD report queries — and serves it to LLM agents via
-the MCP server **`1confdb-knw`** (stdio, read-only). The unpack algorithm is a port of
+`confdb` extracts a 1C:Enterprise 8 configuration (`.cf` / `.cfe` / `.epf`) into a SQLite
+knowledge base — metadata objects, attributes with resolved types, tabular sections, BSL
+modules/methods, SKD report queries, role rights — and serves it to LLM agents via the MCP
+server **`1confdb-knw`** (stdio, read-only). The unpack algorithm is a port of
 [v8unpack](https://github.com/saby-integration/v8unpack) (MIT; reference copy in
 `_vendor/v8unpack`, see `NOTICE.md`). **Decode only** — never add encode/pack code.
 
@@ -14,136 +14,89 @@ Domain glossary: 1C = Russian business-automation platform; BSL = its built-in
 (Information/Accumulation)Register=регистр, Enum=перечисление, tabular
 section=табличная часть (row table of an object).
 
-Detail is not repeated here — it lives in the project knowledge base (state3 of the root
-project; it is NOT shipped inside `dist\`), one `page {"op":"get","id":…}` away: `project`,
-`db-schema`, `mcp-server-1confdb-knw`, `extraction-pipeline`, `query-validator`,
-`tui-console`, `bsl-ls-integration`, `gotchas`, `publication-two-repos`, `test-data`,
-`metadata-extraction-gaps`, `onboarding`.
+Details are not here: `page {"op":"list"}` names the knowledge-base pages (`db-schema`,
+`gotchas`, `mcp-server-1confdb-knw`, `extraction-pipeline`, `publication-two-repos`,
+`role-rights-format`, …), and `README.md` («Состав», «Схема базы данных») carries the
+module-by-module and column-by-column detail. state3 is NOT shipped inside `dist\`, so
+there README is the fallback.
 
 ## Hard constraints
 
-- Python >= 3.9, **runtime stdlib only** (pytest is the only dev extra). All three venvs
-  are 3.10, so green tests do NOT prove 3.9 compatibility — check new syntax by eye.
-- Windows-oriented: `.bat` wrappers in repo root; venv in `.venv` (MS Store Python:
-  `.venv\Scripts\python.exe` is a launcher, the real worker is a child process).
-- Git is available (2.55+); the project root is **not** a repo — the published
-  repo lives in `dist\1confdb-knw` (remote `Zom31C/1confdb-knw`).
-- Comments, docstrings and user-facing text are in **Russian**.
-- The test configuration `SmallBusinessKz_3_0_4_4_cf.cf` (885 MB = 844 MiB) lives in `cf/`
-  (or repo root); never commit it and keep it out of unit tests — tests use small synthetic
-  fixtures. Full-extract timings and the `bench` tuning: page `extraction-pipeline`; ready-made
-  knowledge bases: page `test-data`.
+- Python >= 3.9, **runtime stdlib only** (pytest is the only dev extra). All three venvs are
+  3.10, so green tests do NOT prove 3.9 compatibility — check new syntax by eye.
+- Windows-oriented: `.bat` wrappers in repo root, venv in `.venv`. Comments, docstrings and
+  user-facing text are in **Russian**.
+- The root is **not** a git repo. Published repos: `dist\1confdb-knw` (`Zom31C/1confdb-knw`)
+  and `dist\1confdb-knw-lsp` (BSL-LS variant, `Zom31C/1confdb-knw-lsp`). The mainline venv
+  executes a real copy in `.venv\Lib\site-packages\confdb`, so a `src` change has **three**
+  destinations. Sync order, and what must never be copied from the root: page
+  `publication-two-repos`.
+- `cf/SmallBusinessKz_3_0_4_4_cf.cf` (885 MB) is never committed and never used by unit
+  tests — tests run on small synthetic fixtures. Timings: page `extraction-pipeline`;
+  ready-made bases: page `test-data`.
 - `_vendor/v8unpack` is the port's origin, **not an invariant** (user decision 2026-10-03):
   byte-identical dumps are not worth protecting — speed and completeness of the DB win.
-  Correctness = tests + `confdb check` 375/375 + DB contents; `--dump-indent` still
-  reproduces the v8unpack dump layout if a comparison is ever needed.
+  Correctness = tests + `confdb check` 375/375 + DB contents.
 
 ## Layout
 
-- `src/confdb/extract.py` — pipeline stages 0/1/3 (containers → inflate → decode); the work dir
-  defaults to the target's volume (`make_temp_dir`), not `%TEMP%`, and its cleanup is parallel
-  (`remove_tree`) — deleting ~125k files costs ~30 s on the system volume vs ~10 s elsewhere.
-  It also fingerprints the source file: `file_sha256` (1.7 s for 885 MB) is written to
-  `source.file_sha256`, and `check_same_source(src, db, force)` lets the CLI/TUI skip a
-  re-extraction of the very same file — old bases have no fingerprint, which reads as "unknown",
-  never as "different".
-- `src/confdb/__main__.py` — CLI: `extract`, `check`, `1confdb-knw`.
-- `src/confdb/mcp_server.py` — MCP server `1confdb-knw <db…>`: 30 read-only tools,
-  self-describing (schema primer + glossary + workflow in `initialize.instructions`).
-  Multi-database (alias per base, optional `db` parameter, `db='*'` fan-out); configuration
-  GROUPS — `--group NAME=PATH` (repeatable) opens several groups at once and keeps the
-  division explicit: `group=<name>` queries ONE group, `group='*'` all of them, and WITHOUT
-  `group` only the active base runs (`group_use` switches the active base too); the six search
-  tools page (`limit` 1..200 + `offset`; the last line names the total and the next offset —
-  `page_note`, `count_of` with a per-base cache); cross-base tools
-  take explicit aliases (`compare_object`, `extension_diff`); errors are categorized
-  (`error_text`) and `SQLITE_BUSY` is retried (`call_with_retry`); stdio by default,
-  `--port N` for HTTP/SSE. Inventory and behaviour: page `mcp-server-1confdb-knw`.
-- `src/confdb/tui.py` — console UI (the user chose console over GUI; do not suggest tkinter).
-  In the file/db pickers a number selects a list item and ANY other text is a typed path.
-  The MCP launch selects SEVERAL base groups at once (they reach the server as `--group` in
-  stdio mode and as `McpServer(groups=…)` in network mode), and the running-server panel
-  adds / replaces all / removes / activates a group without a restart.
-  Menus and base groups: page `tui-console`.
-- `src/confdb/bsl_parser.py` — splits BSL modules into procedures/functions.
-- `src/confdb/bsl_analyzer.py` — lexical analysis of BSL for `method_dependencies` and
-  `method_result_schema`: string/comment masking that understands 1C multi-line literals with
-  `|`, query extraction + validation via `query_lang`, common-module/metadata resolution,
-  client-vs-server context. **It deliberately does NOT check module syntax** — BSL Language
-  Server does that, and it only exists in the `1confdb-knw-lsp` variant; do not add a
-  `check_bsl`-style syntax checker here.
-- `src/confdb/header_props.py` — reads `meta_object.header_json` without re-extracting:
-  configuration version/synonym/compatibility mode/extension prefix, register
-  dimension/resource/attribute collections with periodicity and write-mode flags, the target
-  namespace of an XDTO package, and the kind of the loaded file — from the extension of
-  `source.file`, NOT from the root type (`.erf` and `.epf` both decode into
-  `ExternalDataProcessor`). Verified positions and uuids: pages `register-header-structure`,
-  `configuration-header-props`.
-- `src/confdb/xdto.py` — parses `XDTOPackage.bin` (plain UTF-8 XML with a BOM) into the
-  `xdto_*` tables; verified against all 334 packages of the test configuration.
-- `src/confdb/compare.py` — object snapshots and cross-database diff (`compare_object`,
-  `extension_diff`); method/module bodies compared by sha1.
-- `src/confdb/query_lang.py` — 1C query language lexer/parser/semantic validator
-  (page `query-validator`).
-- `src/confdb/rights.py` — parses the role rights file `Role/<name>/Role.0.c1brace`
-  (object rights, per-object RLS, RLS templates) for the writer; a format it does not
-  recognise raises `ValueError`, so one bad role never stops the write. The format, and
-  what a configuration does NOT hold (right names, the meaning of values): page
-  `role-rights-format`.
-- `src/confdb/db/writer.py` — SQLite schema + dump writer (batched inserts; BSL parsing
-  parallelized via `workers`); role rights are written after the objects and resolved
-  against object/attribute/tabular uuids (`_write_role_rights`, `_right_targets`).
-  Schema and write contracts: page `db-schema`.
-- `src/confdb/bench.py` — hardware benchmark, saves the best `workers` to
-  `~/.confdb/config.json` (`src/confdb/config.py` — shared user config, also used by the TUI).
-- `src/confdb/v8/` — ported unpack core.
-- `tests/` — fast tests (`test.bat`); `_tmp/` — throwaway probes (gitignored).
+One line each; detail in README «Состав» and on the page named after it.
+
+- `extract.py` — pipeline stages 0/1/3; work dir on the target's volume; `file_sha256` +
+  `check_same_source` skip re-extracting the same file. Page `extraction-pipeline`.
+- `__main__.py` — CLI: `extract`, `check`, `fts`, `bench`, `1confdb-knw`.
+- `mcp_server.py` — the MCP server: read-only tools, multi-base plus configuration GROUPS,
+  paged search, stdio and `--port`. Page `mcp-server-1confdb-knw`.
+- `tui.py` — console UI (the user chose console over GUI; do not suggest tkinter). Page
+  `tui-console`.
+- `bsl_parser.py`, `bsl_analyzer.py` — split BSL into methods; lexical analysis for
+  dependencies and result schemas. The analyzer deliberately does **not** check module
+  syntax — that is the BSL Language Server's job, only in the `-lsp` variant; do not add a
+  `check_bsl`-style checker here. Page `bsl-ls-integration`.
+- `header_props.py` — reads `meta_object.header_json` without re-extracting. Pages
+  `register-header-structure`, `configuration-header-props`.
+- `query_lang.py` — query language lexer/parser/validator (page `query-validator`);
+  `rights.py` — `Role/<name>/Role.0.c1brace` → object rights and RLS, raising `ValueError` on
+  an unrecognised format so one bad role never stops the write (page `role-rights-format`).
+- `db/writer.py` — SQLite schema and writer: batched inserts, parallel BSL parsing, rights
+  resolved against object/attribute/tabular uuids (page `db-schema`).
+- `xdto.py`, `compare.py`, `bench.py`/`config.py` — `XDTOPackage.bin` → `xdto_*`; object
+  snapshots and cross-database diff; hardware benchmark, best `workers` in
+  `~/.confdb/config.json`.
+- `v8/` — the ported unpack core. `tests/` — fast tests (`test.bat`). `_tmp/` — throwaway
+  probes (gitignored, safe to clean).
 
 ## Commands
 
 ```bat
-.venv\Scripts\python.exe -m pip install -e ".[dev]"   :: once
 test.bat                                              :: pytest
-confdb.bat extract <file.cf> --db out.db --workers 8
-confdb.bat extract <file.cf> --db out.db --force       :: rebuild even if the SHA-256 matches
-confdb.bat extract <file.cf> --db out.db --no-fts      :: skip the body index (sidecar files)
-confdb.bat fts out.db --workers 8                      :: build it later: 8 shards, 7.5 s
-confdb.bat check out.db                               :: validate all SKD queries
-confdb.bat bench <file.cf>                            :: tune workers to hardware
-1confdb-knw.bat out.db                                :: MCP server (stdio)
-1confdb-knw.bat out.db --port 8765                    :: MCP over HTTP (SSH tunnel)
-1confdb-knw.bat --group УНФ=unf.db --group БП=bp.db    :: several groups at once
+confdb.bat extract <file.cf> --db out.db --workers 8   :: --force, --no-fts, --skip-errors
+confdb.bat check out.db                               :: validate all SKD queries (375/375)
+confdb.bat fts out.db --workers 8                      :: body index later, as sidecar shards
+1confdb-knw.bat out.db [--port 8765] [--group УНФ=unf.db --group БП=bp.db]
 .venv\Scripts\python.exe -m compileall -q src\confdb  :: static check
 check-sync.bat                                        :: root src/tests vs both dist copies
 ```
 
-Deployed copies used by the user: `dist\1confdb-knw` (published repo) and
-`dist\1confdb-knw-lsp` (BSL-LS variant, remote `Zom31C/1confdb-knw-lsp`). The mainline venv
-executes a real copy in `.venv\Lib\site-packages\confdb` (no editable `.pth` despite
-`setup.bat`), so a `src` change has three destinations, not one. Sync order, what must never be
-copied from the root, and how to check a copy without pytest: page `publication-two-repos`.
+`confdb.bat bench <file.cf>` tunes `workers` to the hardware; the rest of the CLI flags are
+in README «Использование».
 
 ## Database schema
 
-Tables: `source` (the file the base was built from, when, its size and SHA-256), `meta_object`,
-`meta_attribute`, `meta_tabular`, `attribute_ref`, `module`,
-`method`, `enum_value`, `predefined`, `predefined_subconto`, `common_target`,
-`subsystem_content`, `skd_query`,
-`role_right`/`role_rls_template`/`role_rights_state` (role object rights from
-`Role.0.c1brace`, sparse: no row means "the right is not set", never "denied"; a right
-targets an object, one of its attributes/fields or one of its tabular sections),
-`xdto_import`/`xdto_type`/`xdto_property`, `file`. `meta_attribute.uuid` and
-`meta_tabular.uuid` carry the sub-object ids that rights point at. Column lists, the meaning
-of each `type_str` form (including the three kinds of unresolved reference), how reference
-uuids are resolved, and the SKD binary layout: page `db-schema`. Acceptance criterion for the
-query validator: **375/375** SKD queries of the test configuration pass (`confdb check`) —
-keep it green when touching `query_lang.py` / `writer.py`.
+Tables: `source`, `file`, `meta_object` / `meta_attribute` / `meta_tabular`,
+`attribute_ref`, `module` / `method`, `enum_value`, `predefined` / `predefined_subconto`,
+`common_target`, `subsystem_content`, `skd_query`, `role_right` / `role_rls_template` /
+`role_rights_state`, `xdto_import` / `xdto_type` / `xdto_property`. Role rights are
+**sparse**: no row means "the right is not set", never "denied". `meta_attribute.uuid` and
+`meta_tabular.uuid` carry the sub-object ids that rights point at. Column lists, every
+`type_str` form, reference-uuid resolution and the SKD binary layout: page `db-schema` and
+README «Схема базы данных». Acceptance criterion for the query validator: **375/375** SKD
+queries pass (`confdb check`) — keep it green when touching `query_lang.py` or `writer.py`.
 
 ## Gotchas
 
-The collection is the page `gotchas` (format, SQLite, Windows, MCP clients, query planner);
-proven extraction gaps and their measurements are the page `metadata-extraction-gaps`. Read
-the relevant one before changing the decoder, the writer or a query. Non-negotiable:
+The collection is the page `gotchas`; proven extraction gaps are `metadata-extraction-gaps`.
+Read the relevant one before changing the decoder, the writer or a query. Non-negotiable:
 
 - **Never** `PRAGMA journal_mode=MEMORY` — an interrupted write leaves a "valid-looking"
   near-empty file.
