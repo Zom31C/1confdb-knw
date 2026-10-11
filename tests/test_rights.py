@@ -128,8 +128,8 @@ def test_right_name_returns_name_from_dictionary_or_none():
     # Для известных UUID right_name возвращает имя, для неизвестных — None.
     entry = parse_role_rights(
         _role([['1', OBJ, '0', '1'], ['0', R_READ, '1']])).targets[0].rights[0]
-    # R_READ = 'aa6448f2-be0f-42ea-ba26-1af7f52b5b65' теперь в словаре как 'Edit'
-    assert entry.right_name == 'Edit'
+    # R_READ = 'aa6448f2-be0f-42ea-ba26-1af7f52b5b65' теперь в словаре как 'Редактирование'
+    assert entry.right_name == 'Редактирование'
     
     # Неизвестный UUID → None
     unknown_uuid = '00000000-0000-0000-0000-000000000000'
