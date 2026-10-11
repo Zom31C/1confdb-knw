@@ -59,6 +59,7 @@ def test_tools_list(tmp_path_factory):
     names = {t['name'] for t in resp['result']['tools']}
     assert names == {'find_objects', 'object_card', 'object_tree', 'find_field',
                      'refs_of', 'role_rights', 'object_rights',
+                     'effective_rights', 'role_diff', 'role_impact',
                      'module_outline', 'get_method',
                      'find_method_context', 'method_dependencies',
                      'method_result_schema', 'find_methods',
@@ -1788,9 +1789,8 @@ def test_role_rights_names_targets_of_all_three_kinds(tmp_path_factory):
     assert 'Справочник.Справочник1, реквизит СсылкаАтрибут' in text
     # две цели с одним uuid различимы только флагами записи — флаги показаны
     assert '(флаги цели 0/0)' in text and '(флаги цели 1/1)' in text
-    # право — это uuid, а не выдуманное имя; значение — как в файле роли
+    # право — это uuid (или имя из RIGHT_NAMES, если есть); значение — как в файле роли
     assert f'{RIGHT_READ[:8]}=1' in text
-    assert 'имени права в конфигурации нет' in text
     # адресация подобъекта, текст RLS и шаблоны видны
     assert 'подобъект №-2' in text
     assert 'ГДЕ Пользователь = &ТекущийПользователь' in text
