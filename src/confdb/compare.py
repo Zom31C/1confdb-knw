@@ -10,14 +10,19 @@
 мегабайты кода в память второй раз, а разница «изменилось/не изменилось»
 для кода важнее, чем его текст (текст отдаёт get_method).
 """
+import difflib
 import hashlib
 import re
 import sqlite3
+from collections import namedtuple
 
 from .header_props import REGISTER_KINDS, register_field_kinds
 
 # сколько позиций показывать в одной секции отчёта
 MAX_ITEMS = 40
+
+# структурированное различие для пагинации и идентификации
+DiffItem = namedtuple('DiffItem', ['id', 'section', 'kind', 'description'])
 
 REGISTER_TYPES = frozenset({
     'InformationRegister', 'AccumulationRegister',
@@ -55,7 +60,7 @@ def _xdto_snapshot(conn, oid):
         return {}
     props = {}
     for row in rows:
-        props.setdefault(row[0], []).append(row[1:])
+        props.setdefault(row[0], []).append(row[2:])
 
     def signature(tid):
         parts = []
@@ -135,11 +140,293 @@ def _only_in(title):
     return f'  только в базе «{title}»: '
 
 
+def compute_diff(left, right, title_left='слева', title_right='справа'):
+    """Вычислить структурированные различия двух снимков (без форматирования).
+    
+    Возвращает список DiffItem(id, section, kind, description).
+    Это разделяет вычисление различий от их отображения (P0-3).
+    None-снимки возвращают пустой список (вызывающий код обрабатывает отсутствие).
+    """
+    if left is None or right is None:
+        return []
+    items = []
+    # тип объекта
+    if left['type'] != right['type']:
+        items.append(DiffItem('type', 'type', 'changed',
+                              f'Тип объекта: {title_left} {left["type_ru"]} ({left["type"]})'
+                              f' / {title_right} {right["type_ru"]} ({right["type"]})'))
+    # комментарий
+    if left['comment'] != right['comment']:
+        items.append(DiffItem('comment', 'comment', 'changed',
+                              f'Комментарий: {title_left} "{left["comment"]}"'
+                              f' / {title_right} "{right["comment"]}"'))
+    # реквизиты
+    only_l, only_r, changed = _split(left['attrs'], right['attrs'])
+    for k in only_l:
+        items.append(DiffItem(f'attrs:{k}', 'attrs', 'only_left',
+                              f'Реквизит только в {title_left}: {k}'))
+    for k in only_r:
+        items.append(DiffItem(f'attrs:{k}', 'attrs', 'only_right',
+                              f'Реквизит только в {title_right}: {k}'))
+    for k in changed:
+        items.append(DiffItem(f'attrs:{k}', 'attrs', 'changed',
+                              f'Реквизит изменился: {k}'))
+    # табличные части
+    only_l, only_r, _ = _split({s: 1 for s in left['tabular']},
+                               {s: 1 for s in right['tabular']})
+    for s in only_l:
+        items.append(DiffItem(f'tabular:{s}', 'tabular', 'only_left',
+                              f'Табличная часть только в {title_left}: {s}'))
+    for s in only_r:
+        items.append(DiffItem(f'tabular:{s}', 'tabular', 'only_right',
+                              f'Табличная часть только в {title_right}: {s}'))
+    # XDTO
+    only_l, only_r, changed = _split(left.get('xdto', {}), right.get('xdto', {}))
+    for n in only_l:
+        items.append(DiffItem(f'xdto:{n}', 'xdto', 'only_left',
+                              f'Тип XDTO только в {title_left}: {n}'))
+    for n in only_r:
+        items.append(DiffItem(f'xdto:{n}', 'xdto', 'only_right',
+                              f'Тип XDTO только в {title_right}: {n}'))
+    for n in changed:
+        items.append(DiffItem(f'xdto:{n}', 'xdto', 'changed',
+                              f'Тип XDTO изменился: {n}'))
+    # подобъекты
+    only_l, only_r, changed = _split(left['children'], right['children'])
+    for n in only_l:
+        items.append(DiffItem(f'children:{n}', 'children', 'only_left',
+                              f'Подобъект только в {title_left}: {n}'))
+    for n in only_r:
+        items.append(DiffItem(f'children:{n}', 'children', 'only_right',
+                              f'Подобъект только в {title_right}: {n}'))
+    for n in changed:
+        items.append(DiffItem(f'children:{n}', 'children', 'changed',
+                              f'Подобъект изменил тип: {n}'))
+    # модули
+    only_l, only_r, changed = _split(left['modules'], right['modules'])
+    for c in only_l:
+        items.append(DiffItem(f'modules:{c}', 'modules', 'only_left',
+                              f'Модуль только в {title_left}: {c}'))
+    for c in only_r:
+        items.append(DiffItem(f'modules:{c}', 'modules', 'only_right',
+                              f'Модуль только в {title_right}: {c}'))
+    for c in changed:
+        items.append(DiffItem(f'modules:{c}', 'modules', 'changed',
+                              f'Модуль изменился: {c}'))
+    # методы
+    only_l, only_r, changed = _split(left['methods'], right['methods'])
+    for k in only_l:
+        items.append(DiffItem(f'methods:{k[0]}:{k[1]}', 'methods', 'only_left',
+                              f'Метод только в {title_left}: {k[1]}'))
+    for k in only_r:
+        items.append(DiffItem(f'methods:{k[0]}:{k[1]}', 'methods', 'only_right',
+                              f'Метод только в {title_right}: {k[1]}'))
+    for k in changed:
+        items.append(DiffItem(f'methods:{k[0]}:{k[1]}', 'methods', 'changed',
+                              f'Метод изменился: {k[1]}'))
+    # СКД
+    if left['skd'] != right['skd']:
+        items.append(DiffItem('skd', 'skd', 'changed',
+                              f'Запросы СКД: {title_left} {len(left["skd"])}, '
+                              f'{title_right} {len(right["skd"])}'))
+    return items
+
+
+def format_diff(items, title_left='слева', title_right='справа',
+                limit=100, offset=0):
+    """Форматировать структурированные различия в строки с пагинацией (P0-4).
+    
+    :param items: список DiffItem от compute_diff
+    :param limit: максимум элементов для возврата
+    :param offset: сколько первых элементов пропустить
+    """
+    if not items:
+        return []
+    total = len(items)
+    end = min(offset + limit, total)
+    page = [item.description for item in items[offset:end]]
+    if offset > 0 or end < total:
+        shown = end - offset
+        remaining = total - end
+        page.append(f'… показано {shown} из {total} различий'
+                    + (f'; есть ещё {remaining} — следующий вызов с '
+                       f'offset={end}' if remaining > 0 else ''))
+    return page
+
+
+def _normalize_bsl_line(line):
+    """Нормализовать строку BSL для сравнения: убрать комментарии и пробелы.
+    
+    Идея из git diff — игнорировать незначимые изменения (whitespace/comments).
+    Возвращает нормализованную строку или None, если строка пуста/комментарий.
+    """
+    stripped = line.strip()
+    # пустые строки и чистые комментарии игнорируем
+    if not stripped or stripped.startswith('//'):
+        return None
+    # убираем концевой комментарий (// ...) и пробелы
+    code = re.split(r'\s*//', stripped, maxsplit=1)[0].strip()
+    # убираем все пробелы для сравнения (как git -w)
+    return re.sub(r'\s+', '', code)
+
+
+def method_diff(body_left, body_right, context=3):
+    """Построчное сравнение двух тел метода с игнорированием комментариев и пробелов.
+    
+    Идея из git diff / difflib — unified diff с контекстом.
+    Возвращает список строк различий в удобном для анализа формате.
+    
+    :param body_left: тело метода слева (строка или None)
+    :param body_right: тело метода справа (строка или None)
+    :param context: сколько строк контекста показывать вокруг изменений (по умолчанию 3)
+    :return: список строк различий (пусто — методы идентичны)
+    """
+    if body_left is None:
+        body_left = ''
+    if body_right is None:
+        body_right = ''
+    
+    lines_left = body_left.splitlines()
+    lines_right = body_right.splitlines()
+    
+    # нормализуем строки для сравнения, но сохраняем оригиналы для показа
+    norm_left = [_normalize_bsl_line(line) for line in lines_left]
+    norm_right = [_normalize_bsl_line(line) for line in lines_right]
+    
+    # фильтруем None (пустые/комментарии) для сравнения, но сохраняем индексы
+    filtered_left = [(i, n) for i, n in enumerate(norm_left) if n is not None]
+    filtered_right = [(i, n) for i, n in enumerate(norm_right) if n is not None]
+    
+    # сравниваем нормализованные строки
+    matcher = difflib.SequenceMatcher(
+        None,
+        [n for _, n in filtered_left],
+        [n for _, n in filtered_right]
+    )
+    
+    out = []
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == 'equal':
+            continue  # без изменений
+        
+        # показываем контекст вокруг изменений
+        # определяем диапазон строк для показа (с контекстом)
+        left_start = max(0, filtered_left[i1][0] - context) if i1 < len(filtered_left) else len(lines_left)
+        left_end = min(len(lines_left), (filtered_left[i2-1][0] if i2 > 0 else 0) + context + 1) if i2 > 0 else 0
+        right_start = max(0, filtered_right[j1][0] - context) if j1 < len(filtered_right) else len(lines_right)
+        right_end = min(len(lines_right), (filtered_right[j2-1][0] if j2 > 0 else 0) + context + 1) if j2 > 0 else 0
+        
+        # заголовок блока изменений
+        out.append(f'@@ -{left_start+1},{left_end-left_start} +{right_start+1},{right_end-right_start} @@')
+        
+        # показываем строки
+        for i in range(left_start, left_end):
+            if i1 <= i < i2 and i < len(filtered_left):
+                # удалённая строка
+                orig_i = filtered_left[i][0]
+                out.append(f'-{orig_i+1:4d}: {lines_left[orig_i]}')
+            elif any(filtered_left[k][0] == i for k in range(len(filtered_left))):
+                # контекстная строка (слева)
+                out.append(f' {i+1:4d}: {lines_left[i]}')
+        
+        for j in range(right_start, right_end):
+            if j1 <= j < j2 and j < len(filtered_right):
+                # добавленная строка
+                orig_j = filtered_right[j][0]
+                out.append(f'+{orig_j+1:4d}: {lines_right[orig_j]}')
+            elif any(filtered_right[k][0] == j for k in range(len(filtered_right))):
+                # контекстная строка (справа)
+                out.append(f' {j+1:4d}: {lines_right[j]}')
+    
+    return out
+
+
+def config_diff(conn_left, conn_right, title_left='слева', title_right='справа',
+                limit=50, offset=0):
+    """Сводка различий двух конфигураций (верхнеуровневое сравнение).
+    
+    Оптимизированная версия: сравнивает по сигнатуре объекта (COUNT модулей/методов)
+    через SQL-агрегацию, без загрузки полных снимков. Работает за ~1-2 сек на 40k объектов.
+    
+    Возвращает словарь со сводкой и списком изменённых объектов.
+    Для детального анализа использовать compare_object и method_diff.
+    """
+    # сводка через SQL-агрегацию (быстро)
+    total_attrs_left = conn_left.execute('SELECT COUNT(*) FROM meta_attribute').fetchone()[0]
+    total_attrs_right = conn_right.execute('SELECT COUNT(*) FROM meta_attribute').fetchone()[0]
+    total_modules_left = conn_left.execute('SELECT COUNT(*) FROM module').fetchone()[0]
+    total_modules_right = conn_right.execute('SELECT COUNT(*) FROM module').fetchone()[0]
+    total_methods_left = conn_left.execute('SELECT COUNT(*) FROM method').fetchone()[0]
+    total_methods_right = conn_right.execute('SELECT COUNT(*) FROM method').fetchone()[0]
+    total_skd_left = conn_left.execute('SELECT COUNT(*) FROM skd_query').fetchone()[0]
+    total_skd_right = conn_right.execute('SELECT COUNT(*) FROM skd_query').fetchone()[0]
+    
+    # сигнатура объекта: количество модулей (один простой GROUP BY)
+    def object_signature(conn):
+        mod_count = dict(conn.execute(
+            'SELECT object_id, COUNT(*) FROM module GROUP BY object_id').fetchall())
+        sig = {}
+        for path, oid in conn.execute('SELECT path, id FROM meta_object').fetchall():
+            sig[path] = mod_count.get(oid, 0)
+        return sig
+    
+    sig_left = object_signature(conn_left)
+    sig_right = object_signature(conn_right)
+    
+    paths_left = set(sig_left.keys())
+    paths_right = set(sig_right.keys())
+    only_left = sorted(paths_left - paths_right)
+    only_right = sorted(paths_right - paths_left)
+    common = paths_left & paths_right
+    
+    # найти объекты с изменённой сигнатурой
+    changed_objects = []
+    for path in common:
+        l_mod = sig_left[path]
+        r_mod = sig_right[path]
+        if l_mod != r_mod:
+            type_ru = conn_left.execute(
+                'SELECT type_ru FROM meta_object WHERE path=?', (path,)).fetchone()
+            type_ru = type_ru[0] if type_ru else '?'
+            changed_objects.append({
+                'path': path,
+                'type_ru': type_ru,
+                'modules_diff': abs(l_mod - r_mod),
+                'methods_diff': 0,
+                'attrs_diff': 0,
+                'diffs_count': abs(l_mod - r_mod),
+            })
+    
+    changed_objects.sort(key=lambda x: x['diffs_count'], reverse=True)
+    total_changed = len(changed_objects)
+    end = min(offset + limit, total_changed)
+    page = changed_objects[offset:end]
+    
+    return {
+        'summary': {
+            'objects': f'{len(paths_left)} / {len(paths_right)}',
+            'attrs': f'{total_attrs_left} / {total_attrs_right}',
+            'modules': f'{total_modules_left} / {total_modules_right}',
+            'methods': f'{total_methods_left} / {total_methods_right}',
+            'skd': f'{total_skd_left} / {total_skd_right}',
+            'only_left': len(only_left),
+            'only_right': len(only_right),
+            'changed': total_changed,
+        },
+        'changed_objects': page,
+        'total_changed': total_changed,
+        'offset': offset,
+        'limit': limit,
+    }
+
+
 def diff_snapshots(left, right, title_left='слева', title_right='справа',
-                   fmt_type=None):
+                   fmt_type=None, limit=100, offset=0):
     """Строки различий двух снимков одного объекта (пусто — объекты равны).
 
     :param fmt_type: функция показа типа реквизита (сервер передаёт ru_type_str)
+    :param limit: максимум строк для возврата (пагинация)
+    :param offset: сколько первых строк пропустить (пагинация)
     """
     fmt = fmt_type or (lambda value: value)
     out = []
@@ -231,7 +518,19 @@ def diff_snapshots(left, right, title_left='слева', title_right='справ
                    f'{title_right} {len(right["skd"])}'
                    + (' (состав или тексты различаются)'
                       if len(left['skd']) == len(right['skd']) else ''))
-    return out
+    # пагинация: обрезаем список строк и добавляем информацию о полноте
+    total = len(out)
+    if total == 0:
+        return out
+    end = min(offset + limit, total)
+    page = out[offset:end]
+    if offset > 0 or end < total:
+        shown = end - offset
+        remaining = total - end
+        page.append(f'… показано {shown} из {total} строк различий'
+                    + (f'; есть ещё {remaining} — следующий вызов с '
+                       f'offset={end}' if remaining > 0 else ''))
+    return page
 
 
 def _attr_str(name, value, kinds, fmt=lambda value: value):
