@@ -16,6 +16,7 @@ import re
 import sqlite3
 from collections import namedtuple
 
+from .bsl_analyzer import scan
 from .header_props import REGISTER_KINDS, register_field_kinds
 
 # сколько позиций показывать в одной секции отчёта
@@ -127,217 +128,460 @@ def _split(left, right):
     return only_left, only_right, changed
 
 
-def _list(items, fmt, limit=MAX_ITEMS):
-    """Список строк с обрезкой: '…' + сколько ещё не показано."""
-    lines = [fmt(k) for k in items[:limit]]
-    if len(items) > limit:
-        lines.append(f'… и ещё {len(items) - limit}')
-    return lines
-
-
 def _only_in(title):
     """Подпись «только в базе X»: алиас базы произвольный, склонять его нельзя."""
     return f'  только в базе «{title}»: '
 
 
-def compute_diff(left, right, title_left='слева', title_right='справа'):
-    """Вычислить структурированные различия двух снимков (без форматирования).
-    
-    Возвращает список DiffItem(id, section, kind, description).
-    Это разделяет вычисление различий от их отображения (P0-3).
-    None-снимки возвращают пустой список (вызывающий код обрабатывает отсутствие).
+def compute_diff(left, right, title_left='слева', title_right='справа',
+                 fmt_type=None):
+    """Вычислить структурированные различия двух снимков — единый источник.
+
+    Возвращает список DiffItem(id, section, kind, description) БЕЗ обрезки:
+    полноту выдачи обеспечивает пагинация format_diff, а не отброшенные
+    элементы. None-снимки возвращают пустой список (вызывающий код сообщает
+    об отсутствии объекта сам).
+
+    :param fmt_type: функция показа типа реквизита (сервер передаёт ru_type_str)
     """
     if left is None or right is None:
         return []
+    fmt = fmt_type or (lambda value: value)
     items = []
-    # тип объекта
+
+    def add(item_id, section, kind, description):
+        items.append(DiffItem(item_id, section, kind, description))
+
+    # тип объекта и комментарий
     if left['type'] != right['type']:
-        items.append(DiffItem('type', 'type', 'changed',
-                              f'Тип объекта: {title_left} {left["type_ru"]} ({left["type"]})'
-                              f' / {title_right} {right["type_ru"]} ({right["type"]})'))
-    # комментарий
+        add('type', 'type', 'changed',
+            f'Тип объекта: {title_left} {left["type_ru"]} ({left["type"]})'
+            f' / {title_right} {right["type_ru"]} ({right["type"]})')
     if left['comment'] != right['comment']:
-        items.append(DiffItem('comment', 'comment', 'changed',
-                              f'Комментарий: {title_left} "{left["comment"]}"'
-                              f' / {title_right} "{right["comment"]}"'))
-    # реквизиты
+        add('comment', 'comment', 'changed',
+            f'Комментарий: {title_left} "{left["comment"]}"'
+            f' / {title_right} "{right["comment"]}"')
+    # реквизиты и поля табличных частей
     only_l, only_r, changed = _split(left['attrs'], right['attrs'])
     for k in only_l:
-        items.append(DiffItem(f'attrs:{k}', 'attrs', 'only_left',
-                              f'Реквизит только в {title_left}: {k}'))
+        add(f'attrs:{k}', 'attrs', 'only_left',
+            _only_in(title_left)
+            + _attr_str(k, left['attrs'][k], left['kinds'], fmt))
     for k in only_r:
-        items.append(DiffItem(f'attrs:{k}', 'attrs', 'only_right',
-                              f'Реквизит только в {title_right}: {k}'))
-    for k in changed:
-        items.append(DiffItem(f'attrs:{k}', 'attrs', 'changed',
-                              f'Реквизит изменился: {k}'))
+        add(f'attrs:{k}', 'attrs', 'only_right',
+            _only_in(title_right)
+            + _attr_str(k, right['attrs'][k], right['kinds'], fmt))
+    for key in changed:
+        lt, lb = left['attrs'][key]
+        rt, rb = right['attrs'][key]
+        bits = []
+        if lt != rt:
+            bits.append(f'тип {fmt(lt) or "?"} -> {fmt(rt) or "?"}')
+        if lb != rb:
+            bits.append(f'секция {lb or "—"} -> {rb or "—"}')
+        lk, rk = left['kinds'].get(key), right['kinds'].get(key)
+        if lk != rk:
+            bits.append(f'группа {lk or "?"} -> {rk or "?"}')
+        add(f'attrs:{key}', 'attrs', 'changed',
+            f'  отличается {key}: ' + '; '.join(bits))
     # табличные части
     only_l, only_r, _ = _split({s: 1 for s in left['tabular']},
                                {s: 1 for s in right['tabular']})
     for s in only_l:
-        items.append(DiffItem(f'tabular:{s}', 'tabular', 'only_left',
-                              f'Табличная часть только в {title_left}: {s}'))
+        add(f'tabular:{s}', 'tabular', 'only_left', _only_in(title_left) + s)
     for s in only_r:
-        items.append(DiffItem(f'tabular:{s}', 'tabular', 'only_right',
-                              f'Табличная часть только в {title_right}: {s}'))
-    # XDTO
+        add(f'tabular:{s}', 'tabular', 'only_right', _only_in(title_right) + s)
+    # типы XDTO-пакета
     only_l, only_r, changed = _split(left.get('xdto', {}), right.get('xdto', {}))
     for n in only_l:
-        items.append(DiffItem(f'xdto:{n}', 'xdto', 'only_left',
-                              f'Тип XDTO только в {title_left}: {n}'))
+        add(f'xdto:{n}', 'xdto', 'only_left', _only_in(title_left) + n)
     for n in only_r:
-        items.append(DiffItem(f'xdto:{n}', 'xdto', 'only_right',
-                              f'Тип XDTO только в {title_right}: {n}'))
-    for n in changed:
-        items.append(DiffItem(f'xdto:{n}', 'xdto', 'changed',
-                              f'Тип XDTO изменился: {n}'))
-    # подобъекты
+        add(f'xdto:{n}', 'xdto', 'only_right', _only_in(title_right) + n)
+    for name in changed:
+        lbase, lsha = left['xdto'][name]
+        rbase, rsha = right['xdto'][name]
+        bits = []
+        if lbase != rbase:
+            bits.append(f'базовый тип {lbase or "—"} -> {rbase or "—"}')
+        if lsha != rsha:
+            bits.append('состав свойств, ограничения или значения изменились')
+        add(f'xdto:{name}', 'xdto', 'changed',
+            f'  отличается {name}: ' + '; '.join(bits))
+    # формы, команды и прочие подобъекты
     only_l, only_r, changed = _split(left['children'], right['children'])
     for n in only_l:
-        items.append(DiffItem(f'children:{n}', 'children', 'only_left',
-                              f'Подобъект только в {title_left}: {n}'))
+        add(f'children:{n}', 'children', 'only_left', _only_in(title_left) + n)
     for n in only_r:
-        items.append(DiffItem(f'children:{n}', 'children', 'only_right',
-                              f'Подобъект только в {title_right}: {n}'))
+        add(f'children:{n}', 'children', 'only_right', _only_in(title_right) + n)
     for n in changed:
-        items.append(DiffItem(f'children:{n}', 'children', 'changed',
-                              f'Подобъект изменил тип: {n}'))
+        add(f'children:{n}', 'children', 'changed',
+            f'  другой тип: {n} ({left["children"][n]} -> {right["children"][n]})')
     # модули
     only_l, only_r, changed = _split(left['modules'], right['modules'])
     for c in only_l:
-        items.append(DiffItem(f'modules:{c}', 'modules', 'only_left',
-                              f'Модуль только в {title_left}: {c}'))
+        add(f'modules:{c}', 'modules', 'only_left',
+            _only_in(title_left) + f'{c} ({left["modules"][c][2]} симв.)')
     for c in only_r:
-        items.append(DiffItem(f'modules:{c}', 'modules', 'only_right',
-                              f'Модуль только в {title_right}: {c}'))
-    for c in changed:
-        items.append(DiffItem(f'modules:{c}', 'modules', 'changed',
-                              f'Модуль изменился: {c}'))
+        add(f'modules:{c}', 'modules', 'only_right',
+            _only_in(title_right) + f'{c} ({right["modules"][c][2]} симв.)')
+    for code in changed:
+        lctx, lsha, llen = left['modules'][code]
+        rctx, rsha, rlen = right['modules'][code]
+        bits = []
+        if lctx != rctx:
+            bits.append(f'контекст {lctx or "—"} -> {rctx or "—"}')
+        if lsha != rsha:
+            bits.append(f'текст изменился ({llen} -> {rlen} симв.)')
+        add(f'modules:{code}', 'modules', 'changed',
+            f'  отличается {code}: ' + '; '.join(bits))
     # методы
     only_l, only_r, changed = _split(left['methods'], right['methods'])
     for k in only_l:
-        items.append(DiffItem(f'methods:{k[0]}:{k[1]}', 'methods', 'only_left',
-                              f'Метод только в {title_left}: {k[1]}'))
+        add(f'methods:{k[0]}:{k[1]}', 'methods', 'only_left',
+            _only_in(title_left) + _method_str(k, left['methods'][k]))
     for k in only_r:
-        items.append(DiffItem(f'methods:{k[0]}:{k[1]}', 'methods', 'only_right',
-                              f'Метод только в {title_right}: {k[1]}'))
-    for k in changed:
-        items.append(DiffItem(f'methods:{k[0]}:{k[1]}', 'methods', 'changed',
-                              f'Метод изменился: {k[1]}'))
-    # СКД
+        add(f'methods:{k[0]}:{k[1]}', 'methods', 'only_right',
+            _only_in(title_right) + _method_str(k, right['methods'][k]))
+    for key in changed:
+        lname, lkind, lsig, lexp, ldirs, lsha = left['methods'][key]
+        _rname, rkind, rsig, rexp, rdirs, rsha = right['methods'][key]
+        bits = []
+        if lsig != rsig:
+            bits.append(f'сигнатура ({lsig}) -> ({rsig})')
+        if lkind != rkind:
+            bits.append(f'{lkind} -> {rkind}')
+        if lexp != rexp:
+            bits.append('Экспорт' if rexp else 'без Экспорт')
+        if ldirs != rdirs:
+            bits.append(f'директивы [{ldirs or "—"}] -> [{rdirs or "—"}]')
+        if lsha != rsha:
+            bits.append('тело изменилось')
+        add(f'methods:{key[0]}:{key[1]}', 'methods', 'changed',
+            f'  отличается {key[0]}.{lname}: ' + '; '.join(bits))
+    # запросы СКД
     if left['skd'] != right['skd']:
-        items.append(DiffItem('skd', 'skd', 'changed',
-                              f'Запросы СКД: {title_left} {len(left["skd"])}, '
-                              f'{title_right} {len(right["skd"])}'))
+        add('skd', 'skd', 'changed',
+            f'Запросы СКД: {title_left} {len(left["skd"])}, '
+            f'{title_right} {len(right["skd"])}'
+            + (' (состав или тексты различаются)'
+               if len(left['skd']) == len(right['skd']) else ''))
     return items
 
 
-def format_diff(items, title_left='слева', title_right='справа',
-                limit=100, offset=0):
-    """Форматировать структурированные различия в строки с пагинацией (P0-4).
-    
-    :param items: список DiffItem от compute_diff
-    :param limit: максимум элементов для возврата
-    :param offset: сколько первых элементов пропустить
+def format_diff(items, limit=100, offset=0):
+    """Страница описаний DiffItem с отметкой полноты.
+
+    Пагинация — единственный механизм обрезки: объединение всех страниц
+    содержит каждое различие ровно один раз, а футер сообщает, как получить
+    продолжение.
     """
-    if not items:
-        return []
+    limit = max(1, int(limit))
+    offset = max(0, int(offset))
     total = len(items)
+    if not total:
+        return []
+    if offset >= total:
+        return [f'offset={offset} за пределами списка: всего различий '
+                f'{total} — повторите с offset=0']
     end = min(offset + limit, total)
     page = [item.description for item in items[offset:end]]
     if offset > 0 or end < total:
-        shown = end - offset
         remaining = total - end
-        page.append(f'… показано {shown} из {total} различий'
+        page.append(f'… показано {offset + 1}–{end} из {total} различий'
                     + (f'; есть ещё {remaining} — следующий вызов с '
-                       f'offset={end}' if remaining > 0 else ''))
+                       f'offset={end}' if remaining
+                       else '; это все различия'))
     return page
 
 
-def _normalize_bsl_line(line):
-    """Нормализовать строку BSL для сравнения: убрать комментарии и пробелы.
-    
-    Идея из git diff — игнорировать незначимые изменения (whitespace/comments).
-    Возвращает нормализованную строку или None, если строка пуста/комментарий.
-    """
-    stripped = line.strip()
-    # пустые строки и чистые комментарии игнорируем
-    if not stripped or stripped.startswith('//'):
-        return None
-    # убираем концевой комментарий (// ...) и пробелы
-    code = re.split(r'\s*//', stripped, maxsplit=1)[0].strip()
-    # убираем все пробелы для сравнения (как git -w)
-    return re.sub(r'\s+', '', code)
+RE_PARAM_ZNACH = re.compile(r'^знач\s+', re.IGNORECASE)
 
 
-def method_diff(body_left, body_right, context=3):
-    """Построчное сравнение двух тел метода с игнорированием комментариев и пробелов.
-    
-    Идея из git diff / difflib — unified diff с контекстом.
-    Возвращает список строк различий в удобном для анализа формате.
-    
-    :param body_left: тело метода слева (строка или None)
-    :param body_right: тело метода справа (строка или None)
-    :param context: сколько строк контекста показывать вокруг изменений (по умолчанию 3)
-    :return: список строк различий (пусто — методы идентичны)
+def normalized_lines(text):
+    """Построчная нормализация BSL для сравнения: лексический разбор, не regex.
+
+    Комментарии убираются, пробелы вне литералов убираются; строковые литералы
+    (включая многострочные с '|') и препроцессор сохраняются как есть — разные
+    литералы не должны сравниваться как равные. Возвращает список той же длины,
+    что и text.splitlines(): нормализованная строка либо None для пустой
+    строки/чистого комментария.
     """
-    if body_left is None:
-        body_left = ''
-    if body_right is None:
-        body_right = ''
-    
-    lines_left = body_left.splitlines()
-    lines_right = body_right.splitlines()
-    
-    # нормализуем строки для сравнения, но сохраняем оригиналы для показа
-    norm_left = [_normalize_bsl_line(line) for line in lines_left]
-    norm_right = [_normalize_bsl_line(line) for line in lines_right]
-    
-    # фильтруем None (пустые/комментарии) для сравнения, но сохраняем индексы
-    filtered_left = [(i, n) for i, n in enumerate(norm_left) if n is not None]
-    filtered_right = [(i, n) for i, n in enumerate(norm_right) if n is not None]
-    
-    # сравниваем нормализованные строки
-    matcher = difflib.SequenceMatcher(
-        None,
-        [n for _, n in filtered_left],
-        [n for _, n in filtered_right]
-    )
-    
+    text = text or ''
+    masked, literals = scan(text)
+    in_lit = bytearray(len(text))
+    for start, end, _value in literals:
+        in_lit[start:end] = b'\1' * (end - start)
     out = []
-    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-        if tag == 'equal':
-            continue  # без изменений
-        
-        # показываем контекст вокруг изменений
-        # определяем диапазон строк для показа (с контекстом)
-        left_start = max(0, filtered_left[i1][0] - context) if i1 < len(filtered_left) else len(lines_left)
-        left_end = min(len(lines_left), (filtered_left[i2-1][0] if i2 > 0 else 0) + context + 1) if i2 > 0 else 0
-        right_start = max(0, filtered_right[j1][0] - context) if j1 < len(filtered_right) else len(lines_right)
-        right_end = min(len(lines_right), (filtered_right[j2-1][0] if j2 > 0 else 0) + context + 1) if j2 > 0 else 0
-        
-        # заголовок блока изменений
-        out.append(f'@@ -{left_start+1},{left_end-left_start} +{right_start+1},{right_end-right_start} @@')
-        
-        # показываем строки
-        for i in range(left_start, left_end):
-            if i1 <= i < i2 and i < len(filtered_left):
-                # удалённая строка
-                orig_i = filtered_left[i][0]
-                out.append(f'-{orig_i+1:4d}: {lines_left[orig_i]}')
-            elif any(filtered_left[k][0] == i for k in range(len(filtered_left))):
-                # контекстная строка (слева)
-                out.append(f' {i+1:4d}: {lines_left[i]}')
-        
-        for j in range(right_start, right_end):
-            if j1 <= j < j2 and j < len(filtered_right):
-                # добавленная строка
-                orig_j = filtered_right[j][0]
-                out.append(f'+{orig_j+1:4d}: {lines_right[orig_j]}')
-            elif any(filtered_right[k][0] == j for k in range(len(filtered_right))):
-                # контекстная строка (справа)
-                out.append(f' {j+1:4d}: {lines_right[j]}')
-    
+    cur = []
+    for i, ch in enumerate(text):
+        if ch == '\n':
+            out.append(''.join(cur).strip() or None)
+            cur = []
+        elif in_lit[i]:
+            cur.append(ch)
+        elif masked[i] == ' ' and ch != ' ':
+            continue  # символ комментария
+        elif not ch.isspace():
+            cur.append(ch)
+    if text and not text.endswith('\n'):
+        out.append(''.join(cur).strip() or None)
+    return out
+
+
+def _declaration_end(body):
+    """Индекс последней строки объявления метода (до закрывающей скобки).
+
+    Скобки считаются по маскированному тексту — литералы и комментарии не
+    мешают. -1, если объявление не найдено (битый источник): тело целиком
+    считается исполняемым текстом.
+    """
+    masked, _literals = scan(body or '')
+    depth = 0
+    seen_open = False
+    for idx, line in enumerate(masked.splitlines()):
+        for ch in line:
+            if ch == '(':
+                depth += 1
+                seen_open = True
+            elif ch == ')':
+                depth -= 1
+        if seen_open and depth <= 0:
+            return idx
+    return -1
+
+
+def split_params_full(signature):
+    """[(имя, значение по умолчанию или None)] — разбор сигнатуры по запятым.
+
+    В отличие от bsl_analyzer.split_params сохраняет значения по умолчанию:
+    diff метода обязан показывать их изменение отдельно.
+    """
+    parts = []
+    depth = 0
+    in_str = False
+    cur = []
+    for ch in signature or '':
+        if ch == '"':
+            in_str = not in_str
+        if not in_str:
+            if ch in '([':
+                depth += 1
+            elif ch in ')]':
+                depth -= 1
+            elif ch == ',' and depth == 0:
+                parts.append(''.join(cur))
+                cur = []
+                continue
+        cur.append(ch)
+    if cur:
+        parts.append(''.join(cur))
+    out = []
+    for raw in parts:
+        text = raw.strip()
+        if not text:
+            continue
+        name, sep, default = text.partition('=')
+        name = RE_PARAM_ZNACH.sub('', name.strip()).strip()
+        if not name:
+            continue
+        out.append((name, default.strip() if sep else None))
+    return out
+
+
+def _comment_lines_of(lines, norms):
+    """Непустые строки-комментарии тела (strip), по маске normalized_lines."""
+    return [lines[i].strip() for i, norm in enumerate(norms)
+            if norm is None and lines[i].strip()]
+
+
+def _unified_code_diff(code_l, code_r, start_l, start_r, context):
+    """Единый unified diff нормализованных строк: контекст общий, без дублей.
+
+    code_* — списки (индекс строки в теле, оригинальная строка, нормализованная);
+    номера строк в выводе — строки МОДУЛЯ (line_start + индекс). Контекстная
+    строка печатается один раз с номерами обеих сторон.
+    """
+    matcher = difflib.SequenceMatcher(None, [n for _, _, n in code_l],
+                                      [n for _, _, n in code_r], autojunk=False)
+    ops = matcher.get_opcodes()
+    changed = [op for op in ops if op[0] != 'equal']
+    if not changed:
+        return []
+    # hunks: изменения ближе 2*context (в кодовых строках) сливаются в один
+    groups = []
+    cur = [changed[0]]
+    for op in changed[1:]:
+        if op[1] - cur[-1][2] <= 2 * context:
+            cur.append(op)
+        else:
+            groups.append(cur)
+            cur = [op]
+    groups.append(cur)
+
+    out = []
+    for group in groups:
+        a1 = max(0, group[0][1] - context)
+        a2 = min(len(code_l), group[-1][2] + context)
+        b1 = max(0, group[0][3] - context)
+        b2 = min(len(code_r), group[-1][4] + context)
+        span_l = (f'{start_l + code_l[a1][0]}–{start_l + code_l[a2 - 1][0]}'
+                  if a2 > a1 else f'{start_l}')
+        span_r = (f'{start_r + code_r[b1][0]}–{start_r + code_r[b2 - 1][0]}'
+                  if b2 > b1 else f'{start_r}')
+        out.append(f'@@ строки {span_l} | {span_r} @@')
+        for tag, x1, x2, y1, y2 in ops:
+            if tag == 'equal':
+                shift = y1 - x1
+                for k in range(max(x1, a1), min(x2, a2)):
+                    li, txt, _ = code_l[k]
+                    ri = code_r[k + shift][0]
+                    out.append(f'  {start_l + li:4d} {start_r + ri:4d}  {txt}')
+                continue
+            if x2 < a1 or x1 > a2:
+                continue  # изменение соседнего hunk'а
+            if tag in ('replace', 'delete'):
+                for k in range(x1, x2):
+                    li, txt, _ = code_l[k]
+                    out.append(f'- {start_l + li:4d}        {txt}')
+            if tag in ('replace', 'insert'):
+                for k in range(y1, y2):
+                    ri, txt, _ = code_r[k]
+                    out.append(f'+        {start_r + ri:4d}  {txt}')
+    return out
+
+
+def method_compare(row_left, row_right, context=3):
+    """Сравнить две строки метода из базы (формат McpServer._method_row).
+
+    Строка: kind, name, signature, directives, description, body, is_export,
+    контекст модуля, line_start. Объявление (параметры и значения по умолчанию,
+    Экспорт, директивы) отделяется от исполняемого текста, а комментарии и
+    форматирование — от кода (feedback п.2): добавление только Экспорт не
+    считается изменением исполняемого тела. Возвращает словарь для
+    format_method_compare.
+    """
+    (kind_l, _name_l, sig_l, dirs_l, desc_l, body_l, exp_l,
+     _ctx_l, start_l) = row_left
+    (kind_r, _name_r, sig_r, dirs_r, desc_r, body_r, exp_r,
+     _ctx_r, start_r) = row_right
+    body_l, body_r = body_l or '', body_r or ''
+    start_l, start_r = start_l or 1, start_r or 1
+
+    # -- объявление: параметры и значения по умолчанию, Экспорт, директивы
+    params_l = split_params_full(sig_l)
+    params_r = split_params_full(sig_r)
+    names_l = {n.lower() for n, _ in params_l}
+    names_r = {n.lower() for n, _ in params_r}
+    defs_l = {n.lower(): d for n, d in params_l}
+    defs_r = {n.lower(): d for n, d in params_r}
+    added = [n for n, _ in params_r if n.lower() not in names_l]
+    removed = [n for n, _ in params_l if n.lower() not in names_r]
+    defaults = [(n, defs_l[n.lower()], defs_r[n.lower()])
+                for n, _ in params_r
+                if n.lower() in defs_l
+                and defs_l[n.lower()] != defs_r[n.lower()]]
+    common_l = [n.lower() for n, _ in params_l if n.lower() in names_r]
+    common_r = [n.lower() for n, _ in params_r if n.lower() in names_l]
+    order_changed = common_l != common_r
+    exp_l, exp_r = int(exp_l or 0), int(exp_r or 0)
+    export = (exp_l, exp_r) if exp_l != exp_r else None
+    dl = [d.strip() for d in (dirs_l or '').splitlines() if d.strip()]
+    dr = [d.strip() for d in (dirs_r or '').splitlines() if d.strip()]
+    directives = (dl, dr) if dl != dr else None
+    kind = (kind_l, kind_r) if kind_l != kind_r else None
+
+    # -- исполняемый текст: тело без объявления, литералы и препроцессор целы
+    lines_l, lines_r = body_l.splitlines(), body_r.splitlines()
+    norms_l, norms_r = normalized_lines(body_l), normalized_lines(body_r)
+    base_l = _declaration_end(body_l) + 1
+    base_r = _declaration_end(body_r) + 1
+    code_l = [(i, lines_l[i], norms_l[i])
+              for i in range(base_l, len(lines_l)) if norms_l[i] is not None]
+    code_r = [(i, lines_r[i], norms_r[i])
+              for i in range(base_r, len(lines_r)) if norms_r[i] is not None]
+    body_diff = _unified_code_diff(code_l, code_r, start_l, start_r,
+                                   max(0, int(context)))
+
+    # -- комментарии и форматирование отдельно от кода
+    comments_l = ([s.strip() for s in (desc_l or '').splitlines() if s.strip()]
+                  + _comment_lines_of(lines_l, norms_l))
+    comments_r = ([s.strip() for s in (desc_r or '').splitlines() if s.strip()]
+                  + _comment_lines_of(lines_r, norms_r))
+    comments_changed = comments_l != comments_r
+    comment_lines = []
+    if comments_changed:
+        for tag, x1, x2, y1, y2 in difflib.SequenceMatcher(
+                None, comments_l, comments_r, autojunk=False).get_opcodes():
+            if tag == 'equal':
+                continue
+            comment_lines.extend(f'- {comments_l[k]}' for k in range(x1, x2))
+            comment_lines.extend(f'+ {comments_r[k]}' for k in range(y1, y2))
+
+    decl_changed = bool(added or removed or defaults or order_changed
+                        or export or directives or kind)
+    return {
+        'params': {'added': added, 'removed': removed, 'defaults': defaults,
+                   'order_changed': order_changed},
+        'export': export,
+        'directives': directives,
+        'kind': kind,
+        'body_diff': body_diff,
+        'comments_changed': comments_changed,
+        'comment_lines': comment_lines,
+        'formatting_only': body_l != body_r and not body_diff
+        and not comments_changed,
+        'identical': not decl_changed and not body_diff
+        and not comments_changed and body_l == body_r,
+    }
+
+
+def format_method_compare(res, title_left='слева', title_right='справа'):
+    """Строки выдачи method_compare: объявление, исполняемый текст, комментарии.
+
+    Разделы отдельны: изменение только Экспорт или только комментариев не
+    выглядит как изменение исполняемого тела.
+    """
+    if res['identical']:
+        return ['Различий нет: методы идентичны']
+    out = []
+    decl = []
+    p = res['params']
+    if p['added']:
+        decl.append(f'добавлены параметры в {title_right}: '
+                    + ', '.join(p['added']))
+    if p['removed']:
+        decl.append(f'удалены параметры в {title_right}: '
+                    + ', '.join(p['removed']))
+    for name, old, new in p['defaults']:
+        decl.append(f'значение по умолчанию {name}: {old or "—"} -> {new or "—"}')
+    if p['order_changed']:
+        decl.append('изменён порядок параметров')
+    if res['kind']:
+        decl.append(f'{res["kind"][0]} -> {res["kind"][1]}')
+    if res['export']:
+        decl.append('Экспорт: {} -> {}'.format(
+            'задан' if res['export'][0] else 'не задан',
+            'задан' if res['export'][1] else 'не задан'))
+    if res['directives']:
+        decl.append(f'директивы: [{", ".join(res["directives"][0]) or "—"}]'
+                    f' -> [{", ".join(res["directives"][1]) or "—"}]')
+    if decl:
+        out.append('Объявление:')
+        out.extend(f'  {line}' for line in decl)
+    if res['body_diff']:
+        out.append('Исполняемый текст (комментарии и пробелы вне литералов '
+                   'изменением не считаются):')
+        out.extend(res['body_diff'])
+    else:
+        out.append('Исполняемый текст: без изменений')
+    if res['comments_changed']:
+        out.append('Комментарии и описание:')
+        out.extend(f'  {line}' for line in res['comment_lines'][:12])
+        if len(res['comment_lines']) > 12:
+            out.append(f'  … и ещё {len(res["comment_lines"]) - 12} строк '
+                       'комментариев')
+    if res['formatting_only']:
+        out.append('Изменено только форматирование: код и комментарии те же')
     return out
 
 
@@ -420,155 +664,12 @@ def config_diff(conn_left, conn_right, title_left='слева', title_right='с�
     }
 
 
-def diff_snapshots(left, right, title_left='слева', title_right='справа',
-                   fmt_type=None, limit=100, offset=0):
-    """Строки различий двух снимков одного объекта (пусто — объекты равны).
-
-    :param fmt_type: функция показа типа реквизита (сервер передаёт ru_type_str)
-    :param limit: максимум строк для возврата (пагинация)
-    :param offset: сколько первых строк пропустить (пагинация)
-    """
-    fmt = fmt_type or (lambda value: value)
-    out = []
-    if left['type'] != right['type']:
-        out.append(f'Тип объекта: {title_left} {left["type_ru"]} ({left["type"]})'
-                   f' / {title_right} {right["type_ru"]} ({right["type"]})')
-    if left['comment'] != right['comment']:
-        out.append(f'Комментарий: {title_left} "{left["comment"]}"'
-                   f' / {title_right} "{right["comment"]}"')
-
-    only_l, only_r, changed = _split(left['attrs'], right['attrs'])
-    if only_l or only_r or changed:
-        out.append(f'Реквизиты и поля табличных частей ({title_left} '
-                   f'{len(left["attrs"])}, {title_right} {len(right["attrs"])}):')
-        out.extend(_list(only_l, lambda k: _only_in(title_left)
-                         + _attr_str(k, left['attrs'][k], left['kinds'], fmt)))
-        out.extend(_list(only_r, lambda k: _only_in(title_right)
-                         + _attr_str(k, right['attrs'][k], right['kinds'], fmt)))
-        for key in changed[:MAX_ITEMS]:
-            lt, lb = left['attrs'][key]
-            rt, rb = right['attrs'][key]
-            bits = []
-            if lt != rt:
-                bits.append(f'тип {fmt(lt) or "?"} -> {fmt(rt) or "?"}')
-            if lb != rb:
-                bits.append(f'секция {lb or "—"} -> {rb or "—"}')
-            lk, rk = left['kinds'].get(key), right['kinds'].get(key)
-            if lk != rk:
-                bits.append(f'группа {lk or "?"} -> {rk or "?"}')
-            out.append(f'  отличается {key}: ' + '; '.join(bits))
-        if len(changed) > MAX_ITEMS:
-            out.append(f'  … и ещё {len(changed) - MAX_ITEMS}')
-
-    only_l, only_r, _ = _split({s: 1 for s in left['tabular']},
-                               {s: 1 for s in right['tabular']})
-    if only_l or only_r:
-        out.append('Табличные части:')
-        out.extend(_list(only_l, lambda s: _only_in(title_left) + s))
-        out.extend(_list(only_r, lambda s: _only_in(title_right) + s))
-
-    only_l, only_r, changed = _split(left.get('xdto', {}), right.get('xdto', {}))
-    if only_l or only_r or changed:
-        out.append(f'Типы XDTO ({title_left} {len(left.get("xdto", {}))}, '
-                   f'{title_right} {len(right.get("xdto", {}))}):')
-        out.extend(_list(only_l, lambda n: _only_in(title_left) + n))
-        out.extend(_list(only_r, lambda n: _only_in(title_right) + n))
-        for name in changed[:MAX_ITEMS]:
-            lbase, lsha = left['xdto'][name]
-            rbase, rsha = right['xdto'][name]
-            bits = []
-            if lbase != rbase:
-                bits.append(f'базовый тип {lbase or "—"} -> {rbase or "—"}')
-            if lsha != rsha:
-                bits.append('состав свойств, ограничения или значения изменились')
-            out.append(f'  отличается {name}: ' + '; '.join(bits))
-        if len(changed) > MAX_ITEMS:
-            out.append(f'  … и ещё {len(changed) - MAX_ITEMS}')
-
-    only_l, only_r, changed = _split(left['children'], right['children'])
-    if only_l or only_r or changed:
-        out.append('Формы, команды и прочие подобъекты:')
-        out.extend(_list(only_l, lambda n: _only_in(title_left) + n))
-        out.extend(_list(only_r, lambda n: _only_in(title_right) + n))
-        out.extend(_list(changed, lambda n: f'  другой тип: {n} '
-                                            f'({left["children"][n]} -> '
-                                            f'{right["children"][n]})'))
-
-    only_l, only_r, changed = _split(left['modules'], right['modules'])
-    if only_l or only_r or changed:
-        out.append('Модули:')
-        out.extend(_list(only_l, lambda c: _only_in(title_left) + f'{c} '
-                                           f'({left["modules"][c][2]} симв.)'))
-        out.extend(_list(only_r, lambda c: _only_in(title_right) + f'{c} '
-                                           f'({right["modules"][c][2]} симв.)'))
-        for code in changed[:MAX_ITEMS]:
-            lctx, lsha, llen = left['modules'][code]
-            rctx, rsha, rlen = right['modules'][code]
-            bits = []
-            if lctx != rctx:
-                bits.append(f'контекст {lctx or "—"} -> {rctx or "—"}')
-            if lsha != rsha:
-                bits.append(f'текст изменился ({llen} -> {rlen} симв.)')
-            out.append(f'  отличается {code}: ' + '; '.join(bits))
-
-    out.extend(_methods_diff(left, right, title_left, title_right))
-
-    if left['skd'] != right['skd']:
-        out.append(f'Запросы СКД: {title_left} {len(left["skd"])}, '
-                   f'{title_right} {len(right["skd"])}'
-                   + (' (состав или тексты различаются)'
-                      if len(left['skd']) == len(right['skd']) else ''))
-    # пагинация: обрезаем список строк и добавляем информацию о полноте
-    total = len(out)
-    if total == 0:
-        return out
-    end = min(offset + limit, total)
-    page = out[offset:end]
-    if offset > 0 or end < total:
-        shown = end - offset
-        remaining = total - end
-        page.append(f'… показано {shown} из {total} строк различий'
-                    + (f'; есть ещё {remaining} — следующий вызов с '
-                       f'offset={end}' if remaining > 0 else ''))
-    return page
-
-
 def _attr_str(name, value, kinds, fmt=lambda value: value):
     tstr, tabular = value
     kind = kinds.get(name)
     return (f'{name}: {fmt(tstr) or "?"}'
             + (f' [табчасть {tabular}]' if tabular else '')
             + (f' ({kind.lower()})' if kind and kind in REGISTER_KINDS else ''))
-
-
-def _methods_diff(left, right, title_left, title_right):
-    only_l, only_r, changed = _split(left['methods'], right['methods'])
-    if not (only_l or only_r or changed):
-        return []
-    out = [f'Методы ({title_left} {len(left["methods"])}, '
-           f'{title_right} {len(right["methods"])}):']
-    out.extend(_list(only_l, lambda k: _only_in(title_left)
-                     + _method_str(k, left['methods'][k])))
-    out.extend(_list(only_r, lambda k: _only_in(title_right)
-                     + _method_str(k, right['methods'][k])))
-    for key in changed[:MAX_ITEMS]:
-        lname, lkind, lsig, lexp, ldirs, lsha = left['methods'][key]
-        rname, rkind, rsig, rexp, rdirs, rsha = right['methods'][key]
-        bits = []
-        if lsig != rsig:
-            bits.append(f'сигнатура ({lsig}) -> ({rsig})')
-        if lkind != rkind:
-            bits.append(f'{lkind} -> {rkind}')
-        if lexp != rexp:
-            bits.append('Экспорт' if rexp else 'без Экспорт')
-        if ldirs != rdirs:
-            bits.append(f'директивы [{ldirs or "—"}] -> [{rdirs or "—"}]')
-        if lsha != rsha:
-            bits.append('тело изменилось')
-        out.append(f'  отличается {key[0]}.{lname}: ' + '; '.join(bits))
-    if len(changed) > MAX_ITEMS:
-        out.append(f'  … и ещё {len(changed) - MAX_ITEMS}')
-    return out
 
 
 def _method_str(key, value):

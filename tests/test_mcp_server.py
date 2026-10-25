@@ -65,7 +65,8 @@ def test_tools_list(tmp_path_factory):
                      'method_result_schema', 'find_methods',
                      'skd_of', 'find_skd', 'xdto_of', 'find_xdto',
                      'check_query', 'sql',
-                     'compare_object', 'extension_diff', 'configuration_info',
+                     'compare_object', 'method_diff', 'config_diff',
+                     'extension_diff', 'configuration_info',
                      'db_list', 'db_open', 'db_use', 'db_close',
                      'group_create', 'group_add_db', 'group_remove_db',
                      'group_list', 'group_use', 'group_close'}
@@ -506,6 +507,38 @@ def test_find_method_context(tmp_path_factory):
     assert 'match не задан' in nomatch
 
 
+def test_find_method_context_pages_hits(tmp_path_factory):
+    """Вхождений больше страницы: все дочитываются через offset (feedback п.1)."""
+    server = _server(tmp_path_factory)
+    db = list(server.dbs.values())[0]['path']
+    conn = sqlite3.connect(db)
+    body = '\n'.join([
+        'Процедура Тест()',
+        '    А = ТОЧКА1;',
+        '    Б = 2;',
+        '    В = ТОЧКА2;',
+        '    Г = 3;',
+        '    Д = ТОЧКА3;',
+        '    Е = ТОЧКА4;',
+        '    Ж = ТОЧКА5;',
+        'КонецПроцедуры',
+    ])
+    conn.execute("UPDATE method SET body=? WHERE name='Тест'", (body,))
+    conn.commit()
+    conn.close()
+    out = _call(server, 'find_method_context', path='Catalog/Справочник1',
+                code_name='obj', name='Тест', match='ТОЧКА',
+                before=0, after=0)['content'][0]['text']
+    assert out.count('--- вхождение') == 3  # страница по умолчанию
+    assert 'всего найдено 5 вхождений; показано 1–3' in out
+    assert 'есть ещё 2 — следующий вызов с offset=3' in out
+    rest = _call(server, 'find_method_context', path='Catalog/Справочник1',
+                 code_name='obj', name='Тест', match='ТОЧКА',
+                 before=0, after=0, offset=3)['content'][0]['text']
+    assert rest.count('--- вхождение') == 2
+    assert 'показано 4–5' in rest and 'это все результаты' in rest
+
+
 def test_method_dependencies(tmp_path_factory):
     server = _server(tmp_path_factory)
     out = _call(server, 'method_dependencies', path=CM, code_name='obj',
@@ -820,6 +853,30 @@ def test_error_categories(tmp_path_factory):
     assert 'ошибка [BAD_REQUEST]' in bad_db['content'][0]['text']
 
 
+def test_internal_error_is_not_a_user_request(tmp_path_factory, monkeypatch):
+    """Приёмка feedback п.1: внутренняя поломка — INTERNAL, а не BAD_REQUEST."""
+    server = _server(tmp_path_factory)
+    tool = next(t for t in mcp_server.TOOLS if t.name == 'find_objects')
+
+    def boom(self, **kwargs):
+        raise ValueError('too many values to unpack')
+
+    monkeypatch.setattr(tool, 'fn', boom)
+    res = _call(server, 'find_objects', mask='Х')
+    assert res.get('isError')
+    text = res['content'][0]['text']
+    assert 'ошибка [INTERNAL]' in text and 'ValueError' in text
+
+
+def test_bad_integer_argument_is_bad_args(tmp_path_factory):
+    """Приведение типов аргументов на границе схемы: BAD_ARGS, а не INTERNAL."""
+    server = _server(tmp_path_factory)
+    res = _call(server, 'find_objects', mask='Х', limit='много')
+    assert res.get('isError')
+    text = res['content'][0]['text']
+    assert 'ошибка [BAD_ARGS]' in text and 'limit' in text
+
+
 def test_jsonrpc_roundtrip(tmp_path_factory):
     server = _server(tmp_path_factory)
     resp = server.handle(json.loads('{"jsonrpc":"2.0","id":9,'
@@ -1043,6 +1100,62 @@ def test_compare_object_shows_field_and_type_diff(tmp_path_factory):
     assert 'только в базе «расширение»: лст_НовыйРеквизит: Строка(20)' in out
     # тип показан в русской точечной форме, как в остальных инструментах
     assert 'тип Ссылка: Справочник.Справочник1 -> Число' in out
+
+
+def test_compare_object_json_pages_cover_all_diffs(tmp_path_factory):
+    """Приёмка feedback п.1: объединение страниц = все различия без пропусков."""
+    main_db, ext_db = _two_dbs(tmp_path_factory)
+    conn = sqlite3.connect(ext_db)
+    oid = conn.execute("SELECT id FROM meta_object "
+                       "WHERE path='Catalog/Справочник1'").fetchone()[0]
+    for i in range(45):
+        conn.execute(
+            'INSERT INTO meta_attribute (object_id, ord, name, type_str)'
+            ' VALUES (?, ?, ?, ?)',
+            (oid, 100 + i, f'лст_Реквизит{i:02d}', 'Строка'))
+    conn.commit()
+    conn.close()
+    server = McpServer([main_db, ext_db])
+
+    ids, offset = [], 0
+    while True:
+        raw = _call(server, 'compare_object', path='Catalog/Справочник1',
+                    db_left='основная', db_right='расширение',
+                    limit=10, offset=offset,
+                    format='json')['content'][0]['text']
+        env = json.loads(raw)
+        assert env['tool'] == 'compare_object' and env['status'] == 'ok'
+        assert env['db']['alias'] == 'основная'
+        assert env['data']['db_right']['alias'] == 'расширение'
+        assert env['completeness']['total'] == 45
+        ids += [it['id'] for it in env['data']['items']]
+        offset = env['completeness']['next_offset']
+        if offset is None:
+            break
+    assert len(ids) == 45 and len(set(ids)) == 45
+
+    # текстовый режим: итог и продолжение в футуре
+    out = _call(server, 'compare_object', path='Catalog/Справочник1',
+                db_left='основная', db_right='расширение',
+                limit=10)['content'][0]['text']
+    assert 'Различия (всего 45):' in out
+    assert 'есть ещё 35 — следующий вызов с offset=10' in out
+
+
+def test_method_diff_tool_sections(tmp_path_factory):
+    """Приёмка feedback п.2: только Экспорт — исполняемое тело не изменено."""
+    main_db, ext_db = _two_dbs(tmp_path_factory)
+    conn = sqlite3.connect(ext_db)
+    conn.execute("UPDATE method SET is_export=1 WHERE name='Тест'")
+    conn.commit()
+    conn.close()
+    server = McpServer([main_db, ext_db])
+    out = _call(server, 'method_diff', path='Catalog/Справочник1',
+                code_name='obj', name='Тест',
+                db_left='основная',
+                db_right='расширение')['content'][0]['text']
+    assert 'Экспорт: не задан -> задан' in out
+    assert 'Исполняемый текст: без изменений' in out
 
 
 def test_extension_diff(tmp_path_factory):
