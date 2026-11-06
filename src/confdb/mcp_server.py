@@ -3797,11 +3797,17 @@ class McpServer:
             from .bsl_semantic import analyze_module
             sem = analyze_module(source_text, self.bsl_ctx(db))
             if sem:
+                rank = {'ERROR': 0, 'WARNING': 1, 'INFO': 2}
+                sem.sort(key=lambda d: (rank.get(d.severity, 3), d.line, d.col))
                 out.append('')
                 out.append(f'Семантические замечания ({len(sem)}) — {label}:')
-                for d in sem:
+                limit = 100
+                for d in sem[:limit]:
                     out.append(f'  {d.line}:{d.col} [{d.severity}] {d.code}: '
                                f'{d.message}')
+                if len(sem) > limit:
+                    out.append(f'  … и ещё {len(sem) - limit} (показаны первые '
+                               f'{limit}, порядок ERROR→WARNING→INFO)')
             else:
                 out.append('Семантических замечаний нет.')
         return '\n'.join(out)

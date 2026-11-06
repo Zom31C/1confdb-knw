@@ -1337,6 +1337,7 @@ class Parser:
                 self.expression()
         elif k == EXECUTE:
             self.pos += 1
+            self.result.events.append(('execute', t.line))
             if self.peek().kind == LPAREN:
                 self.call_args()
             elif self.peek().kind in EXPR_START:

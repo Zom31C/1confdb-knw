@@ -28,6 +28,18 @@ r"""Семантические проверки модуля BSL поверх б
   (объект другой базы/переменная) не проверяется вовсе.
 - UsingGoto (INFO) — использование \`Перейти ~Метка\` (метка должна существовать).
 
+Ярус 3-лайт (security/deprecated по именам глобальных вызовов и типов, только
+одноэлементные вызовы — точечные методы объектов не помечаются):
+- ExecuteExternalCode (WARNING) — \`Вычислить\`/\`Выполнить\` (произвольный код);
+- ExternalAppStarting (WARNING) — \`ЗапуститьПриложение\`;
+- FileSystemAccess (WARNING) — \`НайтиФайлы\`/\`СоздатьКаталог\`/\`УдалитьФайлы\`/
+  \`КопироватьФайл\`/\`ПереместитьФайл\`;
+- UsingModalWindows (WARNING) — \`Предупреждение\`/\`Вопрос\` (модальные);
+- InternetAccess (WARNING) — \`Новый HTTPСоединение\`/\`HTTPЗапрос\`/\`ИнтернетПочта\`/
+  \`FTPСоединение\`;
+- DeprecatedCurrentDate / DeprecatedMessage / DeprecatedFind (INFO) — устаревшие
+  \`ТекущаяДата\`/\`Сообщить\`/\`Найти\` (глобальная).
+
 Проверки текстов запросов и разрешения метаданных сюда НАМЕРЕННО не включены:
 на живых конфигурациях они дают тысячи ложных срабатываний (запросы-шаблоны с
 \`%\`, динамическая сборка, общий платформенный тип, объект другой базы). Для
@@ -36,6 +48,54 @@ r"""Семантические проверки модуля BSL поверх б
 from .bsl_syntax import Diagnostic, analyze as syntax_analyze
 
 __all__ = ['analyze_module']
+
+# Ярус 3-лайт: платформенные глобальные вызовы по имени (security/deprecated).
+# Флагаются ТОЛЬКО одноэлементные вызовы (глобальная функция), не точечные:
+# «Выполнить("код")» — динамическое выполнение, а «Запрос.Выполнить()» — штатный
+# метод объекта и не помечается. Значение: (код BSL LS, severity, сообщение).
+GLOBAL_CALL_CHECKS = {
+    'предупреждение': ('UsingModalWindows', 'WARNING',
+                       'модальный вызов «Предупреждение» блокирует работу в '
+                       'управляемом приложении — используйте неблокающие способы'),
+    'вопрос': ('UsingModalWindows', 'WARNING',
+               'модальный вызов «Вопрос» блокирует работу в управляемом '
+               'приложении — используйте неблокающие способы'),
+    'вычислить': ('ExecuteExternalCode', 'WARNING',
+                  '«Вычислить» выполняет произвольный код — проверьте '
+                  'безопасность входных данных'),
+    'запуститьприложение': ('ExternalAppStarting', 'WARNING',
+                            '«ЗапуститьПриложение» запускает внешнее приложение '
+                            '— проверьте безопасность'),
+    'найтифайлы': ('FileSystemAccess', 'WARNING',
+                   'обращение к файловой системе («НайтиФайлы»)'),
+    'создатькаталог': ('FileSystemAccess', 'WARNING',
+                       'обращение к файловой системе («СоздатьКаталог»)'),
+    'удалитьфайлы': ('FileSystemAccess', 'WARNING',
+                     'обращение к файловой системе («УдалитьФайлы»)'),
+    'копироватьфайл': ('FileSystemAccess', 'WARNING',
+                       'обращение к файловой системе («КопироватьФайл»)'),
+    'переместитьфайл': ('FileSystemAccess', 'WARNING',
+                        'обращение к файловой системе («ПереместитьФайл»)'),
+    'текущаядата': ('DeprecatedCurrentDate', 'INFO',
+                    '«ТекущаяДата» устарела — используйте «ТекущаяДатаСеанса»'),
+    'сообщить': ('DeprecatedMessage', 'INFO',
+                 '«Сообщить» устарело — используйте «СообщениеПользователю»'),
+    'найти': ('DeprecatedFind', 'INFO',
+              'глобальная «Найти» устарела — используйте «СтрНайти» '
+              '(«Найти» как метод коллекции остаётся допустимым)'),
+}
+
+# Типы, создаваемые через «Новый», которые означают обращение к интернету.
+NEW_TYPE_CHECKS = {
+    'httpсоединение': ('InternetAccess', 'WARNING',
+                       'создание «HTTPСоединение» — обращение к интернету'),
+    'httpзапрос': ('InternetAccess', 'WARNING',
+                   'создание «HTTPЗапрос» — обращение к интернету'),
+    'интернетпочта': ('InternetAccess', 'WARNING',
+                      'создание «ИнтернетПочта» — обращение к интернету'),
+    'ftpсоединение': ('InternetAccess', 'WARNING',
+                      'создание «FTPСоединение» — обращение к интернету'),
+}
 
 
 def analyze_module(text, ctx=None):
@@ -50,9 +110,45 @@ def analyze_module(text, ctx=None):
     diags += _unused_locals(result)
     diags += _break_continue_outside_loop(result)
     diags += _goto_usage(result)
+    diags += _name_based_checks(result)
     if ctx is not None:
         diags += _common_module_calls(text, ctx)
     diags.sort(key=lambda d: (d.line, d.col))
+    return diags
+
+
+def _name_based_checks(result):
+    """Ярус 3-лайт: security/deprecated по именам глобальных вызовов и типов.
+
+    Проверяются только ОДНОЭЛЕМЕНТНЫЕ вызовы (глобальные функции платформы);
+    точечные методы объектов (Запрос.Выполнить(), Список.Найти()) не помечаются.
+    Имя, совпавшее с методом, объявленным в ЭТОМ модуле, тоже пропускается —
+    это локальный метод, а не глобальная функция платформы.
+    """
+    diags = []
+    local_methods = {m['name'].lower() for m in result.methods}
+    for e in result.events:
+        if e[0] == 'chain':
+            parts, called, line = e[1], e[2], e[3]
+            if called and len(parts) == 1:
+                low = parts[0].lower()
+                if low in local_methods:
+                    continue
+                hit = GLOBAL_CALL_CHECKS.get(low)
+                if hit:
+                    code, sev, msg = hit
+                    diags.append(Diagnostic(code, msg, line, 1, severity=sev))
+        elif e[0] == 'new' and e[1]:
+            hit = NEW_TYPE_CHECKS.get(e[1].lower())
+            if hit:
+                code, sev, msg = hit
+                diags.append(Diagnostic(code, msg, e[2], 1, severity=sev))
+        elif e[0] == 'execute':
+            # оператор «Выполнить» — всегда динамическое выполнение кода
+            diags.append(Diagnostic(
+                'ExecuteExternalCode',
+                '«Выполнить» выполняет произвольный код — проверьте '
+                'безопасность входных данных', e[1], 1, severity='WARNING'))
     return diags
 
 
