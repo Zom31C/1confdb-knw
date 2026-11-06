@@ -1009,6 +1009,7 @@ class Parser:
     def __init__(self, tokens):
         self.tokens = tokens
         self.pos = 0
+        self.loop_depth = 0
         self.result = ParseResult()
         self.sub_locals = None     # список локальных Перем текущего метода
 
@@ -1282,6 +1283,7 @@ class Parser:
                     {'name': nt.text, 'is_export': is_export, 'line': nt.line})
             elif self.sub_locals is not None:
                 self.sub_locals.append(nt.text)
+                self.result.events.append(('localvar', nt.text, nt.line))
             if self.peek().kind == COMMA:
                 self.pos += 1
                 continue
@@ -1319,10 +1321,14 @@ class Parser:
             self.try_stmt()
         elif k == RETURN:
             self.pos += 1
-            if self.peek().kind in EXPR_START:
+            has_expr = self.peek().kind in EXPR_START
+            if has_expr:
                 self.expression()
+            self.result.events.append(('return', has_expr, t.line))
         elif k in (CONTINUE, BREAK):
             self.pos += 1
+            self.result.events.append(
+                ('break' if k == BREAK else 'continue', self.loop_depth, t.line))
         elif k == RAISE:
             self.pos += 1
             if self.peek().kind == LPAREN:
@@ -1401,7 +1407,9 @@ class Parser:
         self.pos += 1  # Пока
         self.expression()
         self.expect(DO, '«Цикл»')
+        self.loop_depth += 1
         self.code_block()
+        self.loop_depth -= 1
         self.expect(ENDDO, '«КонецЦикла»')
 
     def for_stmt(self):
@@ -1422,7 +1430,9 @@ class Parser:
             if vt is not None:
                 self.result.events.append(('assign', (vt.text,), vt.line))
         self.expect(DO, '«Цикл»')
+        self.loop_depth += 1
         self.code_block()
+        self.loop_depth -= 1
         self.expect(ENDDO, '«КонецЦикла»')
 
     def try_stmt(self):

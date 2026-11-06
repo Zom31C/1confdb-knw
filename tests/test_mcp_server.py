@@ -189,6 +189,29 @@ def test_check_syntax_requires_path_or_text(tmp_path_factory):
     assert 'path' in resp['content'][0]['text']
 
 
+def test_check_syntax_semantic_flag(tmp_path_factory):
+    server = _server(tmp_path_factory)
+    code = ('Процедура П()\n    Перем НеИспользуется;\n'
+            '    ОбщийМодуль1.НетТакогоМетода();\nКонецПроцедуры\n')
+    # без semantic — только синтаксис (он корректен), секции семантики нет
+    plain = _call(server, 'check_syntax', text=code)['content'][0]['text']
+    assert 'OK' in plain and 'Семантические' not in plain
+    # с semantic — видны неиспользуемая переменная и отсутствующий метод
+    sem = _call(server, 'check_syntax', text=code,
+                semantic=True)['content'][0]['text']
+    assert 'Семантические замечания' in sem
+    assert 'UnusedLocalVariable' in sem
+    assert 'MissingCommonModuleMethod' in sem
+
+
+def test_check_syntax_semantic_clean(tmp_path_factory):
+    server = _server(tmp_path_factory)
+    sem = _call(server, 'check_syntax', semantic=True,
+                text='Процедура П()\n    А = 1;\nКонецПроцедуры\n'
+                )['content'][0]['text']
+    assert 'Семантических замечаний нет' in sem
+
+
 def test_refs_and_skd_empty(tmp_path_factory):
     server = _server(tmp_path_factory)
     refs = _call(server, 'refs_of', path='Catalog/Справочник1')['content'][0]['text']

@@ -61,6 +61,12 @@ One line each; detail in README «Состав» and on the page named after it.
   41241 modules of three real configs, zero false positives. This SUPERSEDES the old "syntax is
   only the `-lsp` variant's job, do not add a checker" rule — the unified build checks syntax
   natively and `1confdb-knw-lsp` is retired. Page `bsl-ls-integration`.
+- `bsl_semantic.py` — opt-in semantic checks on top of `bsl_syntax.analyze` + `bsl_analyzer`
+  (the `check_syntax(semantic=True)` section): unused local vars, break/continue outside a loop,
+  missing/non-export common-module method calls, goto. Deliberately EXCLUDES the noisy lexical
+  checks (query-text validation, metadata resolution, unused params) — measured thousands of
+  false positives on real vendor configs; those stay in `check_query`/`method_dependencies`.
+  Severity ERROR/WARNING/INFO; only break/continue-outside-loop is ERROR (0 on vendor corpus).
 - `header_props.py` — reads `meta_object.header_json` without re-extracting. Pages
   `register-header-structure`, `configuration-header-props`.
 - `query_lang.py` — query language lexer/parser/validator (page `query-validator`);

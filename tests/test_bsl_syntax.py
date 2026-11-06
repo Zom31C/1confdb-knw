@@ -580,6 +580,37 @@ def test_analyze_events():
     assert ('Справочники', 'Номенклатура', 'Создать') in chains
 
 
+def test_analyze_return_break_events():
+    r = analyze('''\
+Функция Ф(А)
+    Если А Тогда
+        Возврат 1;
+    КонецЕсли;
+    Для Каждого Х Из А Цикл
+        Прервать;
+    КонецЦикла;
+    Пока А Цикл
+        Продолжить;
+    КонецЦикла;
+    Возврат;
+КонецФункции
+''')
+    rets = [e for e in r.events if e[0] == 'return']
+    assert (True, 3) in [(e[1], e[2]) for e in rets]    # Возврат 1
+    assert (False, 11) in [(e[1], e[2]) for e in rets]  # пустой Возврат
+    brk = [e for e in r.events if e[0] == 'break']
+    cont = [e for e in r.events if e[0] == 'continue']
+    assert brk and brk[0][1] == 1      # глубина цикла 1
+    assert cont and cont[0][1] == 1
+
+
+def test_break_outside_loop_depth_zero():
+    # Прервать/Продолжить вне цикла — глубина 0 (семантика поймает)
+    r = analyze('Процедура П()\n    Прервать;\nКонецПроцедуры\n')
+    brk = [e for e in r.events if e[0] == 'break']
+    assert brk and brk[0][1] == 0
+
+
 # ---------------------------------------------------------------------------
 # rebuild_module
 # ---------------------------------------------------------------------------
