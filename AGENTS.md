@@ -26,11 +26,12 @@ there README is the fallback.
   3.10, so green tests do NOT prove 3.9 compatibility — check new syntax by eye.
 - Windows-oriented: `.bat` wrappers in repo root, venv in `.venv`. Comments, docstrings and
   user-facing text are in **Russian**.
-- The root is **not** a git repo. Published repos: `dist\1confdb-knw` (`Zom31C/1confdb-knw`)
-  and `dist\1confdb-knw-lsp` (BSL-LS variant, `Zom31C/1confdb-knw-lsp`). The mainline venv
-  executes a real copy in `.venv\Lib\site-packages\confdb`, so a `src` change has **three**
-  destinations. Sync order, and what must never be copied from the root: page
-  `publication-two-repos`.
+- The root is **not** a git repo. Published repo: `dist\1confdb-knw` (`Zom31C/1confdb-knw`) —
+  the single unified build. (The old `dist\1confdb-knw-lsp` BSL-LS variant is retired: syntax
+  checking is now native, `bsl_syntax.py` / the `check_syntax` tool; its GitHub repo is archived.)
+  The dist venv executes a real copy in `.venv\Lib\site-packages\confdb`, so a `src` change has
+  **two** destinations (dist `src/` + its site-packages). Sync order, and what must never be
+  copied from the root: page `publication-two-repos`.
 - `cf/SmallBusinessKz_3_0_4_4_cf.cf` (885 MB) is never committed and never used by unit
   tests — tests run on small synthetic fixtures. Timings: page `extraction-pipeline`;
   ready-made bases: page `test-data`.
@@ -82,7 +83,7 @@ confdb.bat check out.db                               :: validate all SKD querie
 confdb.bat fts out.db --workers 8                      :: body index later, as sidecar shards
 1confdb-knw.bat out.db [--port 8765] [--group УНФ=unf.db --group БП=bp.db]
 .venv\Scripts\python.exe -m compileall -q src\confdb  :: static check
-check-sync.bat                                        :: root src/tests vs both dist copies
+check-sync.bat                                        :: root src/tests vs the dist copy + its site-packages
 ```
 
 `confdb.bat bench <file.cf>` tunes `workers` to the hardware; the rest of the CLI flags are
