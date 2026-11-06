@@ -1491,6 +1491,9 @@ class Parser:
                 self.pos += 1
                 self.expression()
                 self.expect(RBRACK, '«]»')
+                # индекс — динамический сегмент цепочки: имя после него уже
+                # не объект метаданных (Документы[Имя].Метод()); помечаем None
+                parts.append(None)
                 called = False
             else:
                 break

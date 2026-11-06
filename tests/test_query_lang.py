@@ -138,6 +138,58 @@ def test_syntax_error():
         parse_query('ВЫБРАТЬ Т.Х ИЗ')
 
 
+def test_razreshennye_any_order():
+    # 1С принимает РАЗРЕШЕННЫЕ и до, и после ПЕРВЫЕ N
+    parse_query('ВЫБРАТЬ ПЕРВЫЕ 1 РАЗРЕШЕННЫЕ Т.Х ИЗ Документ.Д КАК Т')
+    parse_query('ВЫБРАТЬ РАЗРЕШЕННЫЕ ПЕРВЫЕ 10 РАЗЛИЧНЫЕ Т.Х '
+                'ИЗ Документ.Д КАК Т')
+
+
+def test_is_null_english():
+    parse_query('ВЫБРАТЬ Т.Х ИЗ Документ.Д КАК Т ГДЕ Т.Х IS NULL')
+    parse_query('ВЫБРАТЬ Т.Х ИЗ Документ.Д КАК Т ГДЕ Т.Х IS NOT NULL')
+    # русская форма по-прежнему работает
+    parse_query('ВЫБРАТЬ Т.Х ИЗ Документ.Д КАК Т ГДЕ Т.Х ЕСТЬ НЕ NULL')
+
+
+def test_check_dotted_star(ctx):
+    # Данные.* — раскрытие всех полей источника, '*' не проверяется как поле
+    assert check_query('ВЫБРАТЬ РАЗЛИЧНЫЕ Т.* ИЗ Справочник.Справочник1 КАК Т',
+                       ctx) == []
+    # звёздочка после поля-ссылки тоже допустима и не даёт «неизвестное поле»
+    errs = check_query(
+        'ВЫБРАТЬ Т.СсылкаАтрибут.* ИЗ Справочник.Справочник1 КАК Т', ctx)
+    assert not any('неизвестное поле' in e and e.endswith(':: *')
+                   for e in errs)
+
+
+def test_query_prefixes_include_plan_obmena():
+    from confdb.query_lang import QUERY_PREFIXES
+    assert QUERY_PREFIXES['ПланОбмена'] == 'ExchangePlan'
+    assert QUERY_PREFIXES['ОбменДанными'] == 'ExchangePlan'
+
+
+def test_bsl_managers_phv_singular_type():
+    # тип ПВХ в meta_object — единственное число (иначе разрешение менеджера
+    # ПланыВидовХарактеристик.Х не находило объект никогда)
+    from confdb.bsl_analyzer import BSL_MANAGERS
+    assert BSL_MANAGERS['планывидовхарактеристик'] == 'ChartOfCharacteristicType'
+
+
+def test_check_table_case_insensitive(ctx):
+    # имена таблиц в запросах регистронезависимы
+    assert check_query('ВЫБРАТЬ Т.Ссылка ИЗ справочник.СПРАВОЧНИК1 КАК Т',
+                       ctx) == []
+    assert check_query('ВЫБРАТЬ Т.Ссылка ИЗ Справочник.справочник1 КАК Т',
+                       ctx) == []
+
+
+def test_parse_hash_temp_tables():
+    # #ВременнаяТаблица — легальный синтаксис языка запросов 1С
+    parse_query('ВЫБРАТЬ Т.Ссылка КАК Ссылка ПОМЕСТИТЬ #Врем ИЗ Документ.Д КАК Т')
+    parse_query('ВЫБРАТЬ #Врем.Ссылка ИЗ #Врем')
+
+
 @pytest.fixture(scope='module')
 def ctx(tmp_path_factory):
     dump = str(tmp_path_factory.mktemp('dump'))
@@ -149,6 +201,33 @@ def ctx(tmp_path_factory):
         yield MetaContext(conn)
     finally:
         conn.close()
+
+
+def test_check_hash_temp_declared_in_script(ctx):
+    errs = check_query(
+        'ВЫБРАТЬ Т.Ссылка КАК Ссылка ПОМЕСТИТЬ #Врем '
+        'ИЗ Справочник.Справочник1 КАК Т;'
+        'ВЫБРАТЬ #Врем.Ссылка ИЗ #Врем', ctx)
+    assert errs == []
+
+
+def test_check_hash_temp_fields_lenient(ctx):
+    # поля временных таблиц (в т.ч. #имя) строго не проверяются: в СКД они
+    # могут достраиваться в других наборах данных — существующее поведение
+    errs = check_query(
+        'ВЫБРАТЬ Т.Ссылка КАК Ссылка ПОМЕСТИТЬ #Врем '
+        'ИЗ Справочник.Справочник1 КАК Т;'
+        'ВЫБРАТЬ #Врем.НетТакого ИЗ #Врем', ctx)
+    assert errs == []
+
+
+def test_check_hash_temp_undeclared_is_not_error(ctx):
+    # таблица, созданная ПОМЕСТИТЬ в другом запросе пакета: не ошибка,
+    # её поля не проверяются (схема неизвестна)
+    errs = check_query(
+        'ВЫБРАТЬ ПЕРВЫЕ 1 Классификатор.Ссылка ИЗ #Классификатор '
+        'КАК Классификатор ГДЕ Классификатор.Код ПОДОБНО &КодЭлемента', ctx)
+    assert errs == []
 
 
 def test_check_ok(ctx):

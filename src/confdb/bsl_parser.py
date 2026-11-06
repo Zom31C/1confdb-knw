@@ -17,8 +17,15 @@
 import re
 
 RE_DIRECTIVE = re.compile(r'^\s*&[A-Za-zА-Яа-яЁё_]+')
+# «Асинх Процедура/Функция» — асинхронные методы (платформа 8.3.21+): префикс
+# стоит ПЕРЕД ключевым словом в той же строке; без него метод не попал бы в
+# таблицу method, а его текст остался бы в module.body (пробел извлечения
+# обнаружен на УНФ: 394 тела с «Асинх», вызовы через «Ждать»).
 RE_METHOD = re.compile(
-    r'^\s*(?P<kind>Процедура|Функция)\s+(?P<name>[A-Za-zА-Яа-яЁё_0-9]+)\s*\(', re.IGNORECASE)
+    r'^\s*(?:(?:Асинх|Async)\s+)?'
+    r'(?P<kind>Процедура|Функция)\s+(?P<name>[A-Za-zА-Яа-яЁё_0-9]+)\s*\(',
+    re.IGNORECASE)
+RE_ASYNC = re.compile(r'^\s*(?:Асинх|Async)\b', re.IGNORECASE)
 RE_METHOD_END = re.compile(r'^\s*Конец(?:Процедуры|Функции)', re.IGNORECASE)
 RE_EXPORT = re.compile(r'Экспорт', re.IGNORECASE)
 RE_COMMENT = re.compile(r'^\s*//')
@@ -89,6 +96,7 @@ def parse_methods(text):
                 'name': m.group('name'),
                 'signature': _collapse(sig),
                 'is_export': bool(RE_EXPORT.search(tail)),
+                'is_async': bool(RE_ASYNC.match(line)),
                 'directives': list(pending),
                 'description': description,
                 'line_start': i + 1,

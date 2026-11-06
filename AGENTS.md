@@ -61,16 +61,21 @@ One line each; detail in README «Состав» and on the page named after it.
   41241 modules of three real configs, zero false positives. This SUPERSEDES the old "syntax is
   only the `-lsp` variant's job, do not add a checker" rule — the unified build checks syntax
   natively and `1confdb-knw-lsp` is retired. Page `bsl-ls-integration`.
-- `bsl_semantic.py` — opt-in semantic checks on top of `bsl_syntax.analyze` + `bsl_analyzer`
-  (the `check_syntax(semantic=True)` section): unused local vars, break/continue outside a loop,
-  missing/non-export common-module method calls, goto, plus tier-3-lite security/deprecated by
-  global-call name (dynamic code `Вычислить`/`Выполнить`, file system, internet, modal windows,
-  `ЗапуститьПриложение`, deprecated `ТекущаяДата`/`Сообщить`/`Найти`) — single-element global
-  calls only, so dotted object methods and module-local method names are not flagged. Deliberately
-  EXCLUDES the noisy lexical checks (query-text validation, metadata resolution, unused params) —
-  measured thousands of false positives on real vendor configs; those stay in
-  `check_query`/`method_dependencies`. Severity ERROR/WARNING/INFO; only break/continue-outside-loop
-  is ERROR (0 on vendor corpus); the rest are true-positive advisories (measured on УНФ).
+- `bsl_semantic.py` — opt-in semantic checks (the `check_syntax(semantic=True)` section) on top
+  of `bsl_syntax.analyze` + the DB. Tier 2 (DB, scope-aware: params/Перем/module vars/method
+  names/object attributes&tabulars/assign targets form the method scope): missing/non-export
+  common-module method calls (ERROR; WARNING in form modules — form attributes are not
+  extracted), `Менеджер.Объект` references to nonexistent metadata (chains with a prefix or a
+  `[index]` are never flagged — dynamic composition; manager methods like ТипВсеСсылки are
+  whitelisted), queries embedded in the module via `query_lang` (syntax + tables/fields;
+  `%`/`#`/`[` templates and truncated texts skipped), pure-`&НаКлиенте` calls to server common
+  modules («Вызов сервера» modules are legal; module-context fallback removed — ordinary
+  application mode made 1675 FPs on УНФ). Tier 1/3-lite (no DB): unused local vars,
+  break/continue outside a loop (the only ERROR, 0 on vendor corpus), goto, deprecated/insecure
+  global calls by name (single-element calls only). Unknown names are NEVER flagged — a stated
+  analysis boundary. Deliberately excluded as noisy: unused params (96631 on УНФ), function
+  return-value checks, arbitrary name resolution. Corpus-tuned: every rule measured on УНФ
+  before shipping.
 - `header_props.py` — reads `meta_object.header_json` without re-extracting. Pages
   `register-header-structure`, `configuration-header-props`.
 - `query_lang.py` — query language lexer/parser/validator (page `query-validator`);

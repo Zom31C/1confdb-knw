@@ -20,7 +20,7 @@
 """
 import re
 
-RE_IDENT = re.compile(r'[A-Za-zА-Яа-яЁё_][A-Za-zА-Яа-яЁё_0-9]*')
+RE_IDENT = re.compile(r'#?[A-Za-zА-Яа-яЁё_][A-Za-zА-Яа-яЁё_0-9]*')
 RE_NUM = re.compile(r'\d+(?:\.\d+)?')
 RE_STR = re.compile(r"'(?:[^'\n]|'')*'")
 RE_STR2 = re.compile(r'"(?:[^"\n]|"")*"')
@@ -172,16 +172,18 @@ class _Parser:
     def parse_select(self):
         self.expect_kw('ВЫБРАТЬ')
         distinct = False
-        while True:  # РАЗРЕШЕННЫЕ/РАЗЛИЧНЫЕ в произвольном порядке
+        first = None
+        # РАЗЛИЧНЫЕ / РАЗРЕШЕННЫЕ / ПЕРВЫЕ N допустимы в любом порядке и
+        # сочетании (1С принимает и «ПЕРВЫЕ N РАЗРЕШЕННЫЕ», и обратный)
+        while True:
             if self.accept_kw('РАЗЛИЧНЫЕ'):
                 distinct = True
             elif self.accept_kw('РАЗРЕШЕННЫЕ'):
                 continue
+            elif first is None and self.accept_kw('ПЕРВЫЕ'):
+                first = self.expect_num()
             else:
                 break
-        first = None
-        if self.accept_kw('ПЕРВЫЕ'):
-            first = self.expect_num()
         items = [self.parse_select_item()]
         while self.accept_op(','):
             items.append(self.parse_select_item())
@@ -586,13 +588,17 @@ class _Parser:
                 node = ('between', left, low, high)
                 left = ('not', node) if neg else node
                 continue
-            if tok[0] == 'id' and tok[1].upper() == 'ЕСТЬ':
+            if tok[0] == 'id' and tok[1].upper() in ('ЕСТЬ', 'IS'):
                 self.next()
-                neg = bool(self.accept_kw('НЕ'))
+                nxt = self.peek()
+                neg = False
+                if nxt[0] == 'id' and nxt[1].upper() in ('НЕ', 'NOT'):
+                    self.next()
+                    neg = True
                 if self.accept_kw('NULL'):
                     left = ('isnull', left, not neg)
                 else:
-                    raise self.error('Ожидалось NULL после ЕСТЬ')
+                    raise self.error('Ожидалось NULL после ЕСТЬ/IS')
                 continue
             return left
 
@@ -690,6 +696,9 @@ class _Parser:
                     self.next()
                     self._parse_call_args()  # Т.Поле.(А КАК Б, …)
                     break
+                if self.accept_op('*'):
+                    # Данные.* / Т.Ссылка.* — звёздочка не имя поля
+                    return ('starof', ('field', parts))
                 parts.append(self.next()[1])
             return ('field', parts)
         raise self.error(f'Неожиданный токен {tok[1]!r}')
@@ -744,6 +753,9 @@ QUERY_PREFIXES = {
     'БизнесПроцесс': 'BusinessProcess',
     'Задача': 'Task',
     'ОбменДанными': 'ExchangePlan',
+    # ПланОбмена — основной префикс планов обмена в современных конфигурациях
+    # (ОбменДанными — устаревший синоним; 1С принимает оба)
+    'ПланОбмена': 'ExchangePlan',
     'ЖурналДокументов': 'DocumentJournal',
     'КритерийОтбора': 'FilterCriterion',
     'ХранилищеНастроек': 'SettingsStorage',
@@ -760,6 +772,9 @@ VIRTUAL_TABLES = {
 STANDARD_FIELDS = {
     'Ссылка', 'Наименование', 'Код', 'Владелец', 'Родитель', 'ПометкаУдаления',
     'Предопределенный', 'ИмяПредопределенныхДанных', 'Дата', 'Номер',
+    # ВерсияДанных — стандартный реквизит объектов с включённой полной
+    # версионностью (пропуск давал сотни ложных «неизвестное поле» на УНФ)
+    'ВерсияДанных',
     'МоментВремени', 'Период', 'Регистратор', 'Активность', 'КлючЗаписи',
     'ВидДвижения', 'НомерСтроки', 'Тип', 'Значение', 'График', 'Порядок',
     'Счет', 'Сумма', 'Субконто1', 'Субконто2', 'Субконто3', 'Организация',
@@ -795,7 +810,9 @@ class MetaContext:
             if path.count('/') == 1:
                 for ru, stem in QUERY_PREFIXES.items():
                     if stem == typ:
-                        self.by_type_name[f'{ru}.{name}'] = path
+                        # ключи в нижнем регистре: имена таблиц в запросах
+                        # регистронезависимы («Персучета» == «ПерсУчета»)
+                        self.by_type_name[f'{ru}.{name}'.lower()] = path
         self._fields = {}
         for path, name in q('SELECT o.path, a.name FROM meta_attribute a '
                             'JOIN meta_object o ON o.id=a.object_id'):
@@ -845,7 +862,7 @@ class MetaContext:
         """Путь объекта по первым двум сегментам таблицы запроса или None."""
         if len(segments) < 2:
             return None
-        return self.by_type_name.get(f'{segments[0]}.{segments[1]}')
+        return self.by_type_name.get(f'{segments[0]}.{segments[1]}'.lower())
 
     def table_ok(self, segments):
         return self.resolve_table(segments) is not None

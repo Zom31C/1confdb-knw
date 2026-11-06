@@ -138,3 +138,85 @@ def test_module_without_methods():
     module_text, methods = parse_methods('Перем А;\nПерем Б;\n')
     assert methods == []
     assert module_text == 'Перем А;\nПерем Б;'
+
+
+ASYNC_MODULE = '''&НаКлиенте
+Асинх Процедура ПоказатьДанные(Команда)
+\tУспех = Ждать ВопросАсинх("?");
+КонецПроцедуры
+
+Асинх Функция ПолучитьАсинх(А) Экспорт
+\tВозврат Ждать Сервис.Данные(А);
+КонецФункции
+
+Процедура Обычная()
+\tА = 1;
+КонецПроцедуры
+'''
+
+
+def test_async_methods_extracted():
+    _, methods = parse_methods(ASYNC_MODULE)
+    assert [m['name'] for m in methods] == [
+        'ПоказатьДанные', 'ПолучитьАсинх', 'Обычная']
+    assert [m['is_async'] for m in methods] == [True, True, False]
+    assert methods[0]['kind'] == 'процедура'
+    assert methods[1]['kind'] == 'функция'
+    assert methods[1]['is_export'] is True
+    # тело включает строку с «Асинх»
+    assert methods[0]['body'].startswith('Асинх Процедура ПоказатьДанные')
+
+
+def test_async_module_text_and_roundtrip():
+    from confdb.bsl_parser import rebuild_module
+    module_text, methods = parse_methods(ASYNC_MODULE)
+    # код асинх-методов вырезан из текста модуля, сигнатуры сохранены
+    assert 'ВопросАсинх' not in module_text
+    assert 'Асинх Процедура ПоказатьДанные(Команда)' in module_text
+    assert 'Асинх Функция ПолучитьАсинх(А) Экспорт' in module_text
+    # реконструкция точная
+    rebuilt = rebuild_module(module_text, methods)
+    assert rebuilt == ASYNC_MODULE.rstrip('\n')
+
+
+def test_rebuild_old_db_async_inline_is_safe():
+    """Старая база: асинх-метод НЕ в списке methods (остался в module.body
+    целиком) — реконструкция не должна его съесть или сдвинуть остальные."""
+    from confdb.bsl_parser import rebuild_module
+    # эмуляция старой базы: текст модуля с цельным асинх-методом,
+    # а в списке методов — только обычный
+    old_body = '''Асинх Процедура АсинхМетод()
+\tЖдать Что-то();
+КонецПроцедуры
+
+Процедура Обычная()
+'''
+    methods = [{'kind': 'процедура', 'name': 'Обычная',
+                'body': 'Процедура Обычная()\n\tА = 1;\nКонецПроцедуры'}]
+    rebuilt = rebuild_module(old_body, methods)
+    assert 'Асинх Процедура АсинхМетод()' in rebuilt
+    assert 'Ждать Что-то();' in rebuilt
+    assert 'А = 1;' in rebuilt
+    assert rebuilt.count('Процедура Обычная()') == 1
+
+
+def test_async_with_directive_and_multiline_signature():
+    module = ('&НаКлиенте\n'
+              'Асинх Процедура Обработать(\n'
+              '\t\tПарам1,\n'
+              '\t\tПарам2) Экспорт\n'
+              '\tЖдать ВнешнийСервис.Метод(Парам1);\n'
+              'КонецПроцедуры\n')
+    module_text, methods = parse_methods(module)
+    assert len(methods) == 1
+    m = methods[0]
+    assert m['is_async'] is True
+    assert m['is_export'] is True
+    assert m['signature'] == 'Парам1, Парам2'
+    assert m['directives'] == ['&НаКлиенте']
+    assert m['line_start'] == 2 and m['line_end'] == 6
+    # многострочная сигнатура целиком остаётся в тексте модуля, тело вырезано
+    assert 'ВнешнийСервис.Метод' not in module_text
+    assert 'Асинх Процедура Обработать(' in module_text
+    from confdb.bsl_parser import rebuild_module
+    assert rebuild_module(module_text, methods) == module.rstrip('\n')

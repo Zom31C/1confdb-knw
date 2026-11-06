@@ -89,8 +89,46 @@ def test_missing_common_method(tmp_path_factory):
     ctx = _ctx(tmp_path_factory)
     d = analyze_module(
         'Процедура П()\n    ОбщийМодуль1.НетТакого();\nКонецПроцедуры\n', ctx)
+    # модуль объекта (не форма): область видимости полна → ERROR
+    assert any(x.code == 'MissingCommonModuleMethod'
+               and x.severity == 'ERROR' for x in d)
+
+
+def test_missing_common_method_form_module_warning(tmp_path_factory):
+    ctx = _ctx(tmp_path_factory)
+    d = analyze_module(
+        'Процедура П()\n    ОбщийМодуль1.НетТакого();\nКонецПроцедуры\n', ctx,
+        is_form_module=True)
+    # в модуле формы имя может быть атрибутом формы → WARNING
     assert any(x.code == 'MissingCommonModuleMethod'
                and x.severity == 'WARNING' for x in d)
+
+
+def test_missing_common_method_variable_shadowing(tmp_path_factory):
+    ctx = _ctx(tmp_path_factory)
+    d = analyze_module(
+        'Процедура П()\n    ОбщийМодуль1 = ПолучитьСписок();\n'
+        '    ОбщийМодуль1.НетТакого();\nКонецПроцедуры\n', ctx)
+    # имя назначено переменной в этом методе → не общий модуль
+    assert not any(x.code == 'MissingCommonModuleMethod' for x in d)
+
+
+def test_missing_common_method_module_var_shadowing(tmp_path_factory):
+    ctx = _ctx(tmp_path_factory)
+    d = analyze_module(
+        'Перем ОбщийМодуль1;\n\n'
+        'Процедура П()\n    ОбщийМодуль1.НетТакого();\nКонецПроцедуры\n', ctx)
+    # модульная переменная с именем общего модуля — тоже затенение
+    assert not any(x.code == 'MissingCommonModuleMethod' for x in d)
+
+
+def test_self_module_nonexport_not_flagged(tmp_path_factory):
+    ctx = _ctx(tmp_path_factory)
+    d = analyze_module(
+        'Процедура П()\n    ОбщийМодуль1.Закрытая();\nКонецПроцедуры\n', ctx,
+        self_module='ОбщийМодуль1')
+    # вызов своего не-Экспорт метода из того же модуля
+    assert not any(x.code == 'NonExportCommonModuleMethod' for x in d)
 
 
 def test_nonexport_common_method(tmp_path_factory):
@@ -194,3 +232,170 @@ def test_global_find_still_flagged():
     d = analyze_module(
         'Процедура П()\n    Где = Найти(Строка, "х");\nКонецПроцедуры\n', None)
     assert any(x.code == 'DeprecatedFind' for x in d)
+
+
+# -- ярус 2: метаданные -------------------------------------------------------
+
+def test_metadata_object_missing(tmp_path_factory):
+    ctx = _ctx(tmp_path_factory)
+    d = analyze_module(
+        'Процедура П()\n    Ссылка = Справочники.НетТакого.НайтиПоКоду("1");\n'
+        'КонецПроцедуры\n', ctx)
+    assert any(x.code == 'MetadataObjectMissing'
+               and x.severity == 'ERROR' for x in d)
+
+
+def test_metadata_object_present_ok(tmp_path_factory):
+    ctx = _ctx(tmp_path_factory)
+    d = analyze_module(
+        'Процедура П()\n    Ссылка = Справочники.Справочник1.НайтиПоКоду("1");\n'
+        'КонецПроцедуры\n', ctx)
+    assert not any(x.code == 'MetadataObjectMissing' for x in d)
+
+
+def test_metadata_chain_with_prefix_not_flagged(tmp_path_factory):
+    ctx = _ctx(tmp_path_factory)
+    d = analyze_module(
+        'Процедура П()\n'
+        '    Если Метаданные.Справочники.Содержит(Имя) Тогда\n'
+        '        А = 1;\n'
+        '    КонецЕсли;\n'
+        '    СтрокаТаблицы.Документы.Добавить();\n'
+        'КонецПроцедуры\n', ctx)
+    # голова цепочки — не менеджер (Метаданные / переменная): не проверяем
+    assert not any(x.code == 'MetadataObjectMissing' for x in d)
+
+
+def test_manager_method_whitelisted(tmp_path_factory):
+    ctx = _ctx(tmp_path_factory)
+    d = analyze_module(
+        'Процедура П()\n    Узел = ПланыОбмена.ГлавныйУзел();\n'
+        '    Типы = Справочники.ТипВсеСсылки();\nКонецПроцедуры\n', ctx)
+    assert not any(x.code == 'MetadataObjectMissing' for x in d)
+
+
+def test_metadata_manager_variable_shadowing(tmp_path_factory):
+    ctx = _ctx(tmp_path_factory)
+    d = analyze_module(
+        'Процедура П()\n    Справочники = Новый Массив;\n'
+        '    Справочники.Добавить(1);\nКонецПроцедуры\n', ctx)
+    assert not any(x.code == 'MetadataObjectMissing' for x in d)
+
+
+# -- ярус 2: запросы в модуле -------------------------------------------------
+
+def test_query_in_module_bad_table(tmp_path_factory):
+    ctx = _ctx(tmp_path_factory)
+    d = analyze_module(
+        'Процедура П()\n'
+        '    Запрос = Новый Запрос;\n'
+        '    Запрос.Текст = "ВЫБРАТЬ Т.Ссылка ИЗ Справочник.НетТакого КАК Т";\n'
+        'КонецПроцедуры\n', ctx)
+    assert any(x.code == 'QueryToMissingMetadata'
+               and x.severity == 'ERROR' for x in d)
+
+
+def test_query_in_module_ok(tmp_path_factory):
+    ctx = _ctx(tmp_path_factory)
+    d = analyze_module(
+        'Процедура П()\n'
+        '    Запрос.Текст = "ВЫБРАТЬ Т.СсылкаАтрибут ИЗ '
+        'Справочник.Справочник1 КАК Т";\n'
+        'КонецПроцедуры\n', ctx)
+    assert not any(x.code in ('QueryToMissingMetadata', 'QueryParseError',
+                              'ConfdbQueryValidation') for x in d)
+
+
+def test_query_template_with_percent_skipped(tmp_path_factory):
+    ctx = _ctx(tmp_path_factory)
+    d = analyze_module(
+        'Процедура П()\n'
+        '    Текст = "ВЫБРАТЬ %1.Ссылка ИЗ Справочник.%2 КАК %1";\n'
+        'КонецПроцедуры\n', ctx)
+    assert not any(x.code in ('QueryToMissingMetadata', 'QueryParseError',
+                              'ConfdbQueryValidation') for x in d)
+
+
+def test_query_hash_temp_table_not_syntax_error(tmp_path_factory):
+    ctx = _ctx(tmp_path_factory)
+    d = analyze_module(
+        'Процедура П()\n'
+        '    Запрос.Текст = "ВЫБРАТЬ ПЕРВЫЕ 1 Х.Ссылка ИЗ #Врем КАК Х";\n'
+        'КонецПроцедуры\n', ctx)
+    # #ВременнаяТаблица — легальный синтаксис, чужой ПОМЕСТИТЬ-набор: не ошибка
+    assert not any(x.code in ('QueryToMissingMetadata', 'QueryParseError')
+                   for x in d)
+
+
+def test_query_hash_template_skipped(tmp_path_factory):
+    ctx = _ctx(tmp_path_factory)
+    d = analyze_module(
+        'Процедура П()\n'
+        '    Запрос.Текст = "ВЫБРАТЬ #Таблица.Поле ИЗ Справочник.НетТакого";\n'
+        'КонецПроцедуры\n', ctx)
+    # '#' в тексте — шаблон с подстановкой: запрос не проверяется вовсе
+    assert not any(x.code in ('QueryToMissingMetadata', 'QueryParseError',
+                              'ConfdbQueryValidation') for x in d)
+
+
+def test_query_versiya_dannyh_is_standard_field(tmp_path_factory):
+    ctx = _ctx(tmp_path_factory)
+    d = analyze_module(
+        'Процедура П()\n'
+        '    Запрос.Текст = "ВЫБРАТЬ Т.ВерсияДанных ИЗ '
+        'Справочник.Справочник1 КАК Т";\n'
+        'КонецПроцедуры\n', ctx)
+    assert not any(x.code == 'ConfdbQueryValidation' for x in d)
+
+
+# -- ярус 2: область видимости и контексты ------------------------------------
+
+def test_bracket_index_chain_skipped(tmp_path_factory):
+    ctx = _ctx(tmp_path_factory)
+    d = analyze_module(
+        'Процедура П()\n'
+        '    Документы[ИмяДокумента].ПолучитьМакет("Основной");\n'
+        '    Значение = ОбщийМодуль1[Индекс].Свойство;\n'
+        'КонецПроцедуры\n', ctx)
+    # [индекс] делает состав цепочки динамическим — не проверяем
+    assert not any(x.code in ('MetadataObjectMissing',
+                              'MissingCommonModuleMethod') for x in d)
+
+
+def test_extra_scope_suppresses_common_module(tmp_path_factory):
+    ctx = _ctx(tmp_path_factory)
+    d = analyze_module(
+        'Процедура П()\n    ОбщийМодуль1.НетТакого();\nКонецПроцедуры\n', ctx,
+        extra_scope=frozenset({'ОбщийМодуль1'}))
+    # реквизит/ТЧ объекта с именем общего модуля затеняет его
+    assert not any(x.code == 'MissingCommonModuleMethod' for x in d)
+
+
+def test_extra_scope_suppresses_manager(tmp_path_factory):
+    ctx = _ctx(tmp_path_factory)
+    code = 'Процедура П()\n    Документы.Удалить(0);\nКонецПроцедуры\n'
+    # реквизит/ТЧ с именем менеджера затеняет менеджер
+    d = analyze_module(code, ctx, extra_scope=frozenset({'Документы'}))
+    assert not any(x.code == 'MetadataObjectMissing' for x in d)
+    # без затенения «Удалить» — не объект метаданных и не метод менеджера
+    d2 = analyze_module(code, ctx)
+    assert any(x.code == 'MetadataObjectMissing' for x in d2)
+
+
+def test_client_server_conflict(tmp_path_factory):
+    ctx = _ctx(tmp_path_factory)
+    d = analyze_module(
+        '&НаКлиенте\nПроцедура П()\n    ОбщийМодуль1.Экспортная(1);\n'
+        'КонецПроцедуры\n', ctx)
+    # ОбщийМодуль1 в тестовой базе имеет контекст «Сервер»
+    assert any(x.code == 'ClientServerCallConflict'
+               and x.severity == 'WARNING' for x in d)
+
+
+def test_context_conflict_server_call_is_legal():
+    from confdb.bsl_analyzer import context_conflict
+    # «Вызов сервера» — легальный вызов с клиента через серверный прокси
+    assert context_conflict('client', 'Сервер,Вызов сервера') is None
+    assert context_conflict('client', 'Сервер') is not None
+    assert context_conflict('client', 'Клиент (управляемое приложение)') is None
+    assert context_conflict(None, 'Сервер') is None

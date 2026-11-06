@@ -212,6 +212,36 @@ def test_check_syntax_semantic_clean(tmp_path_factory):
     assert 'Семантических замечаний нет' in sem
 
 
+def test_check_syntax_semantic_tier2_metadata_and_query(tmp_path_factory):
+    server = _server(tmp_path_factory)
+    code = ('&НаКлиенте\n'
+            'Процедура П()\n'
+            '    А = Справочники.НетТакого.Создать();\n'
+            '    Запрос.Текст = "ВЫБРАТЬ Т.Ссылка ИЗ Справочник.НетТакого КАК Т";\n'
+            '    ОбщийМодуль1.Экспортная(1);\n'
+            'КонецПроцедуры\n')
+    sem = _call(server, 'check_syntax', text=code,
+                semantic=True)['content'][0]['text']
+    assert 'MetadataObjectMissing' in sem
+    assert 'QueryToMissingMetadata' in sem
+    # &НаКлиенте вызывает общий модуль с контекстом «Сервер»
+    assert 'ClientServerCallConflict' in sem
+
+
+def test_check_syntax_semantic_tier2_valid_not_flagged(tmp_path_factory):
+    server = _server(tmp_path_factory)
+    code = ('Процедура П()\n'
+            '    А = Справочники.Справочник1.Создать();\n'
+            '    Запрос.Текст = "ВЫБРАТЬ Т.СсылкаАтрибут ИЗ '
+            'Справочник.Справочник1 КАК Т";\n'
+            'КонецПроцедуры\n')
+    sem = _call(server, 'check_syntax', text=code,
+                semantic=True)['content'][0]['text']
+    assert 'MetadataObjectMissing' not in sem
+    assert 'QueryToMissingMetadata' not in sem
+    assert 'ConfdbQueryValidation' not in sem
+
+
 def test_refs_and_skd_empty(tmp_path_factory):
     server = _server(tmp_path_factory)
     refs = _call(server, 'refs_of', path='Catalog/Справочник1')['content'][0]['text']

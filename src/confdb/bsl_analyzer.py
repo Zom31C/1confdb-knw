@@ -29,7 +29,10 @@ BSL_MANAGERS = {
     'регистрыбухгалтерии': 'AccountingRegister',
     'регистрырасчета': 'CalculationRegister',
     'планысчетов': 'ChartOfAccounts',
-    'планывидовхарактеристик': 'ChartOfCharacteristicTypes',
+    # тип в meta_object — 'ChartOfCharacteristicType' (единственное число,
+    # как и префикс ПланВидовХарактеристик в query_lang.QUERY_PREFIXES);
+    # множественное 'ChartOfCharacteristicTypes' не разрешалось никогда
+    'планывидовхарактеристик': 'ChartOfCharacteristicType',
     'планывидоврасчета': 'ChartOfCalculationTypes',
     'планыобмена': 'ExchangePlan',
     'обработки': 'DataProcessor',
@@ -503,6 +506,7 @@ class BslContext:
 
     def __init__(self, conn):
         from .query_lang import MetaContext
+        self.conn = conn   # для фолбэков (поиск Асинх-объявлений в module.body)
         self.meta = MetaContext(conn)
         self.common = {}
         for name, path, context in conn.execute(
@@ -716,6 +720,10 @@ def context_conflict(caller_context, callee_context):
         return None
     low = callee_context.lower()
     if 'клиент' in low:
+        return None
+    # модуль с признаком «Серверный вызов» (Вызов сервера) легально вызывается
+    # с клиента через серверный прокси — конфликтом не считается
+    if 'вызов сервера' in low:
         return None
     if 'сервер' in low:
         return ('серверный общий модуль вызывается из клиентского контекста — '
