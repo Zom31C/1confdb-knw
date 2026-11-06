@@ -50,9 +50,16 @@ One line each; detail in README «Состав» and on the page named after it.
 - `tui.py` — console UI (the user chose console over GUI; do not suggest tkinter). Page
   `tui-console`.
 - `bsl_parser.py`, `bsl_analyzer.py` — split BSL into methods; lexical analysis for
-  dependencies and result schemas. The analyzer deliberately does **not** check module
-  syntax — that is the BSL Language Server's job, only in the `-lsp` variant; do not add a
-  `check_bsl`-style checker here. Page `bsl-ls-integration`.
+  dependencies and result schemas (`rebuild_module` restores a module's full text from the DB).
+- `bsl_syntax.py` — native BSL syntax checker (lexer + recursive-descent parser, stdlib only),
+  the `check_syntax` MCP tool: block constructs, preprocessor `#Если`/`#Область` balance,
+  strings, expressions, `Асинх`/`Ждать`, `&`-directives/annotations — diagnostics with
+  positions and BSL-LS-compatible codes. Grammar-only (no type/scope resolution). Grammar
+  checklist = ANTLR `BSLParser.g4`/`BSLLexer.g4` (1c-syntax/bsl-parser, LGPL); the Python code
+  is a clean-room implementation, NOT a port of the Java BSL Language Server. Acceptance:
+  41241 modules of three real configs, zero false positives. This SUPERSEDES the old "syntax is
+  only the `-lsp` variant's job, do not add a checker" rule — the unified build checks syntax
+  natively and `1confdb-knw-lsp` is retired. Page `bsl-ls-integration`.
 - `header_props.py` — reads `meta_object.header_json` without re-extracting. Pages
   `register-header-structure`, `configuration-header-props`.
 - `query_lang.py` — query language lexer/parser/validator (page `query-validator`);

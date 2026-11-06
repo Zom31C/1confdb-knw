@@ -114,3 +114,46 @@ def parse_methods(text):
             continue
         out.append(ln)
     return '\n'.join(out), methods
+
+
+def rebuild_module(module_body, methods):
+    """Восстанавливает исходный текст модуля из результата parse_methods.
+
+    module_body — первый элемент кортежа parse_methods (модуль без кода
+    методов, сигнатуры сохранены); methods — последовательность словарей
+    методов с ключами 'name', 'kind', 'body' в порядке возрастания
+    line_start (как их хранит таблица method). Блок строк каждой сигнатуры
+    заменяется на сохранённое тело метода (тело начинается той же
+    сигнатурой), поэтому результат совпадает с исходным модулем с точностью
+    до завершающих пустых строк. При расхождении данных (сигнатура не
+    совпала с ожидаемым методом) строки выдаются как есть — без потерь.
+    """
+    lines = module_body.splitlines()
+    out = []
+    mi = 0
+    n_methods = len(methods)
+    i = 0
+    n = len(lines)
+    while i < n:
+        line = lines[i]
+        m = RE_METHOD.match(line)
+        if m and mi < n_methods:
+            meth = methods[mi]
+            kind = 'процедура' if m.group('kind').lower() == 'процедура' \
+                else 'функция'
+            if meth.get('kind') == kind and meth.get('name') == m.group('name'):
+                # съедаем строки сигнатуры (скобки балансируем, как в
+                # parse_methods) и подставляем сохранённое тело
+                depth = line.count('(') - line.count(')')
+                t = i
+                while depth > 0 and t + 1 < n:
+                    t += 1
+                    depth += lines[t].count('(') - lines[t].count(')')
+                body = meth.get('body') or ''
+                out.append(body)
+                mi += 1
+                i = t + 1
+                continue
+        out.append(line)
+        i += 1
+    return '\n'.join(out)

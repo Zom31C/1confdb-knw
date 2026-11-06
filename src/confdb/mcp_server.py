@@ -465,7 +465,7 @@ DATABASE SCHEMA (for the sql tool; path columns store the legacy slash form 'Cat
 
 1C QUERY LANGUAGE: Russian keywords, dotted paths, table names 'Справочник.Имя', 'Документ.Имя', 'РегистрСведений.Имя', 'РегистрНакопления.Имя.Обороты' (virtual tables: Остатки, Обороты, СрезПоследних…). Grouping clause is 'СГРУППИРОВАТЬ ПО' — the form 'СГРУППИРОВАНО' does NOT exist in the 1C query language. Example: ВЫБРАТЬ Т.Запасы.Номенклатура.Наименование ИЗ Документ.ЗаказПокупателя КАК Т ГДЕ Т.Сумма > 0.
 
-RECOMMENDED WORKFLOW to write a query or 1C code: 1) configuration_info to know which configuration and release you are in, find_objects to locate objects; 2) object_card for its fields, sections, references and the event subscriptions fired on it (the platform calls those handlers, so there is no call site to find in code); 3) skd_of / find_skd to see how THIS configuration queries the same tables (best examples); 4) find_methods — by mask for a name/signature/description, or by text to search INSIDE method bodies: that is how you find EVERY place touching something (all writes to a register, all calls of a common module, all uses of a field) without falling back to a full-text sql query, and every hit carries its module line number; find_methods(text='"Имя"') finds all places where a string literal is mentioned (useful for dynamic calls); then find_method_context for a window around the call you need (it also gives stable insertion markers) and get_method for the full body — reuse existing code instead of inventing; 5) check_query to validate your query before use; 6) method_dependencies before porting code to another configuration (it lists everything the code needs there — including dynamic calls via Вычислить/Выполнить with string literals, resolved against the configuration's modules and objects); when several releases or extensions are open at once, pass scope=[aliases] — the exact combination of bases where missing dependencies may be resolved — and expect={alias: sha256-prefix from configuration_info} to pin snapshots: a dependency found only OUTSIDE the scope is reported as such, never silently borrowed from another release; callers=True adds the INBOUND call graph (who calls this method — each edge names the module line, its enclosing conditions and how it was resolved; event subscriptions and extension interceptions appear as PLATFORM links: registration is not an execution fact, string dispatch stays unconfirmed), depth=2..3 expands the graph transitively, diff_db=<alias> marks every graph node with whether the method changed vs another base; compare_object / extension_diff to see how two configurations differ; 7) method_result_schema when a stock function returns a temporary table and you need its columns; 8) role_rights / object_rights for access analysis — what a role is given and which roles carry explicit rights on an object (its fields and tabular sections included); effective_rights(roles=[…]) to combine several roles and see which role carries each right; role_diff(roles_a, roles_b) to see what one set has that another lacks; role_impact(role) or role_impact(roles_before, roles_after) to assess what methods, SKD queries, and programmatic checks lose a right when a role is narrowed — shows layers (static rights, RLS, programmatic checks as heuristic, UI visibility out of scope) and names the boundary of static analysis (privileged mode, dynamic calls). This server does NOT check 1C code syntax — for that use the 1confdb-knw-lsp variant (BSL Language Server).
+RECOMMENDED WORKFLOW to write a query or 1C code: 1) configuration_info to know which configuration and release you are in, find_objects to locate objects; 2) object_card for its fields, sections, references and the event subscriptions fired on it (the platform calls those handlers, so there is no call site to find in code); 3) skd_of / find_skd to see how THIS configuration queries the same tables (best examples); 4) find_methods — by mask for a name/signature/description, or by text to search INSIDE method bodies: that is how you find EVERY place touching something (all writes to a register, all calls of a common module, all uses of a field) without falling back to a full-text sql query, and every hit carries its module line number; find_methods(text='"Имя"') finds all places where a string literal is mentioned (useful for dynamic calls); then find_method_context for a window around the call you need (it also gives stable insertion markers) and get_method for the full body — reuse existing code instead of inventing; 5) check_query to validate your query before use, and check_syntax to validate the SYNTAX of any BSL module code before you deliver it — pass text=<the code you wrote> (an empty result means the grammar is correct; it also checks an existing module by path+code_name). Syntax checking is now BUILT IN (native parser, no Java / no separate 1confdb-knw-lsp variant); 6) method_dependencies before porting code to another configuration (it lists everything the code needs there — including dynamic calls via Вычислить/Выполнить with string literals, resolved against the configuration's modules and objects); when several releases or extensions are open at once, pass scope=[aliases] — the exact combination of bases where missing dependencies may be resolved — and expect={alias: sha256-prefix from configuration_info} to pin snapshots: a dependency found only OUTSIDE the scope is reported as such, never silently borrowed from another release; callers=True adds the INBOUND call graph (who calls this method — each edge names the module line, its enclosing conditions and how it was resolved; event subscriptions and extension interceptions appear as PLATFORM links: registration is not an execution fact, string dispatch stays unconfirmed), depth=2..3 expands the graph transitively, diff_db=<alias> marks every graph node with whether the method changed vs another base; compare_object / extension_diff to see how two configurations differ; 7) method_result_schema when a stock function returns a temporary table and you need its columns; 8) role_rights / object_rights for access analysis — what a role is given and which roles carry explicit rights on an object (its fields and tabular sections included); effective_rights(roles=[…]) to combine several roles and see which role carries each right; role_diff(roles_a, roles_b) to see what one set has that another lacks; role_impact(role) or role_impact(roles_before, roles_after) to assess what methods, SKD queries, and programmatic checks lose a right when a role is narrowed — shows layers (static rights, RLS, programmatic checks as heuristic, UI visibility out of scope) and names the boundary of static analysis (privileged mode, dynamic calls). This server does NOT check 1C code syntax — for that use the 1confdb-knw-lsp variant (BSL Language Server).
 
 All tools are read-only. Prefer the dedicated tools over raw sql; use sql only for what is not covered. ANTI-LOOP: never issue more than two sql calls in a row — if sql did not answer the question, switch to the dedicated tools (find_objects, object_card, find_field, skd_of, refs_of). The schema is EXACTLY as documented above — never waste calls on PRAGMA / sqlite_master / schema guessing.
 
@@ -3733,6 +3733,57 @@ class McpServer:
             parts.append(msg)
         return '\n'.join(parts)
 
+    def check_syntax(self, path=None, code_name='obj', text=None, db=None):
+        """Проверка синтаксиса модуля/кода BSL нативным парсером (без платформы
+        и без Java/BSL Language Server — язык разбирает confdb.bsl_syntax).
+
+        Два режима:
+        - ``text`` — проверить произвольный фрагмент кода или целый модуль
+          (то, что агент собирается отдать пользователю);
+        - ``path`` (+``code_name``) — проверить модуль конфигурации из базы:
+          полный текст реконструируется из module.body и тел его методов.
+
+        Возвращает список замечаний с позицией строка:колонка, кодом
+        диагностики (имена диагностик BSL Language Server) и сообщением.
+        Пусто = синтаксис корректен. Семантика (разрешение имён, типы) здесь
+        НЕ проверяется — только грамматика языка.
+        """
+        from .bsl_syntax import MAX_DIAGNOSTICS, analyze
+        if text is not None:
+            result = analyze(text)
+            label = 'фрагмент кода'
+        else:
+            if not path:
+                raise UserError('укажите path (и code_name) либо text')
+            path = self.resolve_path(path, db)
+            conn = self.conn(db)
+            row = conn.execute(
+                'SELECT m.id, m.body FROM module m '
+                'JOIN meta_object o ON o.id=m.object_id '
+                'WHERE o.path=? AND m.code_name=?', (path, code_name)).fetchone()
+            if not row or not row[1]:
+                return f'модуль не найден: {path} ({code_name})'
+            from .bsl_parser import rebuild_module
+            methods = [{'kind': k, 'name': n, 'body': b}
+                       for k, n, b in conn.execute(
+                           'SELECT kind, name, body FROM method '
+                           'WHERE module_id=? ORDER BY line_start', (row[0],))]
+            result = analyze(rebuild_module(row[1], methods))
+            label = f'{path} ({code_name})'
+        diags = result.diags
+        if not diags:
+            tail = ''
+            if text is None and result.methods:
+                tail = f' (методов: {len(result.methods)})'
+            return f'OK: синтаксических ошибок нет — {label}{tail}'
+        lines = [f'Синтаксические ошибки ({len(diags)}) — {label}:']
+        for d in diags:
+            lines.append(f'  {d.line}:{d.col} [{d.code}] {d.message}')
+        if result.truncated:
+            lines.append(f'  … разбор остановлен на {MAX_DIAGNOSTICS} '
+                         'сообщениях — исправьте первые ошибки и проверьте снова')
+        return '\n'.join(lines)
+
     def sql(self, query, db=None):
         stripped = _sql_rewrite(query).strip().rstrip(';')
         head = stripped.upper()
@@ -4460,6 +4511,21 @@ TOOLS = [
          'run it on a query you wrote before using it.',
          _schema({'text': _STR, 'db': _DB, 'group': _GROUP}, ('text',)),
          McpServer.check_query),
+    Tool('check_syntax',
+         'Check the SYNTAX of 1C/BSL module code with the built-in parser '
+         '(no platform, no Java). Pass text=<code> to validate a snippet or a '
+         'whole module you are about to give the user — ALWAYS do this before '
+         'delivering BSL code; or pass path (+code_name, default "obj") to '
+         'check an existing module of the configuration (its full text is '
+         'rebuilt from the knowledge base). Returns diagnostics as '
+         'line:col [Code] message (ParseError, InvalidCharacterInFile, '
+         'preprocessor #Если/#Область balance, unclosed strings/brackets); '
+         'empty = the syntax is correct. Grammar only: it does NOT resolve '
+         'names or infer types — use check_query for queries and '
+         'method_dependencies for references.',
+         _schema({'path': _STR, 'code_name': _STR, 'text': _STR,
+                  'db': _DB, 'group': _GROUP}),
+         McpServer.check_syntax),
     Tool('sql',
          'Read-only SELECT escape hatch for anything not covered by the '
          'dedicated tools. Non-SELECT is rejected; LIMIT 200 enforced.',

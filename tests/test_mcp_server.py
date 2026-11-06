@@ -65,14 +65,17 @@ def test_tools_list(tmp_path_factory):
                      'find_method_context', 'method_dependencies',
                      'method_result_schema', 'find_methods',
                      'skd_of', 'find_skd', 'xdto_of', 'find_xdto',
-                     'check_query', 'sql',
+                     'check_query', 'check_syntax', 'sql',
                      'compare_object', 'method_diff', 'config_diff',
                      'extension_diff', 'configuration_info',
                      'db_list', 'db_open', 'db_use', 'db_close',
                      'group_create', 'group_add_db', 'group_remove_db',
                      'group_list', 'group_use', 'group_close'}
-    # проверку синтаксиса модулей делает BSL Language Server (1confdb-knw-lsp),
-    # в mainline её быть не должно
+    # проверку синтаксиса теперь делает нативный парсер confdb.bsl_syntax
+    # (инструмент check_syntax) — единая сборка, отдельный вариант
+    # 1confdb-knw-lsp / Java-прокси bsl_* больше не нужны
+    assert 'check_syntax' in names
+    # старого имени Java-варианта (check_bsl) в единой сборке нет
     assert 'check_bsl' not in names
     # каждый инструмент указывает функцию-обработчик и схему
     for tool in resp['result']['tools']:
@@ -132,6 +135,58 @@ def test_check_and_sql(tmp_path_factory):
     assert 'Catalog/Справочник1' in res['content'][0]['text']
     denied = _call(server, 'sql', query='DELETE FROM meta_object')
     assert denied.get('isError')
+
+
+def test_check_syntax_text_ok(tmp_path_factory):
+    server = _server(tmp_path_factory)
+    ok = _call(server, 'check_syntax', text=(
+        'Процедура П(А, Знач Б = 1) Экспорт\n'
+        '    Если А > Б Тогда\n'
+        '        Сообщить("ок");\n'
+        '    КонецЕсли;\n'
+        'КонецПроцедуры\n'))['content'][0]['text']
+    assert '=== база' in ok and 'OK' in ok and 'ошибок нет' in ok
+
+
+def test_check_syntax_text_errors(tmp_path_factory):
+    server = _server(tmp_path_factory)
+    bad = _call(server, 'check_syntax', text=(
+        'Процедура П()\n'
+        '    А = "незакрытая\n'
+        '    Если А Тогда\n'))['content'][0]['text']
+    assert 'Синтаксические ошибки' in bad
+    assert 'строковый литерал' in bad      # незакрытая строка
+    assert 'КонецЕсли' in bad              # незакрытый Если (ошибка на EOF;
+    # «КонецПроцедуры» там же на EOF гасится дедупликацией по позиции)
+    # отдельно: незакрытая процедура сообщается, когда это единственная ошибка
+    proc = _call(server, 'check_syntax', text=(
+        'Процедура П()\n    А = 1;\n'))['content'][0]['text']
+    assert 'КонецПроцедуры' in proc
+
+
+def test_check_syntax_module_from_db(tmp_path_factory):
+    """Режим path: модуль реконструируется из module.body + тел методов."""
+    server = _server(tmp_path_factory)
+    ok = _call(server, 'check_syntax',
+               path='CommonModule/ОбщийМодуль1',
+               code_name='obj')['content'][0]['text']
+    assert 'OK' in ok and 'ошибок нет' in ok
+    assert 'методов: 2' in ok              # Экспортная + Закрытая
+
+
+def test_check_syntax_module_not_found(tmp_path_factory):
+    server = _server(tmp_path_factory)
+    out = _call(server, 'check_syntax',
+                path='CommonModule/НетТакого', code_name='obj'
+                )['content'][0]['text']
+    assert 'модуль не найден' in out
+
+
+def test_check_syntax_requires_path_or_text(tmp_path_factory):
+    server = _server(tmp_path_factory)
+    resp = _call(server, 'check_syntax')
+    assert resp.get('isError')
+    assert 'path' in resp['content'][0]['text']
 
 
 def test_refs_and_skd_empty(tmp_path_factory):
