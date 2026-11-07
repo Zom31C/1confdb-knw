@@ -16,9 +16,10 @@ section=табличная часть (row table of an object).
 
 Details are not here: `page {"op":"list"}` names the knowledge-base pages (`db-schema`,
 `gotchas`, `mcp-server-1confdb-knw`, `extraction-pipeline`, `publication-two-repos`,
-`role-rights-format`, …), and `README.md` («Состав», «Схема базы данных») carries the
-module-by-module and column-by-column detail. state3 is NOT shipped inside `dist\`, so
-there README is the fallback.
+`role-rights-format`, …), and `docs/details.md` («Состав», «Схема базы данных») carries
+the module-by-module and column-by-column detail (README.md is the short user-facing
+intro: MCP server first, features, install, quick start). state3 is NOT shipped inside
+`dist\`, so there README+docs/details.md are the fallback.
 
 ## Hard constraints
 
@@ -41,7 +42,7 @@ there README is the fallback.
 
 ## Layout
 
-One line each; detail in README «Состав» and on the page named after it.
+One line each; detail in docs/details.md «Состав» and on the page named after it.
 
 - `extract.py` — pipeline stages 0/1/3; work dir on the target's volume; `file_sha256` +
   `check_same_source` skip re-extracting the same file. Page `extraction-pipeline`.
@@ -129,7 +130,7 @@ check-sync.bat                                        :: root src/tests vs the d
 ```
 
 `confdb.bat bench <file.cf>` tunes `workers` to the hardware; the rest of the CLI flags are
-in README «Использование».
+in docs/details.md («Извлечение: подробности», опции `extract`).
 
 ## Database schema
 
@@ -140,7 +141,7 @@ Tables: `source`, `file`, `meta_object` / `meta_attribute` / `meta_tabular`,
 **sparse**: no row means "the right is not set", never "denied". `meta_attribute.uuid` and
 `meta_tabular.uuid` carry the sub-object ids that rights point at. Column lists, every
 `type_str` form, reference-uuid resolution and the SKD binary layout: page `db-schema` and
-README «Схема базы данных». Acceptance criterion for the query validator: **375/375** SKD
+docs/details.md «Схема базы данных». Acceptance criterion for the query validator: **375/375** SKD
 queries pass (`confdb check`) — keep it green when touching `query_lang.py` or `writer.py`.
 
 ## Gotchas
