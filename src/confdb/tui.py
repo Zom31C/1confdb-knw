@@ -865,6 +865,11 @@ class Tui:
             if choice == '1':
                 args = (['-m', 'confdb.mcp_server'] + list(dbs)
                         + group_cli_args(groups))
+                # синтакс-помощник платформы: syntax_db из ~/.confdb/config.json
+                from .mcp_server import resolve_syntax_db
+                syntax_db = resolve_syntax_db()
+                if syntax_db:
+                    args += ['--syntax-db', syntax_db]
                 _cls()
                 print('Сервер работает по stdio; остановка — Ctrl+C.')
                 print(f'  {{"command": "{sys.executable}", '
@@ -889,8 +894,14 @@ class Tui:
             print('Нужно целое число.')
             input('Нажмите Enter…')
             return
-        from .mcp_server import McpServer, start_http_server
-        server = McpServer(dbs, groups=list(groups))
+        from .mcp_server import McpServer, resolve_syntax_db, start_http_server
+        try:
+            server = McpServer(dbs, groups=list(groups),
+                               syntax_db=resolve_syntax_db())
+        except ValueError as err:
+            print(f'Не удалось открыть базы: {err}')
+            input('Нажмите Enter…')
+            return
         try:
             httpd, real_port = start_http_server(server, '127.0.0.1', int(port))
         except OSError as err:

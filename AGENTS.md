@@ -107,6 +107,16 @@ One line each; detail in docs/details.md «Состав» and on the page named 
 - `xdto.py`, `compare.py`, `bench.py`/`config.py` — `XDTOPackage.bin` → `xdto_*`; object
   snapshots and cross-database diff; hardware benchmark, best `workers` in
   `~/.confdb/config.json`.
+- `hbk/` — platform syntax helper: `.hbk` help files (a ZIP shifted by a 1656-byte 1C
+  header; stdlib `zipfile` cannot read them) → `syntax.db` (~25300 topics: stdlib methods,
+  types, availability per platform, FTS5). `unpack`/`build`/`check`/`query` modules; CLI
+  `confdb hbk …`; MCP tools `syntax_search`/`syntax_card`/`syntax_children` via
+  `--syntax-db` (or `syntax_db` in `~/.confdb/config.json`) — PLATFORM-level knowledge,
+  separate from configuration bases (no meta_object, not a group member). Data files
+  (.hbk + ready syntax.db) live in the root `hbk/` dir (gitignored, NOT in dist); detail:
+  docs/details.md «Синтакс-помощник платформы». Ported from the user's retired project
+  `1c-syntax-db-extractor`; the port is verbatim — a rebuild of the real shcntx_ru.hbk
+  matches the original build counts exactly.
 - `v8/` — the ported unpack core. The DB root uuid is the header's `file_uuid` (the
   Configuration metadata uuid, same as the dump root — configuration rights resolve against
   it); Enum and FilterCriterion modules decode as `mgr` (they ARE manager modules,
@@ -124,7 +134,9 @@ confdb.bat extract <dump-dir> --db out.db              :: build from a Designer 
 confdb.bat update <dump-dir> --db out.db               :: incremental; safe while MCP runs
 confdb.bat check out.db                               :: validate all SKD queries (375/375)
 confdb.bat fts out.db --workers 8                      :: body index later, as sidecar shards
-1confdb-knw.bat out.db [--port 8765] [--group УНФ=unf.db --group БП=bp.db]
+confdb.bat hbk unpack <file.hbk> -o DIR                :: platform help unpacker (shcntx_ru.hbk)
+confdb.bat hbk build DIR --db syntax.db                :: syntax-helper DB; check/search/show/tree/repl
+1confdb-knw.bat out.db [--port 8765] [--group УНФ=unf.db --group БП=bp.db] [--syntax-db syntax.db]
 .venv\Scripts\python.exe -m compileall -q src\confdb  :: static check
 check-sync.bat                                        :: root src/tests vs the dist copy + its site-packages
 ```

@@ -477,6 +477,8 @@ COMMON MODULES: in BSL code a common module is called by its bare name: 'Имя�
 
 DATABASE FILE: the SQLite file is internal to the server. Do NOT search for it, open it, read it from disk, or ask the user for its location — you have no filesystem access to it. Everything is available through the tools below; the sql tool runs arbitrary read-only SELECTs.
 
+PLATFORM SYNTAX HELPER: when the server runs with --syntax-db, three extra tools answer from the 1C platform's BUILT-IN SYNTAX HELPER — documentation of the standard library itself, independent of any configuration: syntax_search (fuzzy search over ~25300 topics: global-context methods, types and their members, system-table fields; RU/EN names, word parts and typos all work), syntax_card(id) (the full card: RU/EN signatures, parameters with types, availability per platform — server/thick/thin/web/mobile, since-version, description, example, cross-links), syntax_children(id) (tree navigation; no id = the two roots). Use them to verify that a global method exists and to get its exact signature, parameters and execution contexts BEFORE writing code; ids marked '(id=N)' inside card texts are syntax_card targets. The division of labor: configuration bases tell what THIS configuration contains, the syntax helper tells what the PLATFORM offers. If the helper is not attached, the tools say so — a server setup fact, not a query error; do not retry.
+
 MULTIPLE DATABASES: the server can hold several knowledge bases at once — typically the MAIN configuration plus extensions/data processors (.cfe/.epf extracted into their own .db files). Each open base has an alias. All tools query the ACTIVE base; to query a specific base without switching, pass its alias as the db parameter (e.g. find_objects(mask=…, db='расш_интеграция')). Management tools: db_list (what is open, which is active), db_open (open another base file while the server runs — the path comes from the user), db_use (switch the active base), db_close. An extension usually adds/overrides objects of the main configuration — if something is not found in one base, check the other. Special db value '*': run a tool on every open base at once (the answer is sectioned per base) — one call to compare the main configuration with all extensions.
 
 CONFIGURATION GROUPS: a group bundles related databases (main configuration + extensions + data processors) as a single unit. SEVERAL groups can be open at the same time — typically two different configurations, or two releases of the same one; group_list shows them all and marks the active one. To query ONE group separately, pass group=<name> to any data tool: it runs on every database of that group and sections the answer per database. group='*' runs the tool on every group at once, keeping the groups apart in the answer. WITHOUT the group parameter only the ACTIVE base is queried — NOT the whole active group — so when several groups are open always name the group you mean; db='*' ignores the division and mixes every open base, so prefer group='*' for a per-group picture. Priority: explicit group > explicit db > the active base. group_use switches the active group and makes its first base the active one. Management tools: group_create (create an empty group), group_add_db (add an open database to a group), group_remove_db (remove a database from a group — the database itself stays open), group_list (all groups with their databases), group_use (switch the active group), group_close (delete a group — databases are NOT closed). compare_object and extension_diff take explicit aliases (db_left/db_right, extension_db/base_db) and know nothing about groups — pick the aliases with db_list/group_list.
@@ -646,11 +648,12 @@ class McpServer:
     работают с активной базой либо с явно указанной параметром db.
     """
 
-    def __init__(self, db_paths=None, groups=None):
+    def __init__(self, db_paths=None, groups=None, syntax_db=None):
         self.dbs = {}      # алиас -> {'path':…, 'conn':…, 'ctx':…}
         self.active = None
         self.groups = {}   # имя_группы -> [алиас1, алиас2, ...]
         self.active_group = None
+        self.syntax = None  # база синтакс-помощника: {'path','conn',…} или None
         # сериализация вызовов: см. _synchronized
         self._lock = threading.RLock()
         if isinstance(db_paths, str):
@@ -662,6 +665,8 @@ class McpServer:
         for path in db_paths or ():
             # активна первая указанная база, а не последняя
             self.open_db(path, activate=False)
+        if syntax_db:
+            self.attach_syntax_db(syntax_db)
 
     # -- реестр баз ----------------------------------------------------------
     def _make_alias(self, path):
@@ -4015,6 +4020,120 @@ class McpServer:
             bits.append(f'SHA-256 {props["source_sha256"][:16]}…')
         return props.get('name') or '?', '; '.join(bits)
 
+    # -- синтакс-помощник платформы (syntax.db из "confdb hbk build") --------
+    # Отдельная база ЗНАНИЯ ПЛАТФОРМЫ (встроенная документация 1С: методы
+    # глобального контекста, типы и их члены, поля системных таблиц) — не
+    # база знаний конфигурации, поэтому открывается помимо реестра dbs и
+    # не участвует в группах/fan-out/проверке ревизии схемы confdb.
+
+    def attach_syntax_db(self, path):
+        """Подключить базу синтакс-помощника (read-only).
+
+        Кэш имён и множества родителей грузится сразу: база статична — её
+        не обновляют при живом сервере (в отличие от баз конфигурации).
+        """
+        from .hbk import query as hbk_query
+        path = os.path.abspath(path)
+        if not os.path.isfile(path):
+            raise UserError(f'файл базы синтакс-помощника не найден: {path}')
+        try:
+            conn = hbk_query.open_syntax_db(path)
+        except ValueError as err:
+            raise UserError(str(err))
+        except sqlite3.OperationalError as err:
+            raise UserError(f'не удалось открыть базу синтакс-помощника: {err}')
+        platform = None
+        try:
+            row = conn.execute(
+                "SELECT value FROM meta WHERE key='platform'").fetchone()
+            platform = row[0] if row else None
+        except sqlite3.Error:
+            pass
+        self.syntax = {'path': path, 'conn': conn, 'platform': platform,
+                       'names': hbk_query.load_name_cache(conn),
+                       'parents': hbk_query.parents_with_children(conn)}
+        return path
+
+    def _syntax(self):
+        """Подключённый синтакс-помощник либо внятная ошибка инструмента."""
+        if not self.syntax:
+            raise UserError(
+                'синтакс-помощник не подключён: запустите сервер с ключом '
+                '--syntax-db <путь к syntax.db> (база собирается командой '
+                '"confdb hbk build <каталог .hbk> --db syntax.db") либо '
+                'пропишите путь ключом syntax_db в ~/.confdb/config.json')
+        return self.syntax
+
+    def _syntax_header(self, syn):
+        platform = f' — {syn["platform"]}' if syn['platform'] else ''
+        return (f'=== синтакс-помощник 1С{platform} '
+                f'({os.path.basename(syn["path"])}) ===')
+
+    @_synchronized
+    def syntax_search(self, query=None, limit=None):
+        """Нечёткий поиск тем синтакс-помощника (RU/EN имена, опечатки)."""
+        from .hbk import query as hbk_query
+        syn = self._syntax()
+        if not query or not str(query).strip():
+            raise UserError('пустой запрос: укажите текст — часть RU/EN имени '
+                            'или слово из описания (например, «транзакц» или '
+                            '«BeginTransaction»)')
+        limit = page_limit(limit or 20)
+        conn = syn['conn']
+        res = hbk_query.search(conn, str(query), limit, syn['names'])
+        ids = [tid for tid, _, _ in res]
+        rows = hbk_query.fetch_brief(conn, ids)
+        out = [self._syntax_header(syn),
+               f'По запросу «{query}» найдено тем: {len(rows)}']
+        if rows:
+            out.append(hbk_query.format_results(rows, syn['parents']))
+            out.append('карточка темы: syntax_card(id=…); дети темы: '
+                       'syntax_children(id=…)')
+        else:
+            out.append('ничего не найдено — попробуйте короче, по-английски '
+                       '(BeginTransaction) или по части слова (Транзакц)')
+        return '\n'.join(out)
+
+    @_synchronized
+    def syntax_card(self, id=None):
+        """Полная карточка темы синтакс-помощника: сигнатуры, параметры,
+        доступность, описание, пример, ссылки."""
+        from .hbk import query as hbk_query
+        syn = self._syntax()
+        if id is None:
+            raise UserError('нужен id темы — из syntax_search либо из отметки '
+                            '«(id=N)» в текстах карточек')
+        topic = hbk_query.topic_full(syn['conn'], int(id))
+        if topic is None:
+            raise UserError(f'тема id={id} не найдена в синтакс-помощнике')
+        return self._syntax_header(syn) + '\n' + hbk_query.format_topic(topic)
+
+    @_synchronized
+    def syntax_children(self, id=None):
+        """Дети темы синтакс-помощника (без id — два корня дерева)."""
+        from .hbk import query as hbk_query
+        syn = self._syntax()
+        conn = syn['conn']
+        tid = None if id is None else int(id)
+        row = None
+        if tid is not None:
+            row = conn.execute('SELECT name_ru, kind FROM topics WHERE id=?',
+                               (tid,)).fetchone()
+            if row is None:
+                raise UserError(f'тема id={tid} не найдена в синтакс-помощнике')
+        kids = hbk_query.children_of(conn, tid)
+        out = [self._syntax_header(syn)]
+        if tid is None:
+            out.append('Корни дерева синтакс-помощника:')
+        else:
+            out.append(f'Дети «{row[0]}» [{row[1]}] ({len(kids)}):')
+        if kids:
+            out.append(hbk_query.format_results(kids, syn['parents'],
+                                                show_parent=False))
+        else:
+            out.append('(потомков нет)')
+        return '\n'.join(out)
+
     @_synchronized
     def db_list(self):
         if not self.dbs:
@@ -4696,6 +4815,33 @@ TOOLS = [
          _schema({'path': _STR, 'code_name': _STR, 'text': _STR,
                   'semantic': _BOOL, 'db': _DB, 'group': _GROUP}),
          McpServer.check_syntax),
+    Tool('syntax_search',
+         'Fuzzy search in the PLATFORM SYNTAX HELPER — the built-in 1C '
+         'documentation (attached with --syntax-db; a separate database, NOT '
+         'a configuration base): global-context methods, types and their '
+         'members, system-table fields. RU and EN names, word parts and '
+         'typos all work (FTS5 + substring + Levenshtein). Each hit: id, '
+         'kind, name, and its parent (same member names in different types '
+         'are told apart by it). Take the id to syntax_card.',
+         _schema({'query': _STR, 'limit': _LIMIT}, ('query',)),
+         McpServer.syntax_search),
+    Tool('syntax_card',
+         'Full documentation card of ONE syntax-helper topic by id: '
+         'breadcrumb, kind, since-version, availability per platform '
+         '(server / thick / thin / web client, mobile…), syntax, RU/EN '
+         'signatures, return value, parameters with types, description, '
+         'example, cross-links. This is platform-level knowledge — does a '
+         'global method exist, what exactly it takes, where it may run — '
+         'check it BEFORE writing code that uses a stdlib method. Ids marked '
+         '(id=N) inside texts and links are syntax_card targets.',
+         _schema({'id': _INT}, ('id',)),
+         McpServer.syntax_card),
+    Tool('syntax_children',
+         'Navigate the syntax-helper tree: children of a topic (id omitted = '
+         'the two roots «Объекты»/«Таблицы»). Kinds: type, method, property, '
+         'ctor, event, field…; "+" marks topics that have descendants.',
+         _schema({'id': _INT}),
+         McpServer.syntax_children),
     Tool('sql',
          'Read-only SELECT escape hatch for anything not covered by the '
          'dedicated tools. Non-SELECT is rejected; LIMIT 200 enforced.',
@@ -5080,6 +5226,29 @@ def _print_dbs(server):
         mark = '*' if name == server.active_group else ' '
         print(f' {mark} группа {name}: {", ".join(aliases) or "(пусто)"}',
               file=sys.stderr)
+    if server.syntax:
+        print(f'   синтакс-помощник: {server.syntax["path"]}', file=sys.stderr)
+
+
+def resolve_syntax_db(explicit=None):
+    """База синтакс-помощника: явный путь (--syntax-db) либо syntax_db из
+    ~/.confdb/config.json. Возвращает путь или None (не подключать).
+
+    Отсутствующий файл из конфига — предупреждение в stderr и None: сервер
+    должен стартовать без помощника, а не падать из-за устаревшей записи;
+    явный путь возвращается как есть (ошибка всплывёт при открытии).
+    """
+    if explicit:
+        return explicit
+    from .config import load_config
+    value = load_config().get('syntax_db')
+    if isinstance(value, str) and value.strip():
+        path = value.strip()
+        if os.path.isfile(path):
+            return path
+        print(f'syntax_db из ~/.confdb/config.json не найден — '
+              f'синтакс-помощник не подключён: {path}', file=sys.stderr)
+    return None
 
 
 def _server_pidfile(db_path):
@@ -5117,7 +5286,8 @@ def _remove_pidfiles(created):
             pass
 
 
-def serve_http(db_paths, host='127.0.0.1', port=8765, groups=None):
+def serve_http(db_paths, host='127.0.0.1', port=8765, groups=None,
+               syntax_db=None):
     if isinstance(db_paths, str):
         db_paths = [db_paths]
     group_items = _group_items(groups)
@@ -5131,7 +5301,7 @@ def serve_http(db_paths, host='127.0.0.1', port=8765, groups=None):
         if not os.path.isfile(path):
             print(f'Файл базы не найден: {path}', file=sys.stderr)
             return 2
-    server = McpServer(db_paths, groups=group_items)
+    server = McpServer(db_paths, groups=group_items, syntax_db=syntax_db)
     _print_dbs(server)
     httpd, real_port = start_http_server(server, host, port)
     print(f'1confdb-knw: слушаю http://{host}:{real_port}/mcp '
@@ -5203,17 +5373,28 @@ def main(argv=None):
                              'быть несколько — все откроются одновременно '
                              '(активна первая), а инструменты будут запрашивать '
                              'их раздельно параметром group')
+    parser.add_argument('--syntax-db', metavar='FILE', default=None,
+                        help='база синтакс-помощника платформы (syntax.db, '
+                             'собирается "confdb hbk build"): добавляет '
+                             'инструменты syntax_search/syntax_card/'
+                             'syntax_children — документацию встроенного '
+                             'языка 1С. Без флага берётся путь из syntax_db '
+                             'в ~/.confdb/config.json')
     args = parser.parse_args(argv)
     try:
         groups = resolve_groups(args.group)
     except ValueError as err:
         parser.error(str(err))
+    syntax_db = resolve_syntax_db(args.syntax_db)
+    if args.syntax_db and not os.path.isfile(args.syntax_db):
+        parser.error(f'файл базы синтакс-помощника не найден: {args.syntax_db}')
     # Без --group пустой список баз означает автопоиск; с группами базы уже
     # названы в них, и искать что-то ещё не нужно
     dbs = resolve_dbs(args.db) if (args.db or not groups) else []
     if args.port:
-        return serve_http(dbs, args.host, args.port, groups=groups)
-    server = McpServer(dbs, groups=groups)
+        return serve_http(dbs, args.host, args.port, groups=groups,
+                          syntax_db=syntax_db)
+    server = McpServer(dbs, groups=groups, syntax_db=syntax_db)
     _print_dbs(server)
     import atexit
     pidfiles = _write_pidfiles(server)

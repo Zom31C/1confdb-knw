@@ -84,6 +84,67 @@ def build_parser():
     b.add_argument('--sample', metavar='N', type=int, default=1000,
                    help='размер сэмпла объектов верхнего уровня (по умолчанию 1000)')
 
+    h = subparsers.add_parser(
+        'hbk',
+        help='синтакс-помощник платформы 1С: распаковка .hbk, сборка '
+             'syntax.db и запросы к ней (поиск/карточки/дерево тем)')
+    hsub = h.add_subparsers(dest='hbk_cmd', required=True)
+
+    hu = hsub.add_parser(
+        'unpack',
+        help='распаковать .hbk (контекстная справка 1С) на чистом Python: '
+             'ZIP со смещением на заголовок 1С, стандартный zipfile его не читает')
+    hu.add_argument('hbk', help='файл .hbk (например, hbk\\shcntx_ru.hbk)')
+    hu.add_argument('-o', '--out', default='extracted',
+                    help='каталог назначения (по умолчанию extracted)')
+    hu.add_argument('--list', action='store_true',
+                    help='только показать список файлов архива')
+    hu.add_argument('--verify-only', action='store_true',
+                    help='проверить CRC всех записей, не записывая файлы')
+
+    hb = hsub.add_parser(
+        'build', help='собрать syntax.db из распакованного дерева .hbk')
+    hb.add_argument('root', help='каталог с objects/ и tables/ (результат "hbk unpack")')
+    hb.add_argument('--db', metavar='FILE', default='syntax.db',
+                    help='файл базы (по умолчанию syntax.db; существующий перезаписывается)')
+    hb.add_argument('--platform', metavar='STR', default=None,
+                    help='строка источника для meta.platform (по умолчанию '
+                         '«1С:Предприятие 8.3.26.1498 / shcntx_ru.hbk»)')
+
+    hc = hsub.add_parser('check', help='контроль качества syntax.db')
+    hc.add_argument('db', nargs='?', default=None,
+                    help='база (по умолчанию syntax.db или hbk\\syntax.db)')
+    hc.add_argument('--quick', action='store_true',
+                    help='только структурные проверки: числовые пороги и '
+                         'эталонные темы рассчитаны на полную базу shcntx_ru.hbk')
+
+    hse = hsub.add_parser('search', help='нечёткий поиск тем синтакс-помощника')
+    hse.add_argument('query', nargs='+', help='текст запроса')
+    hse.add_argument('--db', metavar='FILE', default=None,
+                     help='база (по умолчанию syntax.db или hbk\\syntax.db)')
+    hse.add_argument('--limit', type=int, default=20,
+                     help='максимум результатов (по умолчанию 20)')
+
+    hsh = hsub.add_parser('show', help='карточка темы по id')
+    hsh.add_argument('id', type=int, help='id темы (стоит в результатах поиска)')
+    hsh.add_argument('--db', metavar='FILE', default=None,
+                     help='база (по умолчанию syntax.db или hbk\\syntax.db)')
+
+    ht = hsub.add_parser('tree', help='поддерево темы')
+    ht.add_argument('id', type=int, help='id темы-корня поддерева')
+    ht.add_argument('-d', '--depth', type=int, default=2,
+                    help='глубина (по умолчанию 2)')
+    ht.add_argument('--limit', type=int, default=20,
+                    help='максимум узлов (по умолчанию 20)')
+    ht.add_argument('--db', metavar='FILE', default=None,
+                    help='база (по умолчанию syntax.db или hbk\\syntax.db)')
+
+    hr = hsub.add_parser('repl', help='интерактивный обход дерева тем')
+    hr.add_argument('--db', metavar='FILE', default=None,
+                    help='база (по умолчанию syntax.db или hbk\\syntax.db)')
+    hr.add_argument('--limit', type=int, default=20,
+                    help='максимум результатов поиска (по умолчанию 20)')
+
     m = subparsers.add_parser(
         '1confdb-knw',
         help='MCP-сервер знаний по конфигурации 1С и BSL для внешних LLM '
@@ -101,6 +162,11 @@ def build_parser():
                    help='группа конфигураций (повторяемый): имя и путь к базе, '
                         'несколько путей — через ";". Группы открываются '
                         'одновременно и остаются раздельными')
+    m.add_argument('--syntax-db', metavar='FILE', default=None,
+                   help='база синтакс-помощника платформы (syntax.db, '
+                        'собирается через "confdb hbk build"): добавляет '
+                        'инструменты syntax_search/syntax_card/syntax_children. '
+                        'Без флага — путь из syntax_db в ~/.confdb/config.json')
     return parser
 
 
@@ -246,9 +312,113 @@ def run_extract_dump(args):
     return 0
 
 
+def _hbk_db_path(explicit):
+    """База синтакс-помощника: явный путь либо автопоиск в cwd и hbk/."""
+    if explicit:
+        return explicit
+    for cand in ('syntax.db', os.path.join('hbk', 'syntax.db')):
+        if os.path.isfile(cand):
+            return cand
+    return 'syntax.db'
+
+
+def run_hbk(args):
+    """Команды синтакс-помощника: распаковка .hbk, сборка и запросы к базе."""
+    from .hbk import unpack as hbk_unpack
+
+    if args.hbk_cmd == 'unpack':
+        try:
+            if args.list:
+                brief, total = hbk_unpack.list_entries(args.hbk)
+                for usize, name in brief:
+                    print(f'  {usize:>10}  {name}')
+                if total > len(brief):
+                    print(f'  ... и ещё {total - len(brief)}')
+                return 0
+            if args.verify_only:
+                stats = hbk_unpack.verify_hbk(args.hbk, progress=print)
+                print(f'CRC проверен: записей={stats["entries"]}, '
+                      f'файлов={stats["files"]}, ошибок=0')
+                return 0
+            print(f'Распаковка {args.hbk} в {os.path.abspath(args.out)}...')
+            stats = hbk_unpack.unpack_hbk(args.hbk, args.out, progress=print)
+            print(f'Готово: файлов={stats["files"]}, каталогов={stats["dirs"]}, '
+                  f'дубликатов имён={stats["duplicates"]}, ошибок CRC=0')
+            return 0
+        except FileNotFoundError:
+            print(f'Файл не найден: {args.hbk}', file=sys.stderr)
+            return 2
+        except hbk_unpack.HbkError as err:
+            print(f'Ошибка: {err}', file=sys.stderr)
+            return 1
+
+    if args.hbk_cmd == 'build':
+        from .hbk import build as hbk_build
+        if not os.path.isdir(os.path.join(args.root, 'objects')):
+            print(f'в {args.root} нет каталога objects/ '
+                  f'(нужен результат "confdb hbk unpack")', file=sys.stderr)
+            return 2
+        result = hbk_build.build_syntax_db(args.root, args.db,
+                                           platform=args.platform)
+        print(hbk_build.format_build_result(result))
+        return 0
+
+    if args.hbk_cmd == 'check':
+        from .hbk import check as hbk_check
+        path = _hbk_db_path(args.db)
+        if not os.path.isfile(path):
+            print(f'Файл базы не найден: {path}', file=sys.stderr)
+            return 2
+        fails = hbk_check.check_syntax_db(path, full=not args.quick)
+        return 1 if fails else 0
+
+    # search / show / tree / repl — запросы к готовой базе
+    from .hbk import query as hbk_query
+    path = _hbk_db_path(args.db)
+    if not os.path.isfile(path):
+        print(f'Файл базы не найден: {path} (соберите: '
+              f'confdb hbk build <каталог> --db {path})', file=sys.stderr)
+        return 2
+    try:
+        conn = hbk_query.open_syntax_db(path)
+    except (ValueError, OSError) as err:
+        print(f'Ошибка: {err}', file=sys.stderr)
+        return 2
+    try:
+        if args.hbk_cmd == 'search':
+            query = ' '.join(args.query)
+            res = hbk_query.search(conn, query, args.limit,
+                                   hbk_query.load_name_cache(conn))
+            ids = [tid for tid, _, _ in res]
+            rows = hbk_query.fetch_brief(conn, ids)
+            print(f'Найдено {len(rows)} по запросу «{query}»:')
+            if rows:
+                print(hbk_query.format_results(
+                    rows, hbk_query.parents_with_children(conn)))
+            return 0
+        if args.hbk_cmd == 'show':
+            topic = hbk_query.topic_full(conn, args.id)
+            if topic is None:
+                print(f'Тема id={args.id} не найдена.')
+                return 1
+            print(hbk_query.format_topic(topic))
+            return 0
+        if args.hbk_cmd == 'tree':
+            print(hbk_query.format_tree(conn, args.id, args.depth, args.limit))
+            return 0
+        # repl
+        hbk_query.repl(conn, limit=args.limit)
+        return 0
+    finally:
+        conn.close()
+
+
 def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    if args.cmd == 'hbk':
+        return run_hbk(args)
 
     if args.cmd == 'check':
         return run_check(args.db)
@@ -271,6 +441,8 @@ def main(argv=None):
             argv += ['--host', args.host, '--port', str(args.port)]
         for spec in args.group or ():
             argv += ['--group', spec]
+        if args.syntax_db:
+            argv += ['--syntax-db', args.syntax_db]
         return mcp_main(argv)
 
     if args.cmd == 'bench':

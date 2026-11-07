@@ -66,6 +66,7 @@ def test_tools_list(tmp_path_factory):
                      'method_result_schema', 'find_methods',
                      'skd_of', 'find_skd', 'xdto_of', 'find_xdto',
                      'check_query', 'check_syntax', 'sql',
+                     'syntax_search', 'syntax_card', 'syntax_children',
                      'compare_object', 'method_diff', 'config_diff',
                      'extension_diff', 'configuration_info',
                      'db_list', 'db_open', 'db_use', 'db_close',
