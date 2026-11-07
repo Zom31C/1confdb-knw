@@ -4,6 +4,7 @@ r"""Права ролей при записи базы: role_right, role_rls_tem
 кавычек, строки в кавычках), поэтому проверяется весь путь от файла дампа до строк
 в базе, а не только парсер.
 """
+import json
 import os
 import sqlite3
 
@@ -14,6 +15,9 @@ from test_writer import ATTR_UUID, CAT_UUID, TAB_UUID, _json, _write, make_dump
 ROLE_UUID = '7e7e7e7e-0000-0000-0000-0000000000a1'
 RIGHT_READ = 'aaaaaaa1-0000-0000-0000-000000000001'
 RIGHT_WRITE = 'aaaaaaa2-0000-0000-0000-000000000002'
+# uuid метаданных Configuration ('file_uuid' корневого заголовка): настоящий
+# Role.0.c1brace адресует им права на конфигурацию
+CONFIG_FILE_UUID = 'e0666db2-0000-0000-0000-0000000000f1'
 # uuid табличной части «Товары» из фикстуры make_dump: не объект метаданных,
 # поэтому цель с ним разрешается в meta_tabular (и в объект-владелец)
 SUB_UUID = TAB_UUID
@@ -196,3 +200,49 @@ def test_target_flags_keep_every_form_of_the_target_record():
     # первая ступень адресации по-прежнему в sub_index/collection_uuid
     assert two_blocks.sub_index == -12
     assert two_blocks.collection_uuid == CAT_UUID
+
+
+# права на конфигурацию: одна цель (uuid метаданных Configuration) с одним правом
+CONFIG_RIGHTS = (
+    '{10,\n'
+    '{1,\n'
+    '{\n'
+    '{1,%s,0,0},\n'
+    '{0,%s,1}\n'
+    '}\n'
+    '},\n'
+    '{0},4294967295,1,0,4294967295}'
+) % (CONFIG_FILE_UUID, RIGHT_READ)
+
+
+def test_configuration_rights_resolve_via_file_uuid(tmp_path_factory):
+    """Корень cf-базы несёт uuid метаданных Configuration — права на неё разрешаются.
+
+    Настоящий `Role.0.c1brace` адресует права на конфигурацию uuid метаданных
+    Configuration (`file_uuid` корневого заголовка), а не внутренним uuid файла
+    контейнера (`uuid`). Запись берёт для корня `file_uuid` — тот же uuid, что
+    у корня dump-базы, поэтому цель разрешается в корневой объект, а
+    `source.root_uuid` совпадает между базами из .cf и из выгрузки.
+    """
+    dump = str(tmp_path_factory.mktemp('dump'))
+    make_dump(dump)
+    cfg_path = os.path.join(dump, 'Configuration.json')
+    with open(cfg_path, 'r', encoding='utf-8') as f:
+        cfg = json.load(f)
+    cfg['file_uuid'] = CONFIG_FILE_UUID
+    with open(cfg_path, 'w', encoding='utf-8') as f:
+        json.dump(cfg, f, ensure_ascii=False)
+    _write(os.path.join(_role_dir(dump), 'Role.0.c1brace'), CONFIG_RIGHTS)
+    db = str(tmp_path_factory.mktemp('db') / 'c.sqlite')
+    stats, conn = _build(dump, db)
+
+    assert stats['role_rights_failed'] == 0
+    root_id, root_uuid = conn.execute(
+        'SELECT id, uuid FROM meta_object WHERE parent_id IS NULL').fetchone()
+    assert root_uuid == CONFIG_FILE_UUID
+    assert conn.execute(
+        'SELECT root_uuid FROM source').fetchone()[0] == CONFIG_FILE_UUID
+    assert conn.execute(
+        'SELECT target_object_id, right_uuid, value FROM role_right'
+    ).fetchone() == (root_id, RIGHT_READ, '1')
+    conn.close()

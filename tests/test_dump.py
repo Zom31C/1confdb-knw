@@ -734,6 +734,72 @@ def test_update_target_change_relinks_other_roles(env):
     conn.close()
 
 
+def test_update_reresolves_named_right_targets(env):
+    """Право записано ИМЕНЕМ (цели не было); цель появилась — update разрешает.
+
+    Роль при этом не переустанавливается (её Rights.xml не менялся, а все
+    target_* неразрешённой строки NULL — в affected_roles она не попадает):
+    строку лечит переразрешение имён в фазе перелинковки
+    (`update._reresolve_named_targets`). Сценарий найден на реальной базе:
+    права на каналы сервиса интеграции висели именем, хотя подобъекты в
+    meta_subobject были.
+    """
+    dump, db = env
+    # 1. роль получает право на справочник, которого ещё нет
+    rights_path = os.path.join(dump, 'Roles', 'Роль1', 'Ext', 'Rights.xml')
+    with open(rights_path, encoding='utf-8') as f:
+        xml = f.read()
+    xml = xml.replace(
+        '\t<restrictionTemplate>',
+        '\t<object>\n'
+        '\t\t<name>Catalog.БудущийСправочник</name>\n'
+        '\t\t<right>\n'
+        '\t\t\t<name>Read</name>\n'
+        '\t\t\t<value>true</value>\n'
+        '\t\t</right>\n'
+        '\t</object>\n'
+        '\t<restrictionTemplate>')
+    _w(dump, 'Roles/Роль1/Ext/Rights.xml', xml)
+    stats = _update(env)
+    assert 'Role/Роль1' in stats['changed_granules']
+    conn = _conn(db)
+    row = conn.execute(
+        "SELECT target_uuid, target_object_id FROM role_right"
+        " WHERE target_uuid='Catalog.БудущийСправочник'").fetchone()
+    assert row is not None and row[1] is None   # хранится именем, не разрешено
+    conn.close()
+    # 2. справочник появляется; роль НЕ трогали
+    _w(dump, 'Catalogs/БудущийСправочник.xml',
+       '<?xml version="1.0" encoding="UTF-8"?>\n'
+       '<MetaDataObject %s version="2.20">\n'
+       '\t<Catalog uuid="12345678-0000-0000-0000-00000000abcd">\n'
+       '\t\t<Properties><Name>БудущийСправочник</Name></Properties>\n'
+       '\t\t<ChildObjects/>\n'
+       '\t</Catalog>\n'
+       '</MetaDataObject>' % NS)
+    cfg = open(os.path.join(dump, 'Configuration.xml'), encoding='utf-8').read()
+    cfg = cfg.replace('<Catalog>Справочник1</Catalog>',
+                      '<Catalog>Справочник1</Catalog>\n'
+                      '\t\t\t<Catalog>БудущийСправочник</Catalog>')
+    _w(dump, 'Configuration.xml', cfg)
+    stats = _update(env)
+    assert 'Role/Роль1' not in stats['changed_granules']
+    assert stats['rights_reresolved'] == 1
+    conn = _conn(db)
+    obj_id = conn.execute(
+        "SELECT id FROM meta_object"
+        " WHERE path='Catalog/БудущийСправочник'").fetchone()[0]
+    row = conn.execute(
+        "SELECT target_object_id FROM role_right"
+        " WHERE target_uuid='12345678-0000-0000-0000-00000000abcd'").fetchone()
+    assert row is not None and row[0] == obj_id
+    # строки, хранящейся именем, больше нет
+    assert conn.execute(
+        "SELECT COUNT(*) FROM role_right"
+        " WHERE target_uuid='Catalog.БудущийСправочник'").fetchone()[0] == 0
+    conn.close()
+
+
 def test_update_falls_back_to_full_build(env, tmp_path):
     dump, _db = env
     other = str(tmp_path / 'fresh.sqlite')

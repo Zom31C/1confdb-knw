@@ -593,6 +593,11 @@ class DocumentNumerators(Simple):
 
 # --- MetaDataObject/Enum.py ---
 class Enum(Container):
+    # единственный модуль перечисления — менеджер (в выгрузке конфигурации в
+    # файлы он так и называется: Ext\ManagerModule.bsl); поток в контейнере
+    # прежний (0), переименование унифицирует code_name cf- и dump-баз
+    ext_code = {'mgr': 0}
+
     @classmethod
     def get_decode_header(cls, header_data):
         return header_data[0][1][5][1]
@@ -686,6 +691,9 @@ class ExternalDataSourceTableForm(Form0):
 
 # --- MetaDataObject/FilterCriterion.py ---
 class FilterCriterion(Container):
+    # как у Enum: модуль критерия отбора — модуль менеджера (ManagerModule.bsl)
+    ext_code = {'mgr': 0}
+
     @classmethod
     def get_decode_header(cls, header_data):
         return header_data[0][1][5][1]

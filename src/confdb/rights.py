@@ -16,14 +16,23 @@ r"""Разбор прав роли из `Role.0.c1brace`.
 и у записи прав (тогда второй элемент — число пар).
 
 Имена прав в конфигурации ОТСУТСТВУЮТ (uuid прав — платформенные константы:
-поиск по всем .json дампа не дал ни одного попадания), поэтому модуль возвращает
-uuid как есть; словарь `RIGHT_NAMES` заполняется после сверки с редактором прав
-конфигуратора и до тех пор пуст — инструменты обязаны показывать uuid с явной
-пометкой, а не выдуманное имя.
+поиск по всем .json дампа не дал ни одного попадания), поэтому парсер
+возвращает uuid как есть. Словарь `RIGHT_NAMES` (uuid → имя как в редакторе
+прав) ПЕРЕСОБРАН 2026-11-07 по подтверждённым источникам: uuid → eng —
+CSP-майнинг `dump/rights_map.py` по паре «выгрузка + cf-база одной
+конфигурации» (биекция 64/64, RLS-якоря), eng → rus — официальная справка 8.3
+«ПравоДоступа» (таблица `RIGHTS_EN_RU`); редкие uuid иных версий платформы
+сохранены с пометкой «(не подтверждено)».
 
-Значения прав: рабочая гипотеза 1 = разрешено, 0 = запрещено, -1 = не задано
-(наследуется). Гипотеза НЕ подтверждена конфигуратором, поэтому наружу отдаётся
-и число, и признак.
+Значения прав: '1' = право установлено, '-1' = снято/не задано явно — та же
+sparse-семантика, что у текстовых true/false в `Rights.xml` выгрузки
+(подтверждено сопоставлением двух баз одной конфигурации).
+
+Модуль также владеет ОБЩИМ для cf- и dump-конвейеров разрешением целей прав
+в базе (`TargetResolver`): по uuid цели (скобкофайл .cf) и по точечному имени
+(`Rights.xml` выгрузки), с единым соглашением — `target_object_id` реквизита,
+ТЧ и подобъекта есть объект-владелец, так что все права объекта выбираются
+одним условием.
 """
 import re
 from dataclasses import dataclass, field
@@ -410,3 +419,201 @@ def parse_role_file(directory, file_name='Role.0.c1brace'):
     from .v8 import helper
 
     return parse_role_rights(helper.brace_file_read(directory, file_name))
+
+
+# --- разрешение целей прав в базе (общее cf- и dump-путям) --------------------
+
+# Имя класса в Rights.xml → тип объекта в БД (классы-исключения во
+# множественном числе и ПВХ)
+CLASS_ALIAS = {
+    'ChartOfCharacteristicTypes': 'ChartOfCharacteristicType',
+    'ChartOfCharacteristicType': 'ChartOfCharacteristicType',
+    'DocumentNumerator': 'DocumentNumerators',
+    'DocumentNumerators': 'DocumentNumerators',
+    'Sequence': 'Sequences',
+    'Sequences': 'Sequences',
+    'ChartOfCalculationTypes': 'ChartOfCalculationTypes',
+    'ExternalDataSourceTable': 'ExternalDataSourceTable',
+}
+
+# сегмент имени цели → kind в meta_subobject
+SUBOBJECT_KIND = {
+    'Operation': 'webservice_operation',
+    'Method': 'httpservice_method',
+    'URLTemplate': 'httpservice_url_template',
+    'Parameter': 'webservice_parameter',
+    'IntegrationServiceChannel': 'integration_channel',
+    'RoutePoint': 'businessprocess_routepoint',
+}
+
+
+class TargetResolver:
+    """Цель права → id строк базы; общий резолвер обоих конвейеров.
+
+    Два направления по двум форматам источника:
+    - `resolve(name)` — точечное имя цели из `Rights.xml` выгрузки
+      (`Catalog.Валюты[.Attribute.Код|.TabularSection.Т|.Form.Ф|…]`),
+      возвращает (target_uuid, obj_id, attr_id, tab_id, sub_id);
+    - `resolve_uuid(uuid)` — uuid цели из `Role.0.c1brace` (.cf), возвращает
+      (obj_id, attr_id, tab_id, sub_id); карта uuid лениво строится одним
+      проходом по четырём таблицам.
+
+    Соглашение разрешения (единое для cf- и dump-баз): obj_id для реквизита,
+    ТЧ и подобъекта — объект-ВЛАДЕЛЕЦ, поэтому все права, затрагивающие
+    объект, выбираются одним условием по target_object_id. Неразрешённая цель
+    — все None; cf-путь хранит в target_uuid её uuid, dump-путь — имя.
+    """
+
+    def __init__(self, conn):
+        self.conn = conn
+        self._cache = {}
+        self._uuid_map = None
+
+    def resolve(self, name):
+        if name in self._cache:
+            return self._cache[name]
+        result = self._resolve(name)
+        self._cache[name] = result
+        return result
+
+    def resolve_uuid(self, uuid):
+        """(obj_id, attr_id, tab_id, sub_id) по uuid цели; всё None, если нет."""
+        if self._uuid_map is None:
+            self._uuid_map = uuid_targets(self.conn)
+        return self._uuid_map.get(uuid.lower(), (None, None, None, None))
+
+    def _resolve(self, name):
+        parts = name.split('.')
+        if not parts:
+            return None
+        if parts[0] == 'Configuration':
+            # цель «Configuration.<имя конфигурации>» — корневой объект;
+            # её права (Администрирование, ВебКлиент, ОсновнойРежимОкна…)
+            # имеют собственные uuid видов прав — их покрывает майнинговая
+            # таблица dump/rights_map.RIGHT_UUIDS
+            row = self.conn.execute(
+                "SELECT id, uuid FROM meta_object WHERE path=''").fetchone()
+            return (row[1], row[0], None, None, None) if row else None
+        if len(parts) < 2:
+            return None
+        cls = CLASS_ALIAS.get(parts[0], parts[0])
+        obj_path = f'{cls}/{parts[1]}'
+        row = self.conn.execute(
+            'SELECT id, uuid, type FROM meta_object WHERE path=?',
+            (obj_path,)).fetchone()
+        if row is None:
+            return None
+        obj_id, obj_uuid, obj_type = row
+        rest = parts[2:]
+        # вложенные подсистемы: Subsystem.Р.Subsystem.Д[.Subsystem.Е]
+        while len(rest) >= 2 and rest[0] == 'Subsystem':
+            obj_path = f'{obj_path}/Subsystem/{rest[1]}'
+            row = self.conn.execute(
+                'SELECT id, uuid FROM meta_object WHERE path=?',
+                (obj_path,)).fetchone()
+            if row is None:
+                return None
+            obj_id, obj_uuid = row
+            rest = rest[2:]
+        if not rest:
+            return (obj_uuid, obj_id, None, None, None)
+        head = rest[0]
+        # Resource/Dimension/AccountingFlag/AddressingAttribute — те же поля
+        # объекта (meta_attribute), что и Attribute: регистры и планы счетов
+        # в Rights.xml адресуют их своими сегментами
+        if head in ('Attribute', 'Resource', 'Dimension', 'AccountingFlag',
+                    'AddressingAttribute') and len(rest) == 2:
+            return self._attribute(obj_id, obj_uuid, rest[1], None)
+        if head == 'TabularSection' and len(rest) >= 2:
+            if len(rest) == 2:
+                row = self.conn.execute(
+                    'SELECT id, uuid FROM meta_tabular'
+                    ' WHERE object_id=? AND name=?', (obj_id, rest[1])).fetchone()
+                if row:
+                    return (row[1], obj_id, None, row[0], None)
+                return None
+            if len(rest) == 4 and rest[2] in ('Attribute', 'Resource',
+                                               'Dimension'):
+                return self._attribute(obj_id, obj_uuid, rest[3], rest[1])
+            return None
+        if head in ('Form', 'Command', 'Template') and len(rest) == 2:
+            if head == 'Form':
+                sub_type = 'Form' if obj_type == 'DataProcessor' \
+                    else obj_type + 'Form'
+            elif head == 'Command':
+                sub_type = obj_type + 'Command'
+            else:
+                sub_type = 'Template'
+            sub_path = f'{obj_path}/{sub_type}/{rest[1]}'
+            row = self.conn.execute(
+                'SELECT id, uuid FROM meta_object WHERE path=?',
+                (sub_path,)).fetchone()
+            if row:
+                return (row[1], row[0], None, None, None)
+            return None
+        if head == 'URLTemplate' and len(rest) == 4 and rest[2] == 'Method':
+            # метод шаблона URL: подобъект хранится с объединённым именем
+            row = self.conn.execute(
+                'SELECT id, uuid FROM meta_subobject'
+                ' WHERE object_id=? AND kind=? AND name=?',
+                (obj_id, 'httpservice_method',
+                 f'{rest[1]}.{rest[3]}')).fetchone()
+            if row:
+                return (row[1], obj_id, None, None, row[0])
+            return None
+        if head in SUBOBJECT_KIND and len(rest) == 2:
+            row = self.conn.execute(
+                'SELECT id, uuid FROM meta_subobject'
+                ' WHERE object_id=? AND kind=? AND name=?',
+                (obj_id, SUBOBJECT_KIND[head], rest[1])).fetchone()
+            if row:
+                return (row[1], obj_id, None, None, row[0])
+            return None
+        return None
+
+    def _attribute(self, obj_id, obj_uuid, attr_name, tabular):
+        if tabular is None:
+            row = self.conn.execute(
+                'SELECT id, uuid FROM meta_attribute'
+                ' WHERE object_id=? AND name=? AND tabular IS NULL',
+                (obj_id, attr_name)).fetchone()
+        else:
+            row = self.conn.execute(
+                'SELECT id, uuid FROM meta_attribute'
+                ' WHERE object_id=? AND name=? AND tabular=?',
+                (obj_id, attr_name, tabular)).fetchone()
+        if row:
+            return (row[1], obj_id, row[0], None, None)
+        return None
+
+
+def uuid_targets(conn):
+    """Карта uuid цели права -> (объект-владелец, реквизит, ТЧ, подобъект).
+
+    Цель — объект метаданных, его реквизит/поле ТЧ, его табличная часть или
+    подобъект (операция веб-сервиса, метод HTTP-сервиса, форма, команда),
+    поэтому uuid ищется в четырёх таблицах; незаполненные id остаются None.
+    `target_object_id` для реквизита, ТЧ и подобъекта — объект-владелец, так
+    что все права, затрагивающие объект, выбираются одним условием. Замер на
+    УНФ: 16953 цели разрешаются объектом, 12276 — реквизитом, 520 — табличной
+    частью. Права на конфигурацию адресованы uuid метаданных Configuration —
+    у cf-корня это `file_uuid` заголовка, который и хранится в
+    `meta_object.uuid` (тот же uuid, что у корня dump-базы), поэтому такие
+    цели разрешаются объектом; остаток неразрешённых — `StandardAttribute.*`
+    (стандартные реквизиты не извлекаются).
+    """
+    targets = {}
+    for uuid, obj_id in conn.execute(
+            'SELECT uuid, id FROM meta_object WHERE uuid IS NOT NULL'):
+        targets[uuid.lower()] = (obj_id, None, None, None)
+    for uuid, attr_id, obj_id in conn.execute(
+            'SELECT uuid, id, object_id FROM meta_attribute'
+            ' WHERE uuid IS NOT NULL'):
+        targets[uuid.lower()] = (obj_id, attr_id, None, None)
+    for uuid, tab_id, obj_id in conn.execute(
+            'SELECT uuid, id, object_id FROM meta_tabular WHERE uuid IS NOT NULL'):
+        targets[uuid.lower()] = (obj_id, None, tab_id, None)
+    for uuid, sub_id, obj_id in conn.execute(
+            'SELECT uuid, id, object_id FROM meta_subobject WHERE uuid IS NOT NULL'):
+        targets[uuid.lower()] = (obj_id, None, None, sub_id)
+    return targets

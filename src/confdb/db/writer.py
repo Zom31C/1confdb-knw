@@ -1010,6 +1010,83 @@ CREATE INDEX ix_dump_file_granule ON dump_file(granule);
 
 TEXT_KINDS = ('bsl', 'html', 'htm', 'txt', 'json', 'xml', 'css', 'js')
 
+# --- общий слой записи строк --------------------------------------------------
+# Единые INSERT для обоих конвейеров: cf-путь (write_db ниже) и база из
+# выгрузки в файлы (dump/build.py, dump/rights.py) вставляют строки одним и
+# тем же SQL, поэтому список колонок каждой таблицы живёт здесь в одном
+# экземпляре. Новая колонка схемы — правка SCHEMA и этой таблицы; тексты
+# INSERT в конвейерах больше не встречаются. Порядок значений строки обязан
+# совпадать со списком колонок. Таблицы xdto_* пишет общий _insert_xdto,
+# dump_file/dump_state — только dump-путь (инкрементальное обновление).
+
+INSERT_SQL = {
+    'source':
+        'INSERT INTO source (file, created, file_size, file_sha256,'
+        ' extractor_version) VALUES (?, ?, ?, ?, ?)',
+    'meta_object':
+        'INSERT INTO meta_object (source_id, parent_id, ord, path, type,'
+        ' type_ru, name, uuid, comment, obj_version, header_json)'
+        ' VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    'meta_attribute':
+        'INSERT INTO meta_attribute (object_id, ord, name, type_str,'
+        ' tabular, uuid) VALUES (?, ?, ?, ?, ?, ?)',
+    'attribute_ref':
+        'INSERT INTO attribute_ref (attribute_id, ord, uuid, object_id,'
+        ' target_path) VALUES (?, ?, ?, ?, ?)',
+    'meta_tabular':
+        'INSERT INTO meta_tabular (object_id, ord, name, uuid)'
+        ' VALUES (?, ?, ?, ?)',
+    'meta_subobject':
+        'INSERT INTO meta_subobject (object_id, kind, ord, uuid, name)'
+        ' VALUES (?, ?, ?, ?, ?)',
+    'enum_value':
+        'INSERT INTO enum_value (object_id, ord, name) VALUES (?, ?, ?)',
+    'predefined':
+        'INSERT INTO predefined (object_id, ord, parent_ord, uuid, name,'
+        ' code, display) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    'predefined_subconto':
+        'INSERT INTO predefined_subconto (predefined_id, ord, uuid, kind_id,'
+        ' flags) VALUES (?, ?, ?, ?, ?)',
+    'common_target':
+        'INSERT INTO common_target (common_id, target_id) VALUES (?, ?)',
+    'subsystem_content':
+        'INSERT INTO subsystem_content (subsystem_id, target_id, ord)'
+        ' VALUES (?, ?, ?)',
+    'module':
+        'INSERT INTO module (object_id, code_name, context, body)'
+        ' VALUES (?, ?, ?, ?)',
+    'method':
+        'INSERT INTO method (module_id, ord, kind, name, signature,'
+        ' is_export, directives, description, line_start, line_end, body)'
+        ' VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    'file':
+        'INSERT INTO file (source_id, object_id, path, kind, size, data)'
+        ' VALUES (?, ?, ?, ?, ?, ?)',
+    'skd_query':
+        'INSERT INTO skd_query (object_id, ord, query) VALUES (?, ?, ?)',
+    'role_right':
+        'INSERT INTO role_right (role_id, target_uuid, target_object_id,'
+        ' target_attr_id, target_tabular_id, target_subobject_id,'
+        ' sub_index, collection_uuid, target_flags,'
+        ' right_uuid, value, rls_text)'
+        ' VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    'role_rls_template':
+        'INSERT INTO role_rls_template (role_id, ord, name, text)'
+        ' VALUES (?, ?, ?, ?)',
+    'role_rights_state':
+        'INSERT INTO role_rights_state (role_id, version, parsed, targets,'
+        ' rights, rls_templates, error) VALUES (?, ?, ?, ?, ?, ?, ?)',
+}
+
+
+def insert_rows(conn, table, rows):
+    """Пакетная вставка строк таблицы через общий SQL (`INSERT_SQL[table]`).
+
+    Пустой список — no-op: вызывающая сторона не проверяет его сама.
+    """
+    if rows:
+        conn.executemany(INSERT_SQL[table], rows)
+
 
 def _scan_tree(root):
     """Один обход дампа: список (dirpath, [(имя файла, размер)]) в порядке os.walk.
@@ -1420,15 +1497,8 @@ def build_fts_index(db_path, workers=1):
     return methods
 
 
-_ROLE_RIGHT_SQL = ('INSERT INTO role_right (role_id, target_uuid,'
-                   ' target_object_id, target_attr_id, target_tabular_id,'
-                   ' target_subobject_id,'
-                   ' sub_index, collection_uuid, target_flags,'
-                   ' right_uuid, value, rls_text)'
-                   ' VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
-_ROLE_STATE_SQL = ('INSERT INTO role_rights_state (role_id, version, parsed,'
-                   ' targets, rights, rls_templates, error)'
-                   ' VALUES (?, ?, ?, ?, ?, ?, ?)')
+_ROLE_RIGHT_SQL = INSERT_SQL['role_right']
+_ROLE_STATE_SQL = INSERT_SQL['role_rights_state']
 
 
 def _flag_token(value):
@@ -1454,46 +1524,14 @@ def _target_flags(target):
     return '/'.join(_flag_token(value) for value in (target.flag_a, target.flag_b))
 
 
-def _right_targets(conn):
-    """Карта uuid цели права -> (объект-владелец, реквизит, ТЧ, подобъект).
-
-    Цель — объект метаданных, его реквизит/поле ТЧ, его табличная часть или
-    подобъект (операция веб-сервиса, метод HTTP-сервиса, форма, команда),
-    поэтому uuid ищется в четырёх таблицах; незаполненные id остаются None.
-    `target_object_id` для реквизита, ТЧ и подобъекта — объект-владелец, так
-    что все права, затрагивающие объект, выбираются одним условием. Замер на
-    УНФ: 16953 цели разрешаются объектом, 12276 — реквизитом, 520 — табличной
-    частью, подобъекты — заглушка (таблица meta_subobject пока пустая), 258
-    (операции веб-сервисов, методы HTTP-сервисов, специальный маркер
-    de29c81d-…) не опознаны вовсе.
-    """
-    targets = {}
-    for uuid, obj_id in conn.execute(
-            'SELECT uuid, id FROM meta_object WHERE uuid IS NOT NULL'):
-        targets[uuid] = (obj_id, None, None, None)
-    for uuid, attr_id, obj_id in conn.execute(
-            'SELECT uuid, id, object_id FROM meta_attribute'
-            ' WHERE uuid IS NOT NULL'):
-        targets[uuid] = (obj_id, attr_id, None, None)
-    for uuid, tab_id, obj_id in conn.execute(
-            'SELECT uuid, id, object_id FROM meta_tabular WHERE uuid IS NOT NULL'):
-        targets[uuid] = (obj_id, None, tab_id, None)
-    # Подобъекты (операции веб-сервисов, методы HTTP-сервисов, формы, команды):
-    # таблица-заглушка, извлечение будет реализовано позже
-    for uuid, sub_id, obj_id in conn.execute(
-            'SELECT uuid, id, object_id FROM meta_subobject WHERE uuid IS NOT NULL'):
-        targets[uuid] = (obj_id, None, None, sub_id)
-    return targets
-
-
 def _write_role_rights(conn, dump_dir, stats):
     """Права ролей из `Role/<имя>/Role.0.c1brace` — в role_right/role_rls_template.
 
     Файл прав не входит в поток заголовков и остальной записью не читается,
     поэтому разбирается отдельно (`confdb.rights`) и уже после объектов: нужны
-    id ролей и карта uuid -> цель (`_right_targets`), чтобы разрешить цели прав.
-    Хранятся только ЯВНЫЕ записи (sparse): отсутствие строки означает «право не
-    задано», а не «запрещено».
+    id ролей и разрешение целей по uuid (`rights.TargetResolver.resolve_uuid`,
+    общий с dump-путём резолвер). Хранятся только ЯВНЫЕ записи (sparse):
+    отсутствие строки означает «право не задано», а не «запрещено».
 
     `role_rights_state` различает два случая, которые иначе неотличимы:
     parsed=0 — данные недоступны (файла нет или он не разобрался, причина в
@@ -1501,7 +1539,7 @@ def _write_role_rights(conn, dump_dir, stats):
     (например, старые версии формата 8/9). Сбой разбора одной роли не прерывает
     запись всей базы.
     """
-    targets = _right_targets(conn)
+    resolver = rights.TargetResolver(conn)
     right_params = []
     tmpl_params = []
     state_params = []
@@ -1517,8 +1555,7 @@ def _write_role_rights(conn, dump_dir, stats):
             continue
         count = 0
         for target, entry in parsed.entries():
-            obj_id, attr_id, tab_id, sub_id = targets.get(
-                target.uuid, (None, None, None, None))
+            obj_id, attr_id, tab_id, sub_id = resolver.resolve_uuid(target.uuid)
             right_params.append((role_id, target.uuid, obj_id, attr_id, tab_id,
                                  sub_id,
                                  target.sub_index, target.collection_uuid,
@@ -1535,9 +1572,7 @@ def _write_role_rights(conn, dump_dir, stats):
             conn.executemany(_ROLE_RIGHT_SQL, right_params)
             right_params.clear()
     conn.executemany(_ROLE_RIGHT_SQL, right_params)
-    conn.executemany(
-        'INSERT INTO role_rls_template (role_id, ord, name, text)'
-        ' VALUES (?, ?, ?, ?)', tmpl_params)
+    insert_rows(conn, 'role_rls_template', tmpl_params)
     conn.executemany(_ROLE_STATE_SQL, state_params)
 
 
@@ -1615,8 +1650,7 @@ def write_db(dump_dir, db_path, *, source_file=None, source_sha256=None,
         conn.execute(f'PRAGMA user_version={SCHEMA_VERSION}')
         conn.execute('BEGIN')
         cur = conn.execute(
-            'INSERT INTO source (file, created, file_size, file_sha256, extractor_version) '
-            'VALUES (?, ?, ?, ?, ?)',
+            INSERT_SQL['source'],
             (source_file or '', datetime.now().isoformat(timespec='seconds'),
              source_size, source_sha256, __version__)
         )
@@ -1638,7 +1672,13 @@ def write_db(dump_dir, db_path, *, source_file=None, source_sha256=None,
                 if any(fn == id_name for fn, _size in files_of[dirpath]):
                     uuid = _read_id_uuid(os.path.join(dirpath, id_name))
                 else:
-                    uuid = header.get('uuid')
+                    # у корня нет .id.json, а заголовок несёт два uuid:
+                    # 'uuid' — внутренний uuid файла контейнера, 'file_uuid' —
+                    # uuid метаданных Configuration. Права ролей адресуют цель
+                    # вторым, и корень dump-базы носит именно его — в базу
+                    # попадает file_uuid (паритет cf/dump, права на конфигурацию
+                    # разрешаются в корневой объект)
+                    uuid = header.get('file_uuid') or header.get('uuid')
             parent_rel = None
             parent_dir = os.path.dirname(dirpath)
             while parent_dir and parent_dir.startswith(dump_dir):
@@ -1677,10 +1717,7 @@ def write_db(dump_dir, db_path, *, source_file=None, source_sha256=None,
                 info['name'], info['uuid'],
                 info['header'].get('comment'), info['header'].get('obj_version'),
                 info['header_text'] or json.dumps(info['header'], ensure_ascii=False)))
-        conn.executemany(
-            'INSERT INTO meta_object (source_id, parent_id, ord, path, type, type_ru, name,'
-            ' uuid, comment, obj_version, header_json)'
-            ' VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', obj_params)
+        conn.executemany(INSERT_SQL['meta_object'], obj_params)
         stats['objects'] += len(obj_params)
         for rel, info in infos.items():
             if info['parent_rel'] is None:
@@ -1720,14 +1757,8 @@ def write_db(dump_dir, db_path, *, source_file=None, source_sha256=None,
                     ref_params.append((attr_id, l_ord, l_uuid,
                                        dir_to_id.get(l_path) if l_path else None,
                                        l_path))
-        conn.executemany(
-            'INSERT INTO meta_attribute'
-            ' (object_id, ord, name, type_str, tabular, uuid)'
-            ' VALUES (?, ?, ?, ?, ?, ?)',
-            attr_params)
-        conn.executemany(
-            'INSERT INTO attribute_ref (attribute_id, ord, uuid, object_id, target_path)'
-            ' VALUES (?, ?, ?, ?, ?)', ref_params)
+        conn.executemany(INSERT_SQL['meta_attribute'], attr_params)
+        conn.executemany(INSERT_SQL['attribute_ref'], ref_params)
         stats['attributes'] += len(attr_params)
         stats['refs'] += len(ref_params)
 
@@ -1761,24 +1792,12 @@ def write_db(dump_dir, db_path, *, source_file=None, source_sha256=None,
                 predef_params.append((obj_id,) + element)
             for subconto in subcontos:
                 subconto_params.append((obj_id,) + subconto)
-        conn.executemany(
-            'INSERT INTO meta_tabular (object_id, ord, name, uuid)'
-            ' VALUES (?, ?, ?, ?)',
-            tab_params)
+        conn.executemany(INSERT_SQL['meta_tabular'], tab_params)
         if subobject_params:
-            conn.executemany(
-                'INSERT INTO meta_subobject (object_id, kind, ord, uuid, name)'
-                ' VALUES (?, ?, ?, ?, ?)',
-                subobject_params)
-        conn.executemany(
-            'INSERT INTO enum_value (object_id, ord, name) VALUES (?, ?, ?)',
-            enum_params)
-        conn.executemany(
-            'INSERT INTO common_target (common_id, target_id) VALUES (?, ?)',
-            common_params)
-        conn.executemany(
-            'INSERT INTO predefined (object_id, ord, parent_ord, uuid, name, code, display)'
-            ' VALUES (?, ?, ?, ?, ?, ?, ?)', predef_params)
+            conn.executemany(INSERT_SQL['meta_subobject'], subobject_params)
+        conn.executemany(INSERT_SQL['enum_value'], enum_params)
+        conn.executemany(INSERT_SQL['common_target'], common_params)
+        conn.executemany(INSERT_SQL['predefined'], predef_params)
         stats['tabular'] += len(tab_params)
         stats['enum_values'] += len(enum_params)
         stats['common_targets'] += len(common_params)
@@ -1792,10 +1811,7 @@ def write_db(dump_dir, db_path, *, source_file=None, source_sha256=None,
                 'SELECT id, uuid FROM predefined WHERE uuid IS NOT NULL')}
             sub_rows = [(ids[(o, n)], s, u, kinds.get(u), f)
                         for o, n, s, u, f in subconto_params if (o, n) in ids]
-            conn.executemany(
-                'INSERT INTO predefined_subconto'
-                ' (predefined_id, ord, uuid, kind_id, flags) VALUES (?, ?, ?, ?, ?)',
-                sub_rows)
+            conn.executemany(INSERT_SQL['predefined_subconto'], sub_rows)
             stats['subconto'] += len(sub_rows)
 
         # состав подсистем: ссылки из заголовка подсистемы в порядке объявления
@@ -1817,9 +1833,7 @@ def write_db(dump_dir, db_path, *, source_file=None, source_sha256=None,
                 seen.add(value)
                 sub_params.append((rel_to_id[rel], target, ord_no))
                 ord_no += 1
-        conn.executemany(
-            'INSERT INTO subsystem_content (subsystem_id, target_id, ord) VALUES (?, ?, ?)',
-            sub_params)
+        conn.executemany(INSERT_SQL['subsystem_content'], sub_params)
 
         module_re_tpl = {}
 
@@ -1908,13 +1922,8 @@ def write_db(dump_dir, db_path, *, source_file=None, source_sha256=None,
                                             size, None))
                         stats['files'] += 1
                         if len(method_params) >= 50000:
-                            flush(module_params,
-                                  'INSERT INTO module (object_id, code_name, context, body)'
-                                  ' VALUES (?, ?, ?, ?)')
-                            flush(method_params,
-                                  'INSERT INTO method (module_id, ord, kind, name, signature,'
-                                  ' is_export, directives, description, line_start, line_end, body)'
-                                  ' VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+                            flush(module_params, INSERT_SQL['module'])
+                            flush(method_params, INSERT_SQL['method'])
                         continue
                 data = None
                 if ext in TEXT_KINDS:
@@ -1937,22 +1946,12 @@ def write_db(dump_dir, db_path, *, source_file=None, source_sha256=None,
                 file_params.append((source_id, object_id, rel_file, ext or 'bin', size, data))
                 stats['files'] += 1
                 if len(file_params) >= 2000:
-                    flush(file_params,
-                          'INSERT INTO file (source_id, object_id, path, kind, size, data)'
-                          ' VALUES (?, ?, ?, ?, ?, ?)')
-                    flush(skd_params,
-                          'INSERT INTO skd_query (object_id, ord, query) VALUES (?, ?, ?)')
-        flush(module_params,
-              'INSERT INTO module (object_id, code_name, context, body) VALUES (?, ?, ?, ?)')
-        flush(method_params,
-              'INSERT INTO method (module_id, ord, kind, name, signature,'
-              ' is_export, directives, description, line_start, line_end, body)'
-              ' VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
-        flush(file_params,
-              'INSERT INTO file (source_id, object_id, path, kind, size, data)'
-              ' VALUES (?, ?, ?, ?, ?, ?)')
-        flush(skd_params,
-              'INSERT INTO skd_query (object_id, ord, query) VALUES (?, ?, ?)')
+                    flush(file_params, INSERT_SQL['file'])
+                    flush(skd_params, INSERT_SQL['skd_query'])
+        flush(module_params, INSERT_SQL['module'])
+        flush(method_params, INSERT_SQL['method'])
+        flush(file_params, INSERT_SQL['file'])
+        flush(skd_params, INSERT_SQL['skd_query'])
         # права ролей — после объектов: нужны их id и карта uuid -> объект
         _write_role_rights(conn, dump_dir, stats)
         conn.commit()

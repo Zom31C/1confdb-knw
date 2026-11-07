@@ -129,10 +129,9 @@ class Builder:
         compat = xmlmeta.config_props_dict(root).get('CompatibilityMode') or ''
         digits = _compat_digits(compat)
         cur = self.conn.execute(
-            'INSERT INTO meta_object (source_id, parent_id, ord, path, type,'
-            ' type_ru, name, uuid, comment, obj_version, header_json)'
-            ' VALUES (?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?)',
-            (self.source_id, '', obj['type'], W.TYPE_RU.get(obj['type'], obj['type']),
+            W.INSERT_SQL['meta_object'],
+            (self.source_id, None, None, '', obj['type'],
+             W.TYPE_RU.get(obj['type'], obj['type']),
              name or '', uuid, comment, digits or None, header_text))
         self.path_id[''] = cur.lastrowid
         self.stats['objects'] += 1
@@ -166,9 +165,7 @@ class Builder:
         ord_no = self._ord_for(obj)
         header_text = self._header_text(obj, root)
         cur = conn.execute(
-            'INSERT INTO meta_object (source_id, parent_id, ord, path, type,'
-            ' type_ru, name, uuid, comment, obj_version, header_json)'
-            ' VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            W.INSERT_SQL['meta_object'],
             (self.source_id, parent_id, ord_no, path, otype,
              W.TYPE_RU.get(otype, otype), name, uuid, comment,
              _object_version(conn), header_text))
@@ -190,9 +187,7 @@ class Builder:
             c_header = ET.tostring(c_el, encoding='unicode') \
                 if c_el is not None else ''
             ccur = conn.execute(
-                'INSERT INTO meta_object (source_id, parent_id, ord, path,'
-                ' type, type_ru, name, uuid, comment, obj_version, header_json)'
-                ' VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                W.INSERT_SQL['meta_object'],
                 (self.source_id, obj_id, c_ord, c_path,
                  model.command_type(otype),
                  W.TYPE_RU.get(model.command_type(otype), 'Команда'),
@@ -206,8 +201,7 @@ class Builder:
         # реквизиты и поля табличных частей + ссылки
         if attrs:
             conn.executemany(
-                'INSERT INTO meta_attribute (object_id, ord, name, type_str,'
-                ' tabular, uuid) VALUES (?, ?, ?, ?, ?, ?)',
+                W.INSERT_SQL['meta_attribute'],
                 [(obj_id, i, a[0], a[1], a[3], a[4])
                  for i, a in enumerate(attrs)])
             first = conn.execute('SELECT last_insert_rowid()').fetchone()[0] \
@@ -219,16 +213,12 @@ class Builder:
                         ref_params.append((first + i, l_ord, '', None,
                                            target_path))
             if ref_params:
-                conn.executemany(
-                    'INSERT INTO attribute_ref (attribute_id, ord, uuid,'
-                    ' object_id, target_path) VALUES (?, ?, ?, ?, ?)',
-                    ref_params)
+                conn.executemany(W.INSERT_SQL['attribute_ref'], ref_params)
             self.stats['attributes'] += len(attrs)
             self.stats['refs'] += len(ref_params)
         if tabulars:
             conn.executemany(
-                'INSERT INTO meta_tabular (object_id, ord, name, uuid)'
-                ' VALUES (?, ?, ?, ?)',
+                W.INSERT_SQL['meta_tabular'],
                 [(obj_id, i, t[0], t[1]) for i, t in enumerate(tabulars)])
             self.stats['tabular'] += len(tabulars)
             for _n, t_uuid in tabulars:
@@ -236,13 +226,12 @@ class Builder:
                     self.changed_uuids.add(t_uuid.lower())
         if enum_values:
             conn.executemany(
-                'INSERT INTO enum_value (object_id, ord, name) VALUES (?, ?, ?)',
+                W.INSERT_SQL['enum_value'],
                 [(obj_id, i, n) for i, n in enumerate(enum_values)])
             self.stats['enum_values'] += len(enum_values)
         if subobjects:
             conn.executemany(
-                'INSERT INTO meta_subobject (object_id, kind, ord, uuid, name)'
-                ' VALUES (?, ?, ?, ?, ?)',
+                W.INSERT_SQL['meta_subobject'],
                 [(obj_id, s[0], i, s[1], s[2])
                  for i, s in enumerate(subobjects)])
             for s in subobjects:
@@ -361,8 +350,7 @@ class Builder:
             elements, subcontos = xmlmeta.predefined_items(predef_xml, root_name)
             if elements:
                 conn.executemany(
-                    'INSERT INTO predefined (object_id, ord, parent_ord, uuid,'
-                    ' name, code, display) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                    W.INSERT_SQL['predefined'],
                     [(obj_id,) + e for e in elements])
                 self.stats['predefined'] += len(elements)
             for item_ord, sub_ord, ref, flags in subcontos:
@@ -377,8 +365,7 @@ class Builder:
                 queries = W._extract_skd_queries(tmpl_bin) or []
             if queries:
                 conn.executemany(
-                    'INSERT INTO skd_query (object_id, ord, query)'
-                    ' VALUES (?, ?, ?)',
+                    W.INSERT_SQL['skd_query'],
                     [(obj_id, i, q) for i, q in enumerate(queries)])
                 self.stats['skd'] += len(queries)
         # XDTO: Package.bin
@@ -414,14 +401,11 @@ class Builder:
                 self.warnings.append(f'модуль без объекта: {bsl_path}')
                 continue
             cur = conn.execute(
-                'INSERT INTO module (object_id, code_name, context, body)'
-                ' VALUES (?, ?, ?, ?)', (object_id, code_name, context, body))
+                W.INSERT_SQL['module'], (object_id, code_name, context, body))
             module_id = cur.lastrowid
             if methods:
                 conn.executemany(
-                    'INSERT INTO method (module_id, ord, kind, name, signature,'
-                    ' is_export, directives, description, line_start, line_end,'
-                    ' body) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                    W.INSERT_SQL['method'],
                     [(module_id, i, m['kind'], m['name'], m['signature'],
                       int(m['is_export']), ', '.join(m['directives']),
                       m['description'], m['line_start'], m['line_end'],
@@ -532,9 +516,7 @@ class Builder:
 
     def _flush_files(self, file_params, dump_params):
         if file_params:
-            self.conn.executemany(
-                'INSERT INTO file (source_id, object_id, path, kind, size, data)'
-                ' VALUES (?, ?, ?, ?, ?, ?)', file_params)
+            self.conn.executemany(W.INSERT_SQL['file'], file_params)
             file_params.clear()
         if dump_params:
             self.conn.executemany(
@@ -591,9 +573,7 @@ class Builder:
                 if target is not None:
                     sub_params.append((sub_id, target, ord_no))
         if sub_params:
-            conn.executemany(
-                'INSERT INTO subsystem_content (subsystem_id, target_id, ord)'
-                ' VALUES (?, ?, ?)', sub_params)
+            conn.executemany(W.INSERT_SQL['subsystem_content'], sub_params)
         common_params = []
         for common_path, content in self.common_targets:
             common_id = self.path_id.get(common_path)
@@ -604,9 +584,7 @@ class Builder:
                 if target is not None and target != common_id:
                     common_params.append((common_id, target))
         if common_params:
-            conn.executemany(
-                'INSERT INTO common_target (common_id, target_id)'
-                ' VALUES (?, ?)', common_params)
+            conn.executemany(W.INSERT_SQL['common_target'], common_params)
         self.stats['subsystem_content'] = len(sub_params)
         self.stats['common_targets'] += len(common_params)
 
@@ -666,9 +644,7 @@ class Builder:
                          elem_uuid[0] if elem_uuid else None, kind_id[0],
                          ';'.join(flags) or None))
         if rows:
-            conn.executemany(
-                'INSERT INTO predefined_subconto (predefined_id, ord, uuid,'
-                ' kind_id, flags) VALUES (?, ?, ?, ?, ?)', rows)
+            conn.executemany(W.INSERT_SQL['predefined_subconto'], rows)
         self.stats['subconto'] += len(rows)
         _ = by_obj_uuid  # зарезервировано для точного разрешения по uuid
 
@@ -778,8 +754,7 @@ def build_db(dump_dir, db_path, *, workers=1, build_fts=True,
         conn.execute(f'PRAGMA user_version={W.SCHEMA_VERSION}')
         conn.execute('BEGIN')
         cur = conn.execute(
-            'INSERT INTO source (file, created, file_size, file_sha256,'
-            ' extractor_version) VALUES (?, ?, ?, ?, ?)',
+            W.INSERT_SQL['source'],
             (dump_dir, datetime.now().isoformat(timespec='seconds'),
              None, None, _extractor_version()))
         source_id = cur.lastrowid

@@ -33,34 +33,13 @@
 import os
 import xml.etree.ElementTree as ET
 
+from ..db import writer as W
+from ..rights import CLASS_ALIAS, SUBOBJECT_KIND, TargetResolver  # noqa: F401
 from . import xmlmeta
 from .rights_map import RIGHT_UUIDS, RIGHT_UUIDS_BY_NAME
 
-# Имя класса в Rights.xml → тип объекта в БД (классы-исключения во
-# множественном числе и ПВХ)
-CLASS_ALIAS = {
-    'ChartOfCharacteristicTypes': 'ChartOfCharacteristicType',
-    'ChartOfCharacteristicType': 'ChartOfCharacteristicType',
-    'DocumentNumerator': 'DocumentNumerators',
-    'DocumentNumerators': 'DocumentNumerators',
-    'Sequence': 'Sequences',
-    'Sequences': 'Sequences',
-    'ChartOfCalculationTypes': 'ChartOfCalculationTypes',
-    'ExternalDataSourceTable': 'ExternalDataSourceTable',
-}
-
 VALUE_GRANTED = '1'
 VALUE_UNSET = '-1'
-
-# сегмент имени цели → kind в meta_subobject
-SUBOBJECT_KIND = {
-    'Operation': 'webservice_operation',
-    'Method': 'httpservice_method',
-    'URLTemplate': 'httpservice_url_template',
-    'Parameter': 'webservice_parameter',
-    'IntegrationServiceChannel': 'integration_channel',
-    'RoutePoint': 'businessprocess_routepoint',
-}
 
 
 def parse_rights_xml(path):
@@ -108,130 +87,6 @@ def parse_rights_xml(path):
         if tname or ttext:
             templates.append((tname or '', ttext or ''))
     return objects, templates, flags
-
-
-class TargetResolver:
-    """Имя цели из Rights.xml → (target_uuid, obj_id, attr_id, tab_id, sub_id).
-
-    Разрешает составные имена: объект, реквизит, табличная часть и её поле,
-    форма/команда/макет (объекты БД), операции веб-сервисов и методы
-    HTTP-сервисов (meta_subobject), вложенные подсистемы.
-    """
-
-    def __init__(self, conn):
-        self.conn = conn
-        self._cache = {}
-
-    def resolve(self, name):
-        if name in self._cache:
-            return self._cache[name]
-        result = self._resolve(name)
-        self._cache[name] = result
-        return result
-
-    def _resolve(self, name):
-        parts = name.split('.')
-        if not parts:
-            return None
-        if parts[0] == 'Configuration':
-            # цель «Configuration.<имя конфигурации>» — корневой объект;
-            # её права (Администрирование, ВебКлиент, ОсновнойРежимОкна…)
-            # имеют собственные uuid видов прав — их покрывает майнинговая
-            # таблица RIGHT_UUIDS
-            row = self.conn.execute(
-                "SELECT id, uuid FROM meta_object WHERE path=''").fetchone()
-            return (row[1], row[0], None, None, None) if row else None
-        if len(parts) < 2:
-            return None
-        cls = CLASS_ALIAS.get(parts[0], parts[0])
-        obj_path = f'{cls}/{parts[1]}'
-        row = self.conn.execute(
-            'SELECT id, uuid, type FROM meta_object WHERE path=?',
-            (obj_path,)).fetchone()
-        if row is None:
-            return None
-        obj_id, obj_uuid, obj_type = row
-        rest = parts[2:]
-        # вложенные подсистемы: Subsystem.Р.Subsystem.Д[.Subsystem.Е]
-        while len(rest) >= 2 and rest[0] == 'Subsystem':
-            obj_path = f'{obj_path}/Subsystem/{rest[1]}'
-            row = self.conn.execute(
-                'SELECT id, uuid FROM meta_object WHERE path=?',
-                (obj_path,)).fetchone()
-            if row is None:
-                return None
-            obj_id, obj_uuid = row
-            rest = rest[2:]
-        if not rest:
-            return (obj_uuid, obj_id, None, None, None)
-        head = rest[0]
-        # Resource/Dimension/AccountingFlag/AddressingAttribute — те же поля
-        # объекта (meta_attribute), что и Attribute: регистры и планы счетов
-        # в Rights.xml адресуют их своими сегментами
-        if head in ('Attribute', 'Resource', 'Dimension', 'AccountingFlag',
-                    'AddressingAttribute') and len(rest) == 2:
-            return self._attribute(obj_id, obj_uuid, rest[1], None)
-        if head == 'TabularSection' and len(rest) >= 2:
-            if len(rest) == 2:
-                row = self.conn.execute(
-                    'SELECT id, uuid FROM meta_tabular'
-                    ' WHERE object_id=? AND name=?', (obj_id, rest[1])).fetchone()
-                if row:
-                    return (row[1], None, None, row[0], None)
-                return None
-            if len(rest) == 4 and rest[2] in ('Attribute', 'Resource',
-                                               'Dimension'):
-                return self._attribute(obj_id, obj_uuid, rest[3], rest[1])
-            return None
-        if head in ('Form', 'Command', 'Template') and len(rest) == 2:
-            if head == 'Form':
-                sub_type = 'Form' if obj_type == 'DataProcessor' \
-                    else obj_type + 'Form'
-            elif head == 'Command':
-                sub_type = obj_type + 'Command'
-            else:
-                sub_type = 'Template'
-            sub_path = f'{obj_path}/{sub_type}/{rest[1]}'
-            row = self.conn.execute(
-                'SELECT id, uuid FROM meta_object WHERE path=?',
-                (sub_path,)).fetchone()
-            if row:
-                return (row[1], row[0], None, None, None)
-            return None
-        if head == 'URLTemplate' and len(rest) == 4 and rest[2] == 'Method':
-            # метод шаблона URL: подобъект хранится с объединённым именем
-            row = self.conn.execute(
-                'SELECT id, uuid FROM meta_subobject'
-                ' WHERE object_id=? AND kind=? AND name=?',
-                (obj_id, 'httpservice_method',
-                 f'{rest[1]}.{rest[3]}')).fetchone()
-            if row:
-                return (row[1], None, None, None, row[0])
-            return None
-        if head in SUBOBJECT_KIND and len(rest) == 2:
-            row = self.conn.execute(
-                'SELECT id, uuid FROM meta_subobject'
-                ' WHERE object_id=? AND kind=? AND name=?',
-                (obj_id, SUBOBJECT_KIND[head], rest[1])).fetchone()
-            if row:
-                return (row[1], None, None, None, row[0])
-            return None
-        return None
-
-    def _attribute(self, obj_id, obj_uuid, attr_name, tabular):
-        if tabular is None:
-            row = self.conn.execute(
-                'SELECT id, uuid FROM meta_attribute'
-                ' WHERE object_id=? AND name=? AND tabular IS NULL',
-                (obj_id, attr_name)).fetchone()
-        else:
-            row = self.conn.execute(
-                'SELECT id, uuid FROM meta_attribute'
-                ' WHERE object_id=? AND name=? AND tabular=?',
-                (obj_id, attr_name, tabular)).fetchone()
-        if row:
-            return (row[1], None, row[0], None, None)
-        return None
 
 
 def right_uuid_of(eng_name, target_class=None):
@@ -301,13 +156,7 @@ def write_role_rights(conn, dump_dir, roles, path_id, stats, warnings=None):
                     rls))
                 count += 1
             if len(right_params) >= 20000:
-                conn.executemany(
-                    'INSERT INTO role_right (role_id, target_uuid,'
-                    ' target_object_id, target_attr_id, target_tabular_id,'
-                    ' target_subobject_id, sub_index, collection_uuid,'
-                    ' target_flags, right_uuid, value, rls_text)'
-                    ' VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-                    right_params)
+                conn.executemany(W.INSERT_SQL['role_right'], right_params)
                 right_params.clear()
         for ord_no, (tname, ttext) in enumerate(templates):
             tmpl_params.append((role_id, ord_no, tname, ttext))
@@ -316,19 +165,9 @@ def write_role_rights(conn, dump_dir, roles, path_id, stats, warnings=None):
         stats['role_rights'] += count
         stats['role_rls_templates'] += len(templates)
     if right_params:
-        conn.executemany(
-            'INSERT INTO role_right (role_id, target_uuid, target_object_id,'
-            ' target_attr_id, target_tabular_id, target_subobject_id,'
-            ' sub_index, collection_uuid, target_flags, right_uuid, value,'
-            ' rls_text) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            right_params)
-    conn.executemany(
-        'INSERT INTO role_rls_template (role_id, ord, name, text)'
-        ' VALUES (?, ?, ?, ?)', tmpl_params)
-    conn.executemany(
-        'INSERT INTO role_rights_state (role_id, version, parsed, targets,'
-        ' rights, rls_templates, error) VALUES (?, ?, ?, ?, ?, ?, ?)',
-        state_params)
+        conn.executemany(W.INSERT_SQL['role_right'], right_params)
+    conn.executemany(W.INSERT_SQL['role_rls_template'], tmpl_params)
+    conn.executemany(W.INSERT_SQL['role_rights_state'], state_params)
     if unresolved and warnings is not None:
         warnings.append(
             f'права ролей: целей не разрешено по имени: {unresolved}'

@@ -205,7 +205,12 @@ class MetaObject:
         """
         sink = self.get_options('header_sink')
         if sink:
-            helper.sink_put(sink, '', file_name, self.header.get('uuid'), self.header)
+            # uuid корня для базы — 'file_uuid' (uuid метаданных Configuration):
+            # именно его носит корень dump-базы и на него ссылаются права ролей;
+            # 'uuid' заголовка — внутренний uuid файла контейнера
+            helper.sink_put(sink, '', file_name,
+                            self.header.get('file_uuid') or self.header.get('uuid'),
+                            self.header)
         if self.get_options('dump_headers', True):
             helper.json_write(self.header, dest_dir, f'{file_name}.json',
                               indent=self.get_options('dump_indent'))

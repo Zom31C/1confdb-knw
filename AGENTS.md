@@ -55,7 +55,8 @@ One line each; detail in README «Состав» and on the page named after it.
   role_right rows; right-name→uuid bijection MINED from a dump+cf pair of one config,
   RLS-anchored), `update.py` (`confdb update <dir> --db f`: stat-only scan, SHA-256 of changed
   files vs `dump_file`, dirty-granule delete+reinsert, global relink by uuid/path, content
-  tables rebuilt, affected roles re-read; **works while the MCP server runs** — WAL + server
+  tables rebuilt, affected roles re-read, named (once-unresolved) right targets of
+  reinstalled granules re-resolved; **works while the MCP server runs** — WAL + server
   hot reload via `PRAGMA data_version` cache invalidation + pidfile `<db>.server.json`;
   FTS rebuilds in shard GENERATIONS so open connections never block the swap). A dump DB is
   schema-rev 9 like cf DBs; the ONLY stop-the-server case is a full rebuild (file delete).
@@ -94,14 +95,24 @@ One line each; detail in README «Состав» and on the page named after it.
   `register-header-structure`, `configuration-header-props`.
 - `query_lang.py` — query language lexer/parser/validator (page `query-validator`);
   `rights.py` — `Role/<name>/Role.0.c1brace` → object rights and RLS, raising `ValueError` on
-  an unrecognised format so one bad role never stops the write (page `role-rights-format`).
+  an unrecognised format so one bad role never stops the write (page `role-rights-format`);
+  also home of the SHARED `TargetResolver` (cf resolves brace targets by uuid via
+  `resolve_uuid`, dump resolves `Rights.xml` dotted names via `resolve`; one convention —
+  `target_object_id` of an attribute/tabular/subobject right is the OWNER object).
 - `db/writer.py` — SQLite schema and writer: batched inserts, parallel BSL parsing, rights
-  resolved against object/attribute/tabular uuids (page `db-schema`).
+  resolved via `rights.TargetResolver` (page `db-schema`). `INSERT_SQL` is the shared row-write
+  layer: every common table's column list lives there ONCE, both `write_db` (cf) and
+  `dump/build.py`+`dump/rights.py` insert through it (page `dump-file-source`).
 - `xdto.py`, `compare.py`, `bench.py`/`config.py` — `XDTOPackage.bin` → `xdto_*`; object
   snapshots and cross-database diff; hardware benchmark, best `workers` in
   `~/.confdb/config.json`.
-- `v8/` — the ported unpack core. `tests/` — fast tests (`test.bat`). `_tmp/` — throwaway
-  probes (gitignored, safe to clean).
+- `v8/` — the ported unpack core. The DB root uuid is the header's `file_uuid` (the
+  Configuration metadata uuid, same as the dump root — configuration rights resolve against
+  it); Enum and FilterCriterion modules decode as `mgr` (they ARE manager modules,
+  `ManagerModule.bsl` in a file dump).
+- `tests/` — fast tests (`test.bat`); `tests/test_parity.py` builds ONE synthetic config in
+  both formats and diffs the two DBs table by table — the standing guard of cf/dump parity.
+  `_tmp/` — throwaway probes (gitignored, safe to clean).
 
 ## Commands
 

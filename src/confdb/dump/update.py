@@ -149,12 +149,14 @@ def _relink_attribute_refs(conn, paths=None):
 def _relink_role_rights(conn, uuids=None):
     """Восстанавливает target_* у прав, обнулённые удалением цели.
 
+    Порядок: реквизит/ТЧ/подобъект — по своим таблицам, затем target_object_id
+    — сам объект по uuid либо объект-ВЛАДЕЛЕЦ уже разрешённой цели (соглашение
+    общее для cf- и dump-баз, confdb.rights.TargetResolver: все права,
+    затрагивающие объект, выбираются одним условием по target_object_id).
+
     :param uuids: сузить до перечня uuid (инкремент); None — глобально.
     """
     steps = (
-        ('target_object_id',
-         '(SELECT id FROM meta_object WHERE uuid=role_right.target_uuid)',
-         'meta_object'),
         ('target_attr_id',
          '(SELECT a.id FROM meta_attribute a'
          ' WHERE a.uuid=role_right.target_uuid LIMIT 1)',
@@ -167,13 +169,13 @@ def _relink_role_rights(conn, uuids=None):
          '(SELECT s.id FROM meta_subobject s'
          ' WHERE s.uuid=role_right.target_uuid LIMIT 1)',
          'meta_subobject'),
+        ('target_object_id',
+         '(SELECT id FROM meta_object WHERE uuid=role_right.target_uuid)',
+         'meta_object'),
     )
-    null_guards = []
     for col, expr, table in steps:
         where = f'{col} IS NULL AND target_uuid IN (SELECT uuid FROM {table}' \
                 f' WHERE uuid IS NOT NULL)'
-        if null_guards:
-            where += ' AND ' + ' AND '.join(null_guards)
         sql = f'UPDATE role_right SET {col}={expr} WHERE {where}'
         if not uuids:
             conn.execute(sql)
@@ -181,7 +183,84 @@ def _relink_role_rights(conn, uuids=None):
             for chunk in _chunked(uuids):
                 marks = ','.join('?' * len(chunk))
                 conn.execute(sql + f' AND target_uuid IN ({marks})', chunk)
-        null_guards.append(f'{col} IS NULL')
+    # владелец уже разрешённой цели: реквизита, ТЧ или подобъекта
+    conn.execute(
+        'UPDATE role_right SET target_object_id=COALESCE('
+        '(SELECT object_id FROM meta_attribute WHERE id=target_attr_id),'
+        '(SELECT object_id FROM meta_tabular WHERE id=target_tabular_id),'
+        '(SELECT object_id FROM meta_subobject WHERE id=target_subobject_id))'
+        ' WHERE target_object_id IS NULL AND (target_attr_id IS NOT NULL'
+        ' OR target_tabular_id IS NOT NULL OR target_subobject_id IS NOT NULL)')
+
+
+def _named_target_prefixes(dirty):
+    """Точечные префиксы имён прав для переустановленных гранул.
+
+    Имя цели из Rights.xml начинается с «Класс.Имя» — пути гранул
+    ('Catalog/НовыйСправочник') переводятся в точечную форму; классы с
+    множественными XML-именами (ChartOfCharacteristicTypes/Sequences/
+    DocumentNumerators — CLASS_ALIAS) дают все варианты написания.
+    """
+    from ..rights import CLASS_ALIAS
+    xml_names = {}
+    for alias, db_type in CLASS_ALIAS.items():
+        xml_names.setdefault(db_type, set()).add(alias)
+    prefixes = set()
+    for granule in dirty:
+        if not granule or '/' not in granule:
+            continue
+        cls, name = granule.split('/', 1)
+        for alias in xml_names.get(cls, (cls,)):
+            prefixes.add(f'{alias}.{name}')
+    return prefixes
+
+
+def _reresolve_named_targets(conn, prefixes):
+    """Повторяет разрешение целей, хранящихся ИМЕНЕМ, для переустановленных гранул.
+
+    У неразрешённой строки `target_uuid` несёт точечное имя из Rights.xml
+    (uuid содержит '-', имена — '.'). Цель могла появиться позже — например,
+    гранула переустановлена новым кодом, который извлекает больше подобъектов
+    (найдено на реальной базе: 8 прав на каналы сервиса интеграции висели
+    именем, хотя строки в meta_subobject были). Имена переразрешаются общим
+    резолвером (`rights.TargetResolver`), при успехе строка переписывается на
+    uuid + id — так роли, чей Rights.xml не менялся, получают разрешённые цели.
+
+    ОБЯЗАТЕЛЬНО сузить до префиксов переустановленных гранул
+    (`_named_target_prefixes`): полный перебор неразрешённых имён стоит
+    ~27 мс/имя (запросы резолвера), на БП это 3068 имён ≈ 84 с на каждое
+    обновление; неиспользуемые префиксы ничего не стоят.
+
+    :return: число имён, ставших разрешимыми.
+    """
+    if not prefixes:
+        return 0
+    names = set()
+    for prefix in prefixes:
+        for (name,) in conn.execute(
+                'SELECT DISTINCT target_uuid FROM role_right'
+                ' WHERE target_object_id IS NULL AND target_attr_id IS NULL'
+                ' AND target_tabular_id IS NULL AND target_subobject_id IS NULL'
+                ' AND (target_uuid=? OR target_uuid LIKE ?)',
+                (prefix, prefix + '.%')):
+            names.add(name)
+    if not names:
+        return 0
+    from ..rights import TargetResolver
+    resolver = TargetResolver(conn)
+    fixed = 0
+    for name in sorted(names):
+        resolved = resolver.resolve(name)
+        if resolved is None:
+            continue
+        target_uuid, obj_id, attr_id, tab_id, sub_id = resolved
+        conn.execute(
+            'UPDATE role_right SET target_uuid=?, target_object_id=?,'
+            ' target_attr_id=?, target_tabular_id=?, target_subobject_id=?'
+            ' WHERE target_uuid=?',
+            (target_uuid, obj_id, attr_id, tab_id, sub_id, name))
+        fixed += 1
+    return fixed
 
 
 def _relink_subconto(conn):
@@ -406,6 +485,8 @@ def update_db(dump_dir, db_path, *, workers=1, rebuild_fts=None, log=print):
         # глобальная перелинковка
         _relink_attribute_refs(conn)
         _relink_role_rights(conn)
+        named_fixed = _reresolve_named_targets(
+            conn, _named_target_prefixes(dirty))
         _relink_subconto(conn)
         _t6 = _time.monotonic()
         _rebuild_content(conn, objects, builder)
@@ -431,6 +512,8 @@ def update_db(dump_dir, db_path, *, workers=1, rebuild_fts=None, log=print):
             'права=%.1fс перелинковка=%.1fс составы+ord+коммит=%.1fс'
             % (_t1 - _t0, _t2 - _t1, _t3 - _t2, _t4 - _t3, _t5 - _t4,
                _t6 - _t5, _t7 - _t6))
+        if named_fixed:
+            log(f'Целей прав, хранившихся именем, разрешено повторно: {named_fixed}')
     except Exception:
         conn.rollback()
         raise
@@ -442,6 +525,7 @@ def update_db(dump_dir, db_path, *, workers=1, rebuild_fts=None, log=print):
         stats[key] = builder.stats.get(key, 0)
     stats['removed_granules'] = removed_granules
     stats['structural'] = structural
+    stats['rights_reresolved'] = named_fixed
     stats['warnings'] = len(warnings)
     if warnings:
         log(f'Предупреждений: {len(warnings)} (первые 5):')
