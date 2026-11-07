@@ -17,7 +17,11 @@ def build_parser():
     subparsers = parser.add_subparsers(dest='cmd', required=True)
 
     p = subparsers.add_parser('extract', help='распаковать файл конфигурации')
-    p.add_argument('src', help='путь к файлу .cf/.cfe/.epf')
+    p.add_argument('src', help='путь к файлу .cf/.cfe/.epf либо к каталогу '
+                               'выгрузки конфигурации в файлы (с '
+                               'ConfigDumpInfo.xml — соберётся база из '
+                               'выгрузки, повторный запуск = инкрементальное '
+                               'обновление)')
     p.add_argument('--db', metavar='FILE', help='записать результат в базу SQLite')
     p.add_argument('--force', action='store_true',
                    help='пересобрать базу, даже если она уже собрана из этого же '
@@ -47,6 +51,24 @@ def build_parser():
 
     c = subparsers.add_parser('check', help='проверить запросы СКД в готовой базе')
     c.add_argument('db', help='путь к базе SQLite')
+
+    u = subparsers.add_parser(
+        'update',
+        help='инкрементальное обновление базы из выгрузки конфигурации в '
+             'файлы: перезагружаются только изменённые объекты (хэши файлов '
+             'в dump_file); работает при запущенном MCP-сервере (WAL + hot '
+             'reload), без полной пересборки')
+    u.add_argument('src', help='каталог выгрузки конфигурации в файлы')
+    u.add_argument('--db', metavar='FILE', required=True,
+                   help='база знаний (нет или собрана из .cf — будет полная '
+                        'сборка из выгрузки)')
+    u.add_argument('--workers', metavar='N', type=int, default=None,
+                   help='число процессов разбора модулей BSL')
+    u.add_argument('--no-fts', action='store_true',
+                   help='не пересобирать FTS-индекс (по умолчанию '
+                        'пересобирается, если менялись модули)')
+    u.add_argument('--fts', action='store_true',
+                   help='пересобрать FTS-индекс, даже если модули не менялись')
 
     f = subparsers.add_parser(
         'fts', help='построить FTS-индекс по телам методов в готовой базе')
@@ -138,12 +160,106 @@ def run_fts(db_path, workers=None):
     return 0
 
 
+def run_update(args):
+    """Инкрементальное обновление базы из выгрузки конфигурации в файлы."""
+    from .dump import is_dump_dir, update_db
+    if not is_dump_dir(args.src):
+        print(f'Каталог не похож на выгрузку конфигурации '
+              f'(нет ConfigDumpInfo.xml): {args.src}', file=sys.stderr)
+        return 2
+    workers = args.workers
+    if workers is None:
+        from .config import bench_workers
+        workers = bench_workers() or 1
+    if workers < 1:
+        print('--workers должен быть >= 1', file=sys.stderr)
+        return 2
+    rebuild_fts = None
+    if args.no_fts:
+        rebuild_fts = False
+    elif args.fts:
+        rebuild_fts = True
+    try:
+        stats = update_db(args.src, args.db, workers=workers,
+                          rebuild_fts=rebuild_fts)
+    except PermissionError as err:
+        print(f'Файл базы занят другим процессом (запущен MCP-сервер?): {err}',
+              file=sys.stderr)
+        return 1
+    except (ValueError, OSError) as err:
+        print(f'Ошибка: {err}', file=sys.stderr)
+        return 1
+    for key in ('changed_granules', 'objects', 'modules', 'methods',
+                'role_rights', 'elapsed'):
+        value = stats.get(key)
+        if isinstance(value, list):
+            print(f'{key}: {len(value)}')
+        elif value is not None:
+            print(f'{key}: {value}')
+    return 0
+
+
+def run_extract_dump(args):
+    """Сборка/обновление базы из каталога выгрузки конфигурации в файлы."""
+    from .dump import build_db, update_db
+    workers = args.workers
+    if workers is None:
+        from .config import bench_workers
+        workers = bench_workers() or 1
+    if not args.db:
+        parser_error = ('для выгрузки в файлы нужен --db (само дерево уже '
+                        'является «дампом»)')
+        print(parser_error, file=sys.stderr)
+        return 2
+    try:
+        if os.path.isfile(args.db) and not args.force:
+            # уже собрана из выгрузки — инкрементальное обновление
+            stats = update_db(args.src, args.db, workers=workers,
+                              rebuild_fts=False if args.no_fts else None)
+        else:
+            if args.force and os.path.isfile(args.db):
+                from .dump.update import read_server_pidfile
+                server = read_server_pidfile(args.db)
+                if server:
+                    print('Полная пересборка невозможна: базу держит '
+                          f'MCP-сервер (pid {server.get("pid")}). Остановите '
+                          'сервер или используйте "confdb update" — он '
+                          'обновляет базу на ходу (WAL).', file=sys.stderr)
+                    return 1
+            stats = build_db(args.src, args.db, workers=workers,
+                             build_fts=not args.no_fts,
+                             store_blobs=args.store_blobs)
+    except PermissionError as err:
+        print(f'Файл базы занят другим процессом (запущен MCP-сервер?): {err}',
+              file=sys.stderr)
+        return 1
+    except (ValueError, OSError) as err:
+        print(f'Ошибка: {err}', file=sys.stderr)
+        return 1
+    for key in ('objects', 'attributes', 'modules', 'methods', 'role_rights',
+                'changed_granules', 'elapsed'):
+        value = stats.get(key)
+        if isinstance(value, list):
+            print(f'{key}: {len(value)}')
+        elif value is not None:
+            print(f'{key}: {value}')
+    return 0
+
+
 def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
 
     if args.cmd == 'check':
         return run_check(args.db)
+
+    if args.cmd == 'update':
+        return run_update(args)
+
+    if args.cmd == 'extract':
+        from .dump import is_dump_dir
+        if is_dump_dir(args.src):
+            return run_extract_dump(args)
 
     if args.cmd == 'fts':
         return run_fts(args.db, args.workers)

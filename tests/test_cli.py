@@ -156,3 +156,65 @@ def test_main_skips_when_the_source_is_already_extracted(tmp_path, monkeypatch):
     assert main(['extract', str(src), '--db', db, '--force']) == 0
     assert len(calls) == 1
     assert calls[0]['source_sha256'] == file_sha256(str(src))
+
+
+# ---------------------------------------------------------------------------
+# CLI режима «выгрузка конфигурации в файлы»
+# ---------------------------------------------------------------------------
+
+def test_parser_update_command():
+    args = build_parser().parse_args(
+        ['update', r'cf\БП_РФ', '--db', 'out.db', '--workers', '4', '--no-fts'])
+    assert args.cmd == 'update'
+    assert args.src == r'cf\БП_РФ' and args.db == 'out.db'
+    assert args.workers == 4 and args.no_fts and not args.fts
+    args = build_parser().parse_args(['update', 'd', '--db', 'o.db', '--fts'])
+    assert args.fts and not args.no_fts
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(['update', 'd'])   # --db обязателен
+
+
+def test_extract_dump_dir_requires_db(tmp_path):
+    from test_dump import make_dump_dir
+    dump = tmp_path / 'cfg'
+    dump.mkdir()
+    make_dump_dir(str(dump))
+    assert main(['extract', str(dump)]) == 2
+
+
+def test_extract_dump_dir_then_update(tmp_path):
+    """extract на каталоге выгрузки = полная сборка; повтор = инкремент."""
+    import sqlite3
+
+    from test_dump import make_dump_dir, _w
+    dump = tmp_path / 'cfg'
+    dump.mkdir()
+    make_dump_dir(str(dump))
+    db = str(tmp_path / 'out.sqlite')
+    assert main(['extract', str(dump), '--db', db, '--no-fts',
+                 '--workers', '1']) == 0
+    conn = sqlite3.connect(db)
+    assert conn.execute("SELECT COUNT(*) FROM meta_object "
+                        "WHERE path='Catalog/Справочник1'").fetchone()[0] == 1
+    assert conn.execute('SELECT COUNT(*) FROM dump_file').fetchone()[0] >= 15
+    conn.close()
+    # повторный extract той же выгрузки — инкремент без изменений
+    assert main(['extract', str(dump), '--db', db, '--no-fts',
+                 '--workers', '1']) == 0
+    # явный update после правки модуля
+    _w(str(dump), 'CommonModules/ОбщийМодуль1/Ext/Module.bsl',
+       'Процедура Обновлённая()\nКонецПроцедуры')
+    assert main(['update', str(dump), '--db', db, '--no-fts',
+                 '--workers', '1']) == 0
+    conn = sqlite3.connect(db)
+    names = [r[0] for r in conn.execute(
+        "SELECT t.name FROM method t JOIN module m ON m.id=t.module_id "
+        "JOIN meta_object o ON o.id=m.object_id "
+        "WHERE o.path='CommonModule/ОбщийМодуль1'")]
+    conn.close()
+    assert names == ['Обновлённая']
+
+
+def test_update_rejects_non_dump_dir(tmp_path):
+    db = str(tmp_path / 'o.db')
+    assert main(['update', str(tmp_path), '--db', db]) == 2

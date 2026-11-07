@@ -45,7 +45,21 @@ One line each; detail in README «Состав» and on the page named after it.
 
 - `extract.py` — pipeline stages 0/1/3; work dir on the target's volume; `file_sha256` +
   `check_same_source` skip re-extracting the same file. Page `extraction-pipeline`.
-- `__main__.py` — CLI: `extract`, `check`, `fts`, `bench`, `1confdb-knw`.
+- `dump/` — build the SAME knowledge base from a Designer **file dump** (a directory with
+  `ConfigDumpInfo.xml`; `confdb extract <dir>` auto-detects): `model.py` (class-dir registry
+  → DB types/paths 1:1 with the cf build, scanner, update granules = top-level objects),
+  `xmlmeta.py` (XML metadata → the same `type_str` forms, fields/tabulars/enums/predefined
+  +subconto, common-module contexts), `build.py` (full build; `header_json` stores the object
+  XML — `header_props` has XML adapters; refs resolve via `attribute_ref.target_path` UPDATE;
+  DB ends in WAL), `rights.py`+`rights_map.py` (textual `Ext\Rights.xml` → the same sparse
+  role_right rows; right-name→uuid bijection MINED from a dump+cf pair of one config,
+  RLS-anchored), `update.py` (`confdb update <dir> --db f`: stat-only scan, SHA-256 of changed
+  files vs `dump_file`, dirty-granule delete+reinsert, global relink by uuid/path, content
+  tables rebuilt, affected roles re-read; **works while the MCP server runs** — WAL + server
+  hot reload via `PRAGMA data_version` cache invalidation + pidfile `<db>.server.json`;
+  FTS rebuilds in shard GENERATIONS so open connections never block the swap). A dump DB is
+  schema-rev 9 like cf DBs; the ONLY stop-the-server case is a full rebuild (file delete).
+- `__main__.py` — CLI: `extract` (.cf OR a dump dir), `update`, `check`, `fts`, `bench`, `1confdb-knw`.
 - `mcp_server.py` — the MCP server: read-only tools, multi-base plus configuration GROUPS,
   paged search, stdio and `--port`. Page `mcp-server-1confdb-knw`.
 - `tui.py` — console UI (the user chose console over GUI; do not suggest tkinter). Page
@@ -94,6 +108,8 @@ One line each; detail in README «Состав» and on the page named after it.
 ```bat
 test.bat                                              :: pytest
 confdb.bat extract <file.cf> --db out.db --workers 8   :: --force, --no-fts, --skip-errors
+confdb.bat extract <dump-dir> --db out.db              :: build from a Designer file dump
+confdb.bat update <dump-dir> --db out.db               :: incremental; safe while MCP runs
 confdb.bat check out.db                               :: validate all SKD queries (375/375)
 confdb.bat fts out.db --workers 8                      :: body index later, as sidecar shards
 1confdb-knw.bat out.db [--port 8765] [--group УНФ=unf.db --group БП=bp.db]

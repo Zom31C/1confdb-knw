@@ -124,12 +124,14 @@ def test_entries_are_flat_pairs_for_the_writer():
 
 
 def test_right_name_returns_name_from_dictionary_or_none():
-    # словарь RIGHT_NAMES заполнен из Rights.xml конфигурации SmallBusinessKz (35 UUID).
+    # Словарь RIGHT_NAMES пересобран 2026-11-07 по подтверждённым источникам
+    # (uuid→eng: CSP-майнинг dump/rights_map; eng→rus: справка ПравоДоступа).
     # Для известных UUID right_name возвращает имя, для неизвестных — None.
     entry = parse_role_rights(
         _role([['1', OBJ, '0', '1'], ['0', R_READ, '1']])).targets[0].rights[0]
-    # R_READ = 'aa6448f2-be0f-42ea-ba26-1af7f52b5b65' теперь в словаре как 'Редактирование'
-    assert entry.right_name == 'Редактирование'
+    # R_READ = 'aa6448f2-…' — это View (прежний словарь ошибочно подписывал
+    # его «Редактирование»)
+    assert entry.right_name == 'Просмотр'
     
     # Неизвестный UUID → None
     unknown_uuid = '00000000-0000-0000-0000-000000000000'

@@ -116,8 +116,9 @@ def _build_event_index(conn):
     if not q("SELECT 1 FROM meta_object WHERE type='EventSubscription'"
              ' LIMIT 1').fetchone():
         return index
-    refs, by_uuid = {}, {}
+    refs, by_uuid, all_paths = {}, {}, set()
     for path, uuid, header in q('SELECT path, uuid, header_json FROM meta_object'):
+        all_paths.add(path)
         if uuid:
             by_uuid.setdefault(uuid, path)
         ref = header_props.self_ref_uuid(header)
@@ -128,10 +129,23 @@ def _build_event_index(conn):
         props = header_props.event_subscription('EventSubscription', header)
         if not props:
             continue
-        sources = [refs[u] for u in props['sources'] if u in refs]
-        entry = dict(props, path=path, sources=sources,
-                     handler=by_uuid.get(props['handler_uuid'] or ''),
-                     unresolved=len(props['sources']) - len(sources))
+        if 'source_paths' in props:
+            # база из выгрузки: источники — готовые пути, обработчик — имя
+            # общего модуля (uuid в XML-заголовке нет)
+            declared = props['source_paths']
+            sources = [p for p in declared if p in all_paths]
+            handler = ('CommonModule/' + props['handler_module']) \
+                if props.get('handler_module') else None
+            if handler is not None and handler not in all_paths:
+                handler = None
+            entry = dict(props, path=path, sources=sources, handler=handler,
+                         unresolved=props.get('unresolved_sources', 0)
+                         + len(declared) - len(sources))
+        else:
+            sources = [refs[u] for u in props['sources'] if u in refs]
+            entry = dict(props, path=path, sources=sources,
+                         handler=by_uuid.get(props['handler_uuid'] or ''),
+                         unresolved=len(props['sources']) - len(sources))
         index['by_path'][path] = entry
         for src in sources:
             index['by_source'].setdefault(src, []).append(entry)
@@ -185,6 +199,38 @@ def _method_subscriptions_line(entries, limit=6):
     if len(entries) > limit:
         parts.append(f'… ещё {len(entries) - limit}')
     return 'вызывается подписками на события: ' + '; '.join(parts)
+
+
+def _exchange_plan_lines_named(names, q):
+    """Состав плана обмена из базы-выгрузки: строки «Класс.Имя» → пути."""
+    from .header_props import CLASS_ALIAS_NAMES
+    total = len(names)
+    groups = {}
+    missing = 0
+    cache = {}
+    for name in names:
+        cls, _, obj = name.partition('.')
+        cls = CLASS_ALIAS_NAMES.get(cls, cls)
+        key = (cls, obj)
+        if key not in cache:
+            cache[key] = q('SELECT type, path FROM meta_object'
+                           ' WHERE type=? AND name=? LIMIT 1',
+                           (cls, obj)).fetchone()
+        hit = cache[key]
+        if hit is None:
+            missing += 1
+        else:
+            groups.setdefault(hit[0], []).append(hit[1])
+    ordered = sorted(groups.items(), key=lambda kv: -len(kv[1]))
+    if total <= 12:
+        text = ', '.join(ru_path(p) for _, paths in ordered for p in paths)
+    else:
+        text = ', '.join(f'{TYPE_RU.get(t, t)} {len(paths)}'
+                         for t, paths in ordered)
+    if missing:
+        text = ((text + '; ') if text else '') + \
+            f'{missing} из {total} не найдено в базе'
+    return [f'Состав плана обмена ({total}): ' + (text or 'пуст')]
 
 
 def _exchange_plan_lines(uuids, known):
@@ -698,9 +744,17 @@ class McpServer:
             alias = self._make_alias(path)
         # ревизия схемы: 0 у баз, собранных извлекателем до появления штампа
         schema = conn.execute('PRAGMA user_version').fetchone()[0]
+        # data_version меняется при каждом чужом COMMIT — основа hot reload:
+        # инкрементальное обновление базы из выгрузки (dump.update_db, WAL)
+        # подхватывается живым сервером без перезапуска
+        try:
+            data_version = conn.execute('PRAGMA data_version').fetchone()[0]
+        except sqlite3.Error:
+            data_version = None
         self.dbs[alias] = {'path': path, 'conn': conn, 'ctx': None, 'fts': fts,
                            'fts_shards': fts_shards, 'fts_conn': None,
-                           'schema': int(schema or 0)}
+                           'schema': int(schema or 0),
+                           'data_version': data_version}
         if activate or self.active is None:
             self.active = alias
         return alias
@@ -919,7 +973,53 @@ class McpServer:
 
     # -- инфраструктура ----------------------------------------------------
     def conn(self, db=None):
-        return self.dbs[self._alias(db)]['conn']
+        alias = self._alias(db)
+        self._refresh_if_changed(alias)
+        return self.dbs[alias]['conn']
+
+    def _refresh_if_changed(self, alias):
+        """Hot reload: сброс производных кэшей после внешнего обновления базы.
+
+        `PRAGMA data_version` на read-only соединении меняется, когда другая
+        транзакция зафиксировала изменения (dump.update_db пишет базу из выгрузки
+        in-place в WAL — сервер продолжает отвечать всё обновление и видит новое
+        состояние сразу после COMMIT). Сбрасываются: кэш счётчиков, MetaContext,
+        BslContext, индексы подписок/uuid и FTS-манифест (обновление пересобрало
+        шарды новым поколением — соединения переоткрываются лениво).
+        """
+        info = self.dbs.get(alias)
+        if info is None:
+            return
+        try:
+            ver = info['conn'].execute('PRAGMA data_version').fetchone()[0]
+        except sqlite3.Error:
+            return
+        if ver == info.get('data_version'):
+            return
+        info['data_version'] = ver
+        info['counts'] = {}
+        info['ctx'] = None
+        info['bsl'] = None
+        info['events'] = None
+        info['uuids'] = None
+        for shard in info.get('fts_conn') or ():
+            try:
+                shard.close()
+            except sqlite3.Error:
+                pass
+        info['fts_conn'] = None
+        try:
+            manifest = fts_index_info(info['path'])
+            methods = info['conn'].execute(
+                'SELECT COUNT(*) FROM method').fetchone()[0]
+        except (OSError, sqlite3.Error):
+            manifest, methods = None, -1
+        if manifest and int(manifest.get('methods', -1)) == methods:
+            info['fts_shards'] = fts_shard_paths(info['path'])
+        else:
+            # индекс отсутствует/устарел — поиск по телам уйдёт на body_has
+            info['fts_shards'] = None
+            info['fts'] = None
 
     def count_of(self, sql, params=(), db=None, extra=()):
         """Сколько всего строк набирает поиск (total_count ответа).
@@ -930,7 +1030,11 @@ class McpServer:
         `extra` входит в ключ: часть условий поиска живёт не в params
         (временная таблица совпадений FTS5 строится из иглы).
         """
-        cache = self.dbs[self._alias(db)].setdefault('counts', {})
+        alias = self._alias(db)
+        # hot reload: проверка СНАЧАЛА — при попадании в кэш self.conn() не
+        # вызывается, и устаревший счётчик заблокировал бы сброс навсегда
+        self._refresh_if_changed(alias)
+        cache = self.dbs[alias].setdefault('counts', {})
         key = (sql, tuple(params), tuple(extra))
         if key not in cache:
             if len(cache) >= COUNT_CACHE_MAX:
@@ -940,6 +1044,7 @@ class McpServer:
 
     def ctx(self, db=None):
         alias = self._alias(db)
+        self._refresh_if_changed(alias)
         info = self.dbs[alias]
         if info['ctx'] is None:
             from .query_lang import MetaContext
@@ -1078,9 +1183,13 @@ class McpServer:
         if row[0] == 'EventSubscription':
             out.extend(self._subscription_card(q, path, db))
         if row[0] == 'ExchangePlan':
-            uuids = header_props.exchange_plan_content(row[0], row[4])
-            if uuids:
-                out.extend(_exchange_plan_lines(uuids, self.uuid_map(db)))
+            items = header_props.exchange_plan_content(row[0], row[4])
+            if items:
+                if header_props.is_uuid(items[0]):
+                    out.extend(_exchange_plan_lines(items, self.uuid_map(db)))
+                else:
+                    # база из выгрузки: состав — строки «Класс.Имя»
+                    out.extend(_exchange_plan_lines_named(items, q))
         attrs = q('SELECT name, type_str FROM meta_attribute '
                   'WHERE object_id=? AND tabular IS NULL ORDER BY ord',
                   (oid,)).fetchall()
@@ -2751,6 +2860,7 @@ class McpServer:
     def bsl_ctx(self, db=None):
         """Контекст анализа BSL базы (кэш: строится секунды на большой базе)."""
         alias = self._alias(db)
+        self._refresh_if_changed(alias)
         info = self.dbs[alias]
         if info.get('bsl') is None:
             from .bsl_analyzer import BslContext
@@ -2767,6 +2877,7 @@ class McpServer:
         делается один раз на базу и только если подписки в ней вообще есть.
         """
         alias = self._alias(db)
+        self._refresh_if_changed(alias)
         info = self.dbs[alias]
         if info.get('events') is None:
             info['events'] = _build_event_index(info['conn'])
@@ -2779,6 +2890,7 @@ class McpServer:
         превратить в пути; на УНФ это 23513 строк одним запросом.
         """
         alias = self._alias(db)
+        self._refresh_if_changed(alias)
         info = self.dbs[alias]
         if info.get('uuids') is None:
             info['uuids'] = {u: (p, t) for p, t, u in info['conn'].execute(
@@ -4970,6 +5082,41 @@ def _print_dbs(server):
               file=sys.stderr)
 
 
+def _server_pidfile(db_path):
+    """Путь pidfile сервера: `<база>.server.json` (читает dump.update)."""
+    return os.path.abspath(db_path) + '.server.json'
+
+
+def _write_pidfiles(server, port=None):
+    """Pidfile на каждую открытую базу — метка «сервер жив» для confdb update.
+
+    Обновление базы из выгрузки при живом сервере не требует остановки (WAL +
+    hot reload по PRAGMA data_version), но полная пересборка файла не возмож­на,
+    пока сервер держит его открытым — pidfile позволяет команде update/extract
+    назвать причину и pid вместо загадочного PermissionError.
+    """
+    created = []
+    for alias, info in server.dbs.items():
+        path = _server_pidfile(info['path'])
+        try:
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump({'pid': os.getpid(), 'port': port, 'alias': alias,
+                           'started': time.strftime('%Y-%m-%dT%H:%M:%S'),
+                           'argv': ' '.join(sys.argv)}, f)
+            created.append(path)
+        except OSError:
+            pass
+    return created
+
+
+def _remove_pidfiles(created):
+    for path in created:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
 def serve_http(db_paths, host='127.0.0.1', port=8765, groups=None):
     if isinstance(db_paths, str):
         db_paths = [db_paths]
@@ -4999,11 +5146,18 @@ def serve_http(db_paths, host='127.0.0.1', port=8765, groups=None):
         print('Внимание: порт открыт для внешних подключений без аутентификации; '
               'база отдаётся read-only.')
     try:
+        import atexit
+        pidfiles = _write_pidfiles(server, real_port)
+        atexit.register(_remove_pidfiles, pidfiles)
         httpd.serve_forever()
     except KeyboardInterrupt:
         print('Сервер остановлен.')
     finally:
         httpd.server_close()
+        try:
+            _remove_pidfiles(pidfiles)
+        except NameError:
+            pass
     return 0
 
 
@@ -5061,18 +5215,24 @@ def main(argv=None):
         return serve_http(dbs, args.host, args.port, groups=groups)
     server = McpServer(dbs, groups=groups)
     _print_dbs(server)
-    for line in sys.stdin:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            msg = json.loads(line)
-        except ValueError:
-            continue
-        resp = server.handle(msg)
-        if resp is not None:
-            sys.stdout.write(json.dumps(resp, ensure_ascii=False) + '\n')
-            sys.stdout.flush()
+    import atexit
+    pidfiles = _write_pidfiles(server)
+    atexit.register(_remove_pidfiles, pidfiles)
+    try:
+        for line in sys.stdin:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                msg = json.loads(line)
+            except ValueError:
+                continue
+            resp = server.handle(msg)
+            if resp is not None:
+                sys.stdout.write(json.dumps(resp, ensure_ascii=False) + '\n')
+                sys.stdout.flush()
+    finally:
+        _remove_pidfiles(pidfiles)
     return 0
 
 

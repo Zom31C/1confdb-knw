@@ -178,6 +178,116 @@ def _load(header_json):
         return None
 
 
+# ---------------------------------------------------------------------------
+# Адаптеры баз из ВЫГРУЗКИ В ФАЙЛЫ: там header_json хранит исходный XML
+# объекта (dump.build), а не внутренний JSON декодера .cf. Формат определяется
+# по первому непробельному символу; состав сведений тот же, но лежит в
+# именованных тегах — парсеры проще и надёжнее позиционных.
+# ---------------------------------------------------------------------------
+
+def _xml_header(header_json):
+    """Узел класса из XML-заголовка или None (это не XML)."""
+    text = header_json.lstrip() if isinstance(header_json, str) else ''
+    if not text.startswith('<'):
+        return None
+    from .dump import xmlmeta
+    try:
+        return xmlmeta.class_element(xmlmeta.loads(text))
+    except Exception:  # noqa: BLE001 — битый XML = заголовок не читается
+        return None
+
+
+def _xml_text(el, name):
+    for child in el:
+        if child.tag == name:
+            return child.text or None
+    return None
+
+
+def _xml_props(root):
+    for child in root:
+        if child.tag == 'Properties':
+            return child
+    return None
+
+
+# Периодичность регистра сведений: XML-имя → строка как в cf-базе
+PERIODICITY_XML = {
+    'Nonperiodical': 'непериодический', 'Year': 'год', 'Quarter': 'квартал',
+    'Month': 'месяц', 'Day': 'день', 'Second': 'секунда',
+    'RecorderPosition': 'позиция регистратора',
+}
+
+# Режим записи регистра: XML-имя → строка как в cf-базе
+WRITE_MODE_XML = {
+    'Independent': 'независимый',
+    'RecordSubordinate': 'подчинение регистратору',
+}
+
+# Коллекции полей регистра: тег ChildObjects → группа паспорта
+REGISTER_KIND_TAGS = {
+    'Dimension': 'Измерения', 'Resource': 'Ресурсы', 'Attribute': 'Реквизиты',
+}
+
+# События подписок: английское имя платформы → русское как в конфигураторе.
+# Накопано по header_json четырёх cf-баз (УНФ, БП, БП-обновление, ЗУП: 1723
+# подписки, 20 имён, нулевая конфликтность) — cf хранит пару '"En_Ru"'.
+EVENTS_RU = {
+    'BeforeDelete': 'ПередУдалением',
+    'BeforeWrite': 'ПередЗаписью',
+    'ChoiceDataGetProcessing': 'ОбработкаПолученияДанныхВыбора',
+    'FillCheckProcessing': 'ОбработкаПроверкиЗаполнения',
+    'Filling': 'ОбработкаЗаполнения',
+    'FormGetProcessing': 'ОбработкаПолученияФормы',
+    'OnCopy': 'ПриКопировании',
+    'OnReceiveDataFromMaster': 'ПриПолученииДанныхОтГлавного',
+    'OnReceiveDataFromSlave': 'ПриПолученииДанныхОтПодчиненного',
+    'OnSendDataToMaster': 'ПриОтправкеДанныхГлавному',
+    'OnSendDataToSlave': 'ПриОтправкеДанныхПодчиненному',
+    'OnSendNodeDataToSlave': 'ПриОтправкеДанныхУзлаПодчиненному',
+    'OnSetNewCode': 'ПриУстановкеНовогоКода',
+    'OnSetNewNumber': 'ПриУстановкеНовогоНомера',
+    'OnWrite': 'ПриЗаписи',
+    'Posting': 'ОбработкаПроведения',
+    'PresentationFieldsGetProcessing':
+        'ОбработкаПолученияПолейПредставления',
+    'PresentationGetProcessing': 'ОбработкаПолученияПредставления',
+    'UndoPosting': 'ОбработкаУдаленияПроведения',
+}
+
+# Источники подписок в выгрузке: тип платформы → тип объекта в базе
+SUB_SOURCE_CLASS = {
+    'CatalogObject': 'Catalog',
+    'DocumentObject': 'Document',
+    'ExchangePlanObject': 'ExchangePlan',
+    'BusinessProcessObject': 'BusinessProcess',
+    'TaskObject': 'Task',
+    'ChartOfAccountsObject': 'ChartOfAccounts',
+    'ChartOfCharacteristicTypesObject': 'ChartOfCharacteristicType',
+    'ChartOfCalculationTypesObject': 'ChartOfCalculationTypes',
+    'DataProcessorObject': 'DataProcessor',
+    'AccumulationRegisterRecordSet': 'AccumulationRegister',
+    'InformationRegisterRecordSet': 'InformationRegister',
+    'AccountingRegisterRecordSet': 'AccountingRegister',
+    'CalculationRegisterRecordSet': 'CalculationRegister',
+}
+
+# Имена классов в строках состава/целей («Класс.Имя») → тип объекта в базе:
+# платформа для части классов использует имена, отличающиеся от типа
+CLASS_ALIAS_NAMES = {
+    'ChartOfCharacteristicTypes': 'ChartOfCharacteristicType',
+    'ChartOfCharacteristicType': 'ChartOfCharacteristicType',
+    'DocumentNumerator': 'DocumentNumerators',
+    'DocumentNumerators': 'DocumentNumerators',
+    'Sequence': 'Sequences',
+    'Sequences': 'Sequences',
+}
+
+# Маркер внедрённого при сборке файла (состав плана обмена живёт в отдельном
+# Ext/Content.xml — dump.build дописывает его текст к header_json)
+INCLUDE_MARKER = '<!--confdb:include:'
+
+
 def _is_attr(node):
     """Запись реквизита ['2', CORE, TYPEDESC] -> имя, иначе None.
 
@@ -223,6 +333,21 @@ def register_field_kinds(header_json):
     регистра или другой формат заголовка): вызывающий код показывает реквизиты
     одним плоским списком, как раньше.
     """
+    root = _xml_header(header_json)
+    if root is not None:
+        kinds = {}
+        for child in root:
+            if child.tag != 'ChildObjects':
+                continue
+            for item in child:
+                kind = REGISTER_KIND_TAGS.get(item.tag)
+                if kind is None:
+                    continue
+                name = _xml_text(_xml_props(item), 'Name') \
+                    if _xml_props(item) is not None else None
+                if name:
+                    kinds.setdefault(name, kind)
+        return kinds
     data = _load(header_json)
     if data is None:
         return {}
@@ -253,6 +378,21 @@ def register_props(obj_type, header_json):
         return ['Режим записи: подчинение регистратору']
     if obj_type != 'InformationRegister':
         return []
+    root = _xml_header(header_json)
+    if root is not None:
+        props = _xml_props(root)
+        if props is None:
+            return []
+        lines = []
+        period = PERIODICITY_XML.get(
+            (_xml_text(props, 'InformationRegisterPeriodicity') or '').strip())
+        if period:
+            lines.append(f'Периодичность: {period}')
+        mode = WRITE_MODE_XML.get(
+            (_xml_text(props, 'WriteMode') or '').strip())
+        if mode:
+            lines.append(f'Режим записи: {mode}')
+        return lines
     data = _load(header_json)
     if data is None:
         return []
@@ -287,6 +427,11 @@ def xdto_props(obj_type, header_json):
     """
     if obj_type != 'XDTOPackage':
         return []
+    root = _xml_header(header_json)
+    if root is not None:
+        namespace = _xml_text(_xml_props(root), 'Namespace') \
+            if _xml_props(root) is not None else None
+        return [f'Пространство имён: {namespace}'] if namespace else []
     data = _load(header_json)
     if data is None:
         return []
@@ -322,6 +467,9 @@ def config_props(header_json):
     Возвращает словарь: name, synonym, version, compatibility, name_prefix,
     obj_version — отсутствующие значения не включаются.
     """
+    root = _xml_header(header_json)
+    if root is not None:
+        return _config_props_xml(root)
     data = _load(header_json)
     if not isinstance(data, dict):
         return {}
@@ -347,6 +495,37 @@ def config_props(header_json):
         prefix = unquote(_scalar(props, CFG_NAME_PREFIX) or '')
         if prefix:
             out['name_prefix'] = prefix
+    return out
+
+
+def _config_props_xml(root):
+    """config_props по Configuration.xml выгрузки."""
+    from .dump import xmlmeta
+    props = _xml_props(root)
+    out = {}
+    if props is None:
+        return out
+    name = _xml_text(props, 'Name')
+    if name:
+        out['name'] = name
+    synonym = xmlmeta.synonym(root)
+    if synonym:
+        out['synonym'] = synonym
+    version = _xml_text(props, 'Version')
+    if version:
+        out['version'] = version
+    compat = (_xml_text(props, 'CompatibilityMode') or '').strip()
+    if compat:
+        # 'Version8_3_27' -> '8.3.27'
+        digits = compat.replace('Version', '').replace('_', '.')
+        out['compatibility'] = digits
+        parts = [p for p in digits.split('.') if p.isdigit()]
+        if len(parts) >= 3:
+            out['obj_version'] = '%s%02d%02d' % (
+                parts[0], int(parts[1]), int(parts[2]))
+    prefix = _xml_text(props, 'NamePrefix')
+    if prefix:
+        out['name_prefix'] = prefix
     return out
 
 
@@ -419,6 +598,58 @@ def event_name(raw):
     return ru if sep and ru else text
 
 
+def _event_subscription_xml(root):
+    """event_subscription по XML выгрузки.
+
+    В выгрузке источник — тип платформы ('cfg:DocumentObject.Х'), обработчик —
+    точечное имя ('CommonModule.Модуль.Метод'), событие — английское имя.
+    Возвращает те же ключи плюс 'source_paths' (пути объектов в стиле БД
+    вместо «источниковых» uuid) и 'handler_module' — вызывающий код
+    (_build_event_index) использует их напрямую, без карты self_ref_uuid.
+    """
+    props = _xml_props(root)
+    if props is None:
+        return {}
+    event_en = None
+    handler_module = None
+    handler_method = None
+    source_paths = []
+    unresolved = 0
+    for child in props:
+        if child.tag == 'Event' and child.text:
+            event_en = child.text.strip()
+        elif child.tag == 'Handler' and child.text:
+            parts = child.text.strip().split('.')
+            if len(parts) == 3:
+                handler_module, handler_method = parts[1], parts[2]
+        elif child.tag == 'Source':
+            for item in child:
+                if item.tag != 'v8:Type' or not item.text:
+                    continue
+                value = item.text.strip()
+                if not value.startswith('cfg:') or '.' not in value:
+                    unresolved += 1
+                    continue
+                family, name = value[4:].split('.', 1)
+                cls = SUB_SOURCE_CLASS.get(family)
+                if cls is None:
+                    unresolved += 1
+                    continue
+                source_paths.append(f'{cls}/{name}')
+    event = EVENTS_RU.get(event_en or '', event_en)
+    if not event:
+        return {}
+    return {
+        'event': event,
+        'handler_uuid': None,
+        'handler_method': handler_method,
+        'sources': [],
+        'source_paths': source_paths,
+        'unresolved_sources': unresolved,
+        'handler_module': handler_module,
+    }
+
+
 def event_subscription(obj_type, header_json):
     """Свойства подписки на событие; {} — не подписка или другой формат.
 
@@ -428,6 +659,9 @@ def event_subscription(obj_type, header_json):
     """
     if obj_type != 'EventSubscription':
         return {}
+    root = _xml_header(header_json)
+    if root is not None:
+        return _event_subscription_xml(root)
     data = _load(header_json)
     if not isinstance(data, dict):
         return {}
@@ -456,6 +690,28 @@ def event_subscription(obj_type, header_json):
     }
 
 
+def _exchange_plan_content_xml(header_json):
+    """Состав плана обмена из внедрённого Ext/Content.xml: строки «Класс.Имя»."""
+    from .dump import xmlmeta
+    tail = header_json.split(INCLUDE_MARKER, 1)[1]
+    cut = tail.find('-->')
+    body = (tail[cut + 3:] if cut >= 0 else tail).lstrip()
+    try:
+        root = xmlmeta.loads(body)
+    except Exception:  # noqa: BLE001
+        return []
+    out = []
+    for item in root.iter('Item'):
+        name = None
+        for child in item:
+            if child.tag == 'Metadata' and child.text:
+                name = child.text.strip()
+                break
+        if name:
+            out.append(name)
+    return out
+
+
 # План обмена: поток .1 декодер кладёт в data['info'] — плоский список
 # ['2', КОЛИЧЕСТВО, uuid, флаг, uuid, флаг, …], у всех 27 планов УНФ он
 # обёрнут в один дополнительный список. Это состав плана: uuid разрешаются
@@ -466,9 +722,17 @@ EP_FIRST = 2
 
 
 def exchange_plan_content(obj_type, header_json):
-    """uuid объектов состава плана обмена; [] — не план или состава нет."""
+    """uuid объектов состава плана обмена; [] — не план или состава нет.
+
+    В базах из выгрузки состав плана живёт в отдельном Ext/Content.xml, который
+    dump.build дописывает к header_json за маркером INCLUDE_MARKER: тогда
+    возвращаются строки «Класс.Имя» (не uuid) — вызывающий код различает их
+    через is_uuid.
+    """
     if obj_type != 'ExchangePlan':
         return []
+    if isinstance(header_json, str) and INCLUDE_MARKER in header_json:
+        return _exchange_plan_content_xml(header_json)
     data = _load(header_json)
     if not isinstance(data, dict):
         return []

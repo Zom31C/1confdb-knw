@@ -2655,3 +2655,75 @@ def test_http_parallel_text_searches(tmp_path_factory):
         server.close_db()
 
 
+# ---------------------------------------------------------------------------
+# Hot reload: живой сервер подхватывает инкрементальное обновление базы
+# ---------------------------------------------------------------------------
+
+def test_hot_reload_after_dump_update(tmp_path):
+    from confdb.dump import build_db, update_db
+    from test_dump import NS, make_dump_dir, _w
+    dump = str(tmp_path / 'cfg')
+    os.makedirs(dump)
+    make_dump_dir(dump)
+    db = str(tmp_path / 'hot.sqlite')
+    build_db(dump, db, workers=1, build_fts=False, log=lambda *a: None)
+    server = McpServer(db)
+    try:
+        # до обновления объекта нет; кэш счётчиков заполняется
+        before = _call(server, 'find_objects',
+                       mask='НовыйСправочник')['content'][0]['text']
+        assert 'НовыйСправочник' not in before
+        # внешнее обновление при открытом сервере (LLM правит выгрузку)
+        _w(dump, 'Catalogs/НовыйСправочник.xml',
+           '<?xml version="1.0" encoding="UTF-8"?>\n'
+           '<MetaDataObject %s version="2.20">\n'
+           '\t<Catalog uuid="12345678-0000-0000-0000-000000000001">\n'
+           '\t\t<Properties><Name>НовыйСправочник</Name></Properties>\n'
+           '\t\t<ChildObjects/>\n'
+           '\t</Catalog>\n'
+           '</MetaDataObject>' % NS)
+        update_db(dump, db, workers=1, rebuild_fts=False,
+                  log=lambda *a: None)
+        # тот же сервер, то же соединение — видит новый объект и новый модуль
+        after = _call(server, 'find_objects',
+                      mask='НовыйСправочник')['content'][0]['text']
+        assert 'НовыйСправочник' in after
+        _w(dump, 'CommonModules/ОбщийМодуль1/Ext/Module.bsl',
+           'Функция ДобавленнаяФункция() Экспорт\n\tВозврат 1;\nКонецФункции')
+        update_db(dump, db, workers=1, rebuild_fts=False,
+                  log=lambda *a: None)
+        methods = _call(server, 'find_methods',
+                        mask='ДобавленнаяФункция')['content'][0]['text']
+        assert 'ДобавленнаяФункция' in methods
+        # кэш BslContext тоже сброшен: семантическая проверка видит новый метод
+        sem = _call(server, 'check_syntax', semantic=True,
+                    path='CommonModule/ОбщийМодуль1',
+                    code_name='obj')['content'][0]['text']
+        assert 'ДобавленнаяФункция' in sem or 'синтаксических ошибок нет' in sem
+    finally:
+        server.close_db()
+
+
+def test_pidfile_written_and_removed(tmp_path):
+    """Pidfile сервера — метка для confdb update (живой сервер)."""
+    from confdb.dump.update import read_server_pidfile
+    dump_dir = str(tmp_path / 'cfg')
+    os.makedirs(dump_dir)
+    from test_dump import make_dump_dir
+    make_dump_dir(dump_dir)
+    from confdb.dump import build_db
+    db = str(tmp_path / 'pf.sqlite')
+    build_db(dump_dir, db, workers=1, build_fts=False, log=lambda *a: None)
+    assert read_server_pidfile(db) is None
+    server = McpServer(db)
+    try:
+        created = mcp_server._write_pidfiles(server, 8765)
+        assert len(created) == 1
+        info = read_server_pidfile(db)
+        assert info and info['pid'] == os.getpid() and info['port'] == 8765
+        mcp_server._remove_pidfiles(created)
+        assert read_server_pidfile(db) is None
+    finally:
+        server.close_db()
+
+

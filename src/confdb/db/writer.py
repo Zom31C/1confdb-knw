@@ -37,7 +37,11 @@ ROOT_TYPES = ('Configuration', 'ConfigurationExtension', 'ExternalDataProcessor'
 # 8 — meta_subobject (заглушка для будущих подобъектов: операции веб-сервисов,
 # методы HTTP-сервисов, формы, команды) и target_subobject_id в role_right
 # (2026-10-10).
-SCHEMA_VERSION = 8
+# 9 — поддержка выгрузки в файлы (dump): dump_file/dump_state (хэши файлов
+# выгрузки для инкрементального обновления), attribute_ref.target_path
+# (цель ссылки по пути — позволяет переразрешить ссылку, когда объект
+# добавлен позже ссылки) (2026-11-07).
+SCHEMA_VERSION = 9
 
 RE_UUID = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.I)
 
@@ -781,6 +785,7 @@ CREATE TABLE meta_object (
 CREATE UNIQUE INDEX ux_meta_object_path ON meta_object(source_id, path);
 CREATE INDEX ix_meta_object_type ON meta_object(type);
 CREATE INDEX ix_meta_object_parent ON meta_object(parent_id, ord);
+CREATE INDEX ix_meta_object_uuid ON meta_object(uuid);
 CREATE TABLE module (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     object_id INTEGER NOT NULL REFERENCES meta_object(id) ON DELETE CASCADE,
@@ -887,11 +892,16 @@ CREATE TABLE attribute_ref (
     attribute_id INTEGER NOT NULL REFERENCES meta_attribute(id) ON DELETE CASCADE,
     ord INTEGER NOT NULL,
     uuid TEXT NOT NULL,
-    object_id INTEGER REFERENCES meta_object(id) ON DELETE CASCADE
+    -- SET NULL (не CASCADE): инкрементальное обновление удаляет и вставляет
+    -- объект заново — строки ссылок ДРУГИХ объектов должны выживать и
+    -- переразрешаться по target_path/uuid
+    object_id INTEGER REFERENCES meta_object(id) ON DELETE SET NULL,
+    target_path TEXT
 );
 CREATE INDEX ix_attribute_ref_attr ON attribute_ref(attribute_id, ord);
 CREATE INDEX ix_attribute_ref_object ON attribute_ref(object_id);
 CREATE INDEX ix_attribute_ref_uuid ON attribute_ref(uuid);
+CREATE INDEX ix_attribute_ref_target_path ON attribute_ref(target_path);
 CREATE TABLE enum_value (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     object_id INTEGER NOT NULL REFERENCES meta_object(id) ON DELETE CASCADE,
@@ -948,10 +958,12 @@ CREATE TABLE role_right (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     role_id INTEGER NOT NULL REFERENCES meta_object(id) ON DELETE CASCADE,
     target_uuid TEXT NOT NULL,
-    target_object_id INTEGER REFERENCES meta_object(id) ON DELETE CASCADE,
-    target_attr_id INTEGER REFERENCES meta_attribute(id) ON DELETE CASCADE,
-    target_tabular_id INTEGER REFERENCES meta_tabular(id) ON DELETE CASCADE,
-    target_subobject_id INTEGER REFERENCES meta_subobject(id) ON DELETE CASCADE,
+    -- SET NULL: строки прав ДРУГИХ ролей на переустанавливаемый объект
+    -- выживают и переразрешаются по target_uuid (см. dump.update)
+    target_object_id INTEGER REFERENCES meta_object(id) ON DELETE SET NULL,
+    target_attr_id INTEGER REFERENCES meta_attribute(id) ON DELETE SET NULL,
+    target_tabular_id INTEGER REFERENCES meta_tabular(id) ON DELETE SET NULL,
+    target_subobject_id INTEGER REFERENCES meta_subobject(id) ON DELETE SET NULL,
     sub_index INTEGER,
     collection_uuid TEXT,
     target_flags TEXT,
@@ -981,6 +993,19 @@ CREATE TABLE role_rights_state (
     rls_templates INTEGER NOT NULL,
     error TEXT
 );
+CREATE TABLE dump_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    dump_dir TEXT NOT NULL,
+    updated TEXT NOT NULL
+);
+CREATE TABLE dump_file (
+    path TEXT PRIMARY KEY,
+    granule TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    mtime_ns INTEGER NOT NULL,
+    sha256 TEXT NOT NULL
+);
+CREATE INDEX ix_dump_file_granule ON dump_file(granule);
 """
 
 TEXT_KINDS = ('bsl', 'html', 'htm', 'txt', 'json', 'xml', 'css', 'js')
@@ -1247,13 +1272,33 @@ def fts_dir(db_path):
 
 
 def fts_shard_paths(db_path):
-    """Файлы шардов по порядку номеров; пустой список — индекса нет."""
+    """Файлы шардов по порядку номеров; пустой список — индекса нет.
+
+    Состав берётся из манифеста (`files` — схема с поколениями: сборка для
+    работающего сервера не может перезаписать открытые им файлы, поэтому каждый
+    rebuild пишет шарды нового поколения `g<N>_<k>.db`). Манифесты прежней
+    схемы без `files` читаются по числовым именам `<k>.db`.
+    """
     d = fts_dir(db_path)
     if not os.path.isdir(d):
         return []
+    info = _read_fts_manifest(d)
+    if info is not None and isinstance(info.get('files'), list):
+        return [os.path.join(d, n) for n in info['files']]
     names = [n for n in os.listdir(d) if n.endswith('.db') and n[:-3].isdigit()]
     names.sort(key=lambda n: int(n[:-3]))
     return [os.path.join(d, n) for n in names]
+
+
+def _read_fts_manifest(d):
+    manifest = os.path.join(d, 'index.json')
+    if not os.path.isfile(manifest):
+        return None
+    try:
+        with open(manifest, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
 
 
 def drop_fts_index(db_path):
@@ -1267,21 +1312,21 @@ def fts_index_info(db_path):
     """Манифест приставного индекса или None, если индекса нет/он неполный.
 
     Манифест `index.json` пишется последним, поэтому его отсутствие означает
-    прерванную сборку, а несовпадение числа шардов — частично удалённый индекс.
-    В обоих случаях сервер обязан искать через body_has, а не молча возвращать
-    часть выдачи.
+    прерванную сборку, а отсутствующие файлы шардов — частично удалённый
+    индекс. В обоих случаях сервер обязан искать через body_has, а не молча
+    возвращать часть выдачи.
 
-    :return: {'shards': N, 'methods': M, 'created': iso} или None
+    :return: {'shards': N, 'methods': M, 'created': iso[, 'generation': G,
+        'files': [...]]} или None
     """
-    manifest = os.path.join(fts_dir(db_path), 'index.json')
-    if not os.path.isfile(manifest):
+    d = fts_dir(db_path)
+    info = _read_fts_manifest(d)
+    if info is None:
         return None
-    try:
-        with open(manifest, 'r', encoding='utf-8') as f:
-            info = json.load(f)
-    except (OSError, ValueError):
-        return None
-    if len(fts_shard_paths(db_path)) != int(info.get('shards', -1)):
+    if isinstance(info.get('files'), list):
+        if not all(os.path.isfile(os.path.join(d, n)) for n in info['files']):
+            return None
+    elif len(fts_shard_paths(db_path)) != int(info.get('shards', -1)):
         return None
     return info
 
@@ -1319,6 +1364,13 @@ def build_fts_index(db_path, workers=1):
     базы) при пересборке удаляется: это производные данные, и две схемы сразу не
     нужны.
 
+    Пересборка у работающего MCP-сервера: сервер держит шарды открытыми, а Windows
+    не даёт перезаписать/удалить открытый файл, поэтому шарды пишутся ПОКОЛЕНИЯМИ
+    (`g<N>_<k>.db`): новое поколение создаётся рядом, манифест переключается на
+    него последним, а файлы прежних поколений удаляются best-effort (заблокированные
+    сервером доживут до следующей пересборки). Сервер при смене `PRAGMA
+    data_version` перечитывает манифест и переоткрывает шарды.
+
     :param db_path: путь к базе знаний
     :param workers: число процессов сборки (1 — последовательно, без пула)
     """
@@ -1334,11 +1386,15 @@ def build_fts_index(db_path, workers=1):
     finally:
         conn.close()
 
-    drop_fts_index(db_path)
-    shards = max(1, min(int(workers or 1), MAX_FTS_SHARDS, max(methods, 1)))
-    os.makedirs(helper.long_path(fts_dir(db_path)), exist_ok=True)
-    tasks = [(db_path, os.path.join(fts_dir(db_path), f'{k}.db'), k, shards)
-             for k in range(shards)]
+    d = fts_dir(db_path)
+    prev = _read_fts_manifest(d) if os.path.isdir(d) else None
+    generation = int((prev or {}).get('generation', 0)) + 1
+    os.makedirs(helper.long_path(d), exist_ok=True)
+    names = [f'g{generation}_{k}.db' for k in
+             range(max(1, min(int(workers or 1), MAX_FTS_SHARDS, max(methods, 1))))]
+    shards = len(names)
+    tasks = [(db_path, os.path.join(d, n), k, shards)
+             for k, n in enumerate(names)]
     if shards > 1:
         import multiprocessing
         mp_ctx = multiprocessing.get_context('spawn')
@@ -1348,9 +1404,19 @@ def build_fts_index(db_path, workers=1):
         _build_fts_shard(tasks[0])
     # манифест — последним: пока его нет, индекс считается неполным
     # (fts_index_info) и поиск идёт через body_has
-    with open(os.path.join(fts_dir(db_path), 'index.json'), 'w', encoding='utf-8') as f:
+    with open(os.path.join(d, 'index.json'), 'w', encoding='utf-8') as f:
         json.dump({'shards': shards, 'methods': methods,
+                   'generation': generation, 'files': names,
                    'created': datetime.now().isoformat(timespec='seconds')}, f)
+    # файлы прежних поколений — best-effort: заблокированные открытыми
+    # соединениями сервера пропускаются (Windows), их подберёт следующая сборка
+    keep = set(names) | {'index.json'}
+    for fn in os.listdir(d):
+        if fn not in keep:
+            try:
+                os.unlink(os.path.join(d, fn))
+            except OSError:
+                pass
     return methods
 
 
@@ -1647,18 +1713,21 @@ def write_db(dump_dir, db_path, *, source_file=None, source_sha256=None,
                 attr_params.append((dir_to_id[rel], ord_no, name, type_str,
                                     tabular, uuid))
                 attr_id = len(attr_params)
-                # связи реквизита с объектами метаданных по ссылочным uuid
+                # связи реквизита с объектами метаданных по ссылочным uuid;
+                # target_path хранит цель по пути даже когда объект не найден —
+                # инкрементальное обновление переразрешает ссылку позже
                 for l_ord, (l_uuid, l_path) in enumerate(links):
                     ref_params.append((attr_id, l_ord, l_uuid,
-                                       dir_to_id.get(l_path) if l_path else None))
+                                       dir_to_id.get(l_path) if l_path else None,
+                                       l_path))
         conn.executemany(
             'INSERT INTO meta_attribute'
             ' (object_id, ord, name, type_str, tabular, uuid)'
             ' VALUES (?, ?, ?, ?, ?, ?)',
             attr_params)
         conn.executemany(
-            'INSERT INTO attribute_ref (attribute_id, ord, uuid, object_id)'
-            ' VALUES (?, ?, ?, ?)', ref_params)
+            'INSERT INTO attribute_ref (attribute_id, ord, uuid, object_id, target_path)'
+            ' VALUES (?, ?, ?, ?, ?)', ref_params)
         stats['attributes'] += len(attr_params)
         stats['refs'] += len(ref_params)
 

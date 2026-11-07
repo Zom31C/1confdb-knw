@@ -411,6 +411,7 @@ class Tui:
             _cls()
             print('--- Извлечение ---')
             print(f' 1. Файл 1С:      {self.src or "<не задан>"}')
+            print('    (.cf/.cfe/.epf или каталог выгрузки конфигурации в файлы)')
             print(f' 2. База SQLite:  {self.db or "<не писать>"}')
             print(f' 3. Дамп дерева:  {self.dump or "<не сохранять>"}')
             print(' 4. Запустить извлечение')
@@ -420,8 +421,9 @@ class Tui:
                 self._save()
                 return
             if choice == '1':
-                picked = self._pick_path('Файл конфигурации 1С (.cf/.cfe/.epf)',
-                                         _cf_candidates(), self.recent_src)
+                picked = self._pick_path(
+                    'Файл конфигурации 1С (.cf/.cfe/.epf) или каталог выгрузки',
+                    _cf_candidates(), self.recent_src)
                 if picked:
                     self.src = picked
                     # База по умолчанию — рядом с исходником, имя из его имени.
@@ -447,6 +449,13 @@ class Tui:
                 input('Нажмите Enter…')
 
     def _run_extract(self):
+        # каталог выгрузки конфигурации в файлы — свой конвейер (XML вместо
+        # контейнеров; повторный запуск = инкрементальное обновление)
+        if self.src and os.path.isdir(self.src):
+            from .dump import is_dump_dir
+            if is_dump_dir(self.src):
+                self._run_extract_dump()
+                return
         if not self.src or not os.path.isfile(self.src):
             print('Ошибка: укажите существующий файл 1С (пункт 1).')
             input('Нажмите Enter…')
@@ -508,6 +517,50 @@ class Tui:
         if stats.get('db') and not self.build_fts and _yes_no(
                 'Индекс не строился. Построить FTS-индекс по телам методов сейчас?', False):
             self._build_fts(stats['db'])
+        if self.last_db and _yes_no('Открыть запросы к полученной базе?', True):
+            self._query_menu(self.last_db)
+        input('Нажмите Enter…')
+
+    def _run_extract_dump(self):
+        """Сборка/инкрементальное обновление базы из выгрузки в файлы."""
+        from .dump import build_db, update_db
+        if not self.db:
+            self.db = _out_defaults(self.src)[0]
+            print(f'База не задана — используем {self.db}')
+        if os.path.isdir(self.db):
+            base = os.path.basename(os.path.normpath(self.src))
+            self.db = os.path.join(self.db, base + '_dump.sqlite')
+            print(f'Путь БД — каталог, файл будет создан как: {self.db}')
+        os.makedirs(os.path.dirname(os.path.abspath(self.db)), exist_ok=True)
+        _cls()
+        try:
+            if os.path.isfile(self.db):
+                print('База уже есть — инкрементальное обновление '
+                      '(только изменённые объекты).')
+                stats = update_db(self.src, self.db, workers=self.workers,
+                                  rebuild_fts=None if self.build_fts else False)
+            else:
+                stats = build_db(self.src, self.db, workers=self.workers,
+                                 build_fts=self.build_fts,
+                                 store_blobs=self.store_blobs)
+        except PermissionError as err:
+            print(f'Файл базы занят другим процессом (запущен MCP-сервер?): {err}')
+            input('Нажмите Enter…')
+            return
+        except Exception as err:  # noqa: BLE001
+            print(f'Ошибка сборки из выгрузки: {err}')
+            input('Нажмите Enter…')
+            return
+        self.last_db = stats['db']
+        self.recent_src = _remember(self.recent_src, self.src)
+        self.recent_db = _remember(self.recent_db, self.db)
+        self._save()
+        changed = stats.get('changed_granules')
+        summary = (f'изменённых объектов: {len(changed)}'
+                   if changed is not None else
+                   f'объектов: {stats.get("objects")}, '
+                   f'модулей: {stats.get("modules")}')
+        print(f'Готово за {stats["elapsed"]}. {summary}')
         if self.last_db and _yes_no('Открыть запросы к полученной базе?', True):
             self._query_menu(self.last_db)
         input('Нажмите Enter…')
