@@ -978,3 +978,34 @@ def test_predefined_chart_of_accounts_subconto(tmp_path):
         (0, None, ZERO_UUID, 'Элементы', '', ''),
         (1, 0, DRIVER_UUID, 'ДрайверСканера', '', 'Драйвер сканера')]
     conn.close()
+
+
+def test_version_follows_schema_revision():
+    """Правило пользователя (2026-11-08): версия = <major>.<ревизия схемы>.<доработки>.
+
+    Вторая цифра __version__ обязана равняться SCHEMA_VERSION: поднял схему —
+    подними минор версии (и сбрось последнюю цифру в 0).
+    """
+    from confdb import __version__
+    parts = __version__.split('.')
+    assert len(parts) == 3, f'версия должна быть из трёх чисел: {__version__}'
+    assert int(parts[1]) == SCHEMA_VERSION, \
+        f'вторая цифра версии ({parts[1]}) != ревизия схемы ({SCHEMA_VERSION})'
+
+
+def test_version_places_are_in_sync():
+    """Все места, где живёт версия, показывают одно и то же число.
+
+    pyproject.toml корня проекта, штамп ядра распаковки v8 (пишется в
+    JSON-заголовки дампа как 'v8unpack') и confdb.__version__.
+    """
+    import re
+
+    from confdb import __version__
+    from confdb.v8 import __version__ as v8_version
+    assert v8_version == __version__
+    root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+    with open(os.path.join(root, 'pyproject.toml'), encoding='utf-8') as f:
+        m = re.search(r'^version = "([^"]+)"', f.read(), re.M)
+    assert m and m.group(1) == __version__, \
+        f'pyproject.toml: {m.group(1) if m else "?"} != {__version__}'

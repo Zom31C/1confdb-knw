@@ -27,14 +27,18 @@ intro: MCP server first, features, install, quick start). state3 is NOT shipped 
   3.10, so green tests do NOT prove 3.9 compatibility — check new syntax by eye.
 - Windows-oriented: `.bat` wrappers in repo root, venv in `.venv`. Comments, docstrings and
   user-facing text are in **Russian**.
-- Package version is 1.0.0 (2026-11-08; was a never-bumped 0.1.0). It lives in FOUR places
-  that must move together: `src/confdb/__init__.__version__`, `pyproject.toml` (root AND
-  dist — the files are identical), `src/confdb/v8/__init__.py` (the `v8unpack` stamp in dump
-  JSON headers). Minor = new tools/tables/pipelines, patch = fixes. After a bump reinstall
-  both venvs (root `pip install -e .`, dist `pip install .`) and only then robocopy — the
-  site-packages copies shadow the metadata and would keep reporting the old version;
+- Package version is `<major>.<schema revision>.<tool patch>` — now **1.9.0** (schema rev 9).
+  User rule (2026-11-08): the SECOND digit follows the DB schema revision
+  (`writer.SCHEMA_VERSION` = `PRAGMA user_version` of built bases) and resets the last digit
+  to 0; the LAST digit increments on tool improvements/fixes (MCP/CLI). Guards:
+  `test_version_follows_schema_revision`, `test_version_places_are_in_sync`. The version
+  lives in FOUR places that must move together: `src/confdb/__init__.__version__`,
+  `pyproject.toml` (root AND dist — the files are identical), `src/confdb/v8/__init__.py`
+  (the `v8unpack` stamp in dump JSON headers). After a bump reinstall both venvs
+  (root `pip install -e .`, dist `pip install .`) and only then robocopy — the site-packages
+  copies shadow the metadata and would keep reporting the old version;
   `source.extractor_version` of built DBs is informational (compatibility is the schema
-  revision, `PRAGMA user_version`).
+  revision itself).
 - The root is **not** a git repo. Published repo: `dist\1confdb-knw` (`Zom31C/1confdb-knw`) —
   the single unified build. (The old `dist\1confdb-knw-lsp` BSL-LS variant is retired: syntax
   checking is now native, `bsl_syntax.py` / the `check_syntax` tool; its GitHub repo is archived.)

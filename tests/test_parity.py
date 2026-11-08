@@ -186,7 +186,7 @@ RIGHTS_XML = (
 def make_cf_tree(base):
     """Мини-конфигурация в формате выхода декодера .cf (стадия 3)."""
     _json(os.path.join(base, 'Configuration.json'), {
-        'v8unpack': '1.0.0',
+        'v8unpack': '1.9.0',
         'uuid': CONTAINER_UUID,       # внутренний uuid контейнера
         'file_uuid': CFG_UUID,        # uuid метаданных Configuration
         'root': [['2', CFG_UUID, '']],
