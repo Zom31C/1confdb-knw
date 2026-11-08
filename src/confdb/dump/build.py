@@ -36,6 +36,30 @@ from . import model, xmlmeta
 
 HASH_CHUNK = 1 << 20
 
+# Пачка файлов для пула потоков в write_files: ограничивает число одновременно
+# удерживаемых в памяти прочитанных содержимых (хэшируемые потоково файлы
+# в память не берутся вовсе).
+_READ_BATCH = 64
+
+
+def _decode_text(blob):
+    """Байты файла → UTF-8-байты текста (содержимое file.data).
+
+    Повторяет W._read_text байт-в-байт: те же кодировки (utf-8-sig, затем
+    cp1251, затем utf-8 с заменами) и то же преобразование переносов строк,
+    которое давал текстовый режим чтения (universal newlines: CRLF/CR → LF).
+    """
+    for enc in ('utf-8-sig', 'cp1251'):
+        try:
+            text = blob.decode(enc)
+            break
+        except UnicodeDecodeError:
+            continue
+    else:
+        text = blob.decode('utf-8', errors='replace')
+    text = text.replace('\r\n', '\n').replace('\r', '\n')
+    return text.encode('utf-8')
+
 # Соответствие имени тега ChildObjects конфигурации и типа объекта: теги
 # обычно совпадают с типом, но классы-«множественные» (DocumentNumerators,
 # Sequences) и возможные расхождения singular/plural разрешаются поиском.
@@ -421,13 +445,19 @@ class Builder:
         Владелец файла — подобъект с самым длинным совпадением папки, иначе
         объект верхнего уровня; файлы корня принадлежат корневому объекту.
 
+        Stat, SHA-256 и чтение содержимого каждого файла — за ОДИН проход
+        (раньше хэш и текст читали файл дважды), а проходы распараллелены
+        потоками (ожидание диска и hashlib отпускают GIL); строки вставляются
+        как и прежде последовательно, в прежнем порядке (он определяет id
+        строк file). Файлы, которым содержимое не нужно (крупные макеты
+        Template.*, .bsl), хэшируются потоково и в память целиком не берутся.
+
         :param current: кэш состояний {rel: (granule, size, mtime_ns, sha256)}
             из update.scan_changes — не пересчитывать stat/хэш (инкремент);
         :param write_dump_state: писать dump_file (False при обновлении —
             update_db пишет их сам вместе с удалением старых строк гранулы);
         :return: (manifest_sha256, total_size) — только для полной сборки.
         """
-        conn = self.conn
         # префиксы папок подобъектов: {гранула: [(префикс, путь объекта)]}
         prefixes = {}
         for obj in objects:
@@ -442,67 +472,110 @@ class Builder:
         # дублировать незачем
         xml_rels = {os.path.relpath(o['xml'], self.dump_dir).replace(os.sep, '/')
                     for o in objects if o['xml']}
-        file_params = []
-        dump_params = []
-        manifest_entries = []   # (rel, sha) — хэш состава считаем в конце
-        total_size = 0
+
+        # плоский список задач в прежнем порядке: сортированные гранулы и rel
+        # внутри них (порядок обхода определяет id строк file)
+        todo = []
         for granule in sorted(granule_files):
-            plist = prefixes.get(granule, [])
-            base_id = self.path_id.get(granule) if granule else root_id
             for rel in sorted(granule_files[granule]):
-                full = os.path.join(self.dump_dir, *rel.split('/'))
-                state = (current or {}).get(rel)
-                if state is not None:
-                    _g, size, mtime_ns, sha = state
-                else:
-                    try:
-                        st = os.stat(helper.long_path(full))
-                    except OSError:
-                        continue
-                    size = st.st_size
-                    mtime_ns = st.st_mtime_ns
-                    sha = file_sha256(full)
-                if write_dump_state:
-                    manifest_entries.append((rel, sha))
-                    total_size += size
-                owner_id = base_id
-                for pref, obj_path in plist:
-                    if rel.startswith(pref + '/'):
-                        owner_id = self.path_id.get(obj_path, base_id)
-                        break
-                ext = rel.rsplit('.', 1)[-1].lower() if '.' in rel.rsplit('/', 1)[-1] else ''
-                data = None
+                base = rel.rsplit('/', 1)[-1]
+                ext = base.rsplit('.', 1)[-1].lower() if '.' in base else ''
                 # текст файлов храним, кроме: тел модулей (живут в module),
                 # ConfigDumpInfo.xml (32 МБ служебных версий), XML самих
                 # объектов (уже в header_json) и содержимого макетов
                 # Template.* — cf-базы бинарные макеты тоже не хранят, а
                 # запросы СКД из них уже извлечены в skd_query (на БП это
                 # 3.2 ГБ справочных листов, которые никто не читает)
-                base = rel.rsplit('/', 1)[-1]
-                if ext in W.TEXT_KINDS and ext != 'bsl' \
-                        and base != 'ConfigDumpInfo.xml' and rel not in xml_rels \
-                        and not base.startswith('Template.'):
-                    try:
-                        data = W._read_text(full).encode('utf-8')
-                        self.stats['files_content'] += 1
-                    except OSError:
-                        data = None
-                elif ext == 'bsl':
-                    pass  # тело модуля живёт в module/method
-                elif self.store_blobs:
-                    try:
+                want_text = (ext in W.TEXT_KINDS and ext != 'bsl'
+                             and base != 'ConfigDumpInfo.xml'
+                             and rel not in xml_rels
+                             and not base.startswith('Template.'))
+                want_raw = (not want_text) and ext != 'bsl' and self.store_blobs
+                todo.append((granule, rel, want_text, want_text or want_raw))
+
+        def read_one(item):
+            """(size, mtime_ns, sha, data, data_ok) по файлу; None — файла нет.
+
+            Ошибка чтения хэша (как и прежде) не перехватывается: пропавший
+            посреди сборки файл — исключение; ошибка чтения СОДЕРЖИМОГО —
+            data=None (файл остаётся в file/dump_file без текста).
+            """
+            _granule, rel, want_text, want_content = item
+            full = os.path.join(self.dump_dir, *rel.split('/'))
+            state = (current or {}).get(rel)
+            blob = None
+            if state is not None:
+                _g, size, mtime_ns, sha = state
+            else:
+                try:
+                    st = os.stat(helper.long_path(full))
+                except OSError:
+                    return None
+                size = st.st_size
+                mtime_ns = st.st_mtime_ns
+                if want_content:
+                    with open(helper.long_path(full), 'rb') as f:
+                        blob = f.read()
+                    sha = hashlib.sha256(blob).hexdigest()
+                else:
+                    sha = file_sha256(full)
+            data, ok = None, False
+            if want_content:
+                try:
+                    if blob is None:
                         with open(helper.long_path(full), 'rb') as f:
-                            data = f.read()
-                        self.stats['files_content'] += 1
-                    except OSError:
-                        data = None
-                file_params.append((self.source_id, owner_id, rel,
-                                    ext or 'bin', size, data))
-                if write_dump_state:
-                    dump_params.append((rel, granule, size, mtime_ns, sha))
-                self.stats['files'] += 1
-                if len(file_params) >= 2000:
-                    self._flush_files(file_params, dump_params)
+                            blob = f.read()
+                    data = _decode_text(blob) if want_text else blob
+                    ok = True
+                except OSError:
+                    data, ok = None, False
+            return size, mtime_ns, sha, data, ok
+
+        file_params = []
+        dump_params = []
+        manifest_entries = []   # (rel, sha) — хэш состава считаем в конце
+        total_size = 0
+
+        def handle(item, res):
+            nonlocal total_size
+            granule, rel, _wt, _wc = item
+            size, mtime_ns, sha, data, ok = res
+            if write_dump_state:
+                manifest_entries.append((rel, sha))
+                total_size += size
+            plist = prefixes.get(granule, [])
+            owner_id = self.path_id.get(granule) if granule else root_id
+            for pref, obj_path in plist:
+                if rel.startswith(pref + '/'):
+                    owner_id = self.path_id.get(obj_path, owner_id)
+                    break
+            base = rel.rsplit('/', 1)[-1]
+            ext = base.rsplit('.', 1)[-1].lower() if '.' in base else ''
+            file_params.append((self.source_id, owner_id, rel,
+                                ext or 'bin', size, data))
+            if ok:
+                self.stats['files_content'] += 1
+            if write_dump_state:
+                dump_params.append((rel, granule, size, mtime_ns, sha))
+            self.stats['files'] += 1
+            if len(file_params) >= 2000:
+                self._flush_files(file_params, dump_params)
+
+        threads = min(8, max(1, self.workers))
+        if threads > 1 and len(todo) > 1:
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=threads) as pool:
+                # пачки ограничивают память: в полёте не больше пачки содержимых
+                for start in range(0, len(todo), _READ_BATCH):
+                    chunk = todo[start:start + _READ_BATCH]
+                    for item, res in zip(chunk, pool.map(read_one, chunk)):
+                        if res is not None:
+                            handle(item, res)
+        else:
+            for item in todo:
+                res = read_one(item)
+                if res is not None:
+                    handle(item, res)
         self._flush_files(file_params, dump_params)
         # манифест состава — по ОТНОСИТЕЛЬНЫМ ПУТЯМ (тот же порядок, что
         # update._manifest_sha по таблице dump_file: иначе отпечаток базы
