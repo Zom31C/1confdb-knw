@@ -1,8 +1,8 @@
 """Консольный интерфейс confdb (только стандартная библиотека).
 
-Меню с обновлением экрана: извлечение конфигурации, SQL-запросы к базе,
-проверка запросов СКД, запуск MCP-сервера 1confdb-knw (одна база,
-несколько баз или именованная группа баз).
+Меню с обновлением экрана: запуск MCP-сервера 1confdb-knw (одна база,
+несколько баз или именованная группа баз), извлечение конфигурации,
+опции извлечения, группы баз.
 Недавние пути .cf/.sqlite, опции и группы баз запоминаются
 в ~/.confdb/config.json.
 Запуск: confdb-ui.bat (или python -m confdb.tui)
@@ -10,7 +10,6 @@
 import glob
 import json
 import os
-import sqlite3
 import subprocess
 import sys
 import threading
@@ -21,85 +20,6 @@ from .config import bench_workers
 from .config import load_config as _load_config
 from .config import save_config as _save_config
 from .extract import check_same_source, extract
-
-PRESETS = [
-    ('Состав конфигурации',
-     'SELECT type, COUNT(*) AS cnt FROM meta_object GROUP BY type ORDER BY cnt DESC'),
-    ('Объекты по имени',
-     "SELECT path, type, name, uuid FROM meta_object WHERE name LIKE '%{имя}%' LIMIT 50"),
-    ('Модули объекта',
-     "SELECT m.code_name, LENGTH(m.body) AS len FROM module m "
-     "JOIN meta_object o ON o.id=m.object_id WHERE o.path='{путь}'"),
-    ('Дети объекта',
-     "SELECT path, type, name FROM meta_object "
-     "WHERE parent_id=(SELECT id FROM meta_object WHERE path='{путь}')"),
-    ('Иерархия до корня',
-     "WITH RECURSIVE up(p) AS ("
-     "SELECT parent_id FROM meta_object WHERE path='{путь}' "
-     "UNION ALL SELECT m.parent_id FROM meta_object m JOIN up ON m.id=up.p WHERE up.p IS NOT NULL) "
-     "SELECT COALESCE((SELECT path FROM meta_object WHERE id=up.p), '<корень>') AS parent FROM up"),
-    ('Текст модуля',
-     "SELECT m.body FROM module m JOIN meta_object o ON o.id=m.object_id "
-     "WHERE o.path='{путь}' AND m.code_name='{модуль}'"),
-    ('Методы объекта',
-     "SELECT mt.kind, mt.name, mt.signature, mt.directives, mt.is_export, mt.description "
-     "FROM method mt JOIN module m ON m.id=mt.module_id "
-     "JOIN meta_object o ON o.id=m.object_id "
-     "WHERE o.path='{путь}' ORDER BY m.id, mt.ord"),
-    ('Тело метода',
-     "SELECT mt.body FROM method mt JOIN module m ON m.id=mt.module_id "
-     "JOIN meta_object o ON o.id=m.object_id "
-     "WHERE o.path='{путь}' AND m.code_name='{модуль}' AND mt.name='{метод}'"),
-    ('Дерево как в конфигураторе',
-     "WITH RECURSIVE tree(id, path, type, lvl, sort) AS ("
-     "SELECT id, path, type, 0, printf('%08d', COALESCE(ord, 0)) FROM meta_object "
-     "WHERE parent_id IS NULL "
-     "UNION ALL SELECT o.id, o.path, o.type, t.lvl+1, t.sort || printf('%08d', COALESCE(o.ord, 0)) "
-     "FROM meta_object o JOIN tree t ON o.parent_id=t.id) "
-     "SELECT substr('................', 1, lvl*2) || type || ' ' || name FROM tree "
-     "ORDER BY sort LIMIT 200"),
-    ('Запросы СКД макетов',
-     "SELECT o.path, q.query FROM skd_query q "
-     "JOIN meta_object o ON o.id=q.object_id "
-     "WHERE instr(o.path, '{имя}') > 0 ORDER BY q.object_id, q.ord LIMIT 20"),
-    ('Реквизиты объекта',
-     "SELECT a.name, a.type_str FROM meta_attribute a "
-     "JOIN meta_object o ON o.id=a.object_id "
-     "WHERE o.path='{путь}' ORDER BY a.ord"),
-    ('Связи реквизитов',
-     "SELECT a.name, r.uuid, COALESCE(o.path, '<абстрактный>') FROM attribute_ref r "
-     "JOIN meta_attribute a ON a.id=r.attribute_id "
-     "JOIN meta_object v ON v.id=a.object_id LEFT JOIN meta_object o ON o.id=r.object_id "
-     "WHERE v.path='{путь}' ORDER BY a.ord, r.ord"),
-    # права ролей: right_uuid — идентификатор права платформы (русского имени
-    # права в конфигурации нет), value — значение как в файле роли
-    ('Права роли',
-     "SELECT ro.name AS role, COALESCE(t.path, 'цель ' || r.target_uuid) AS object, "
-     "COALESCE(a.name, tb.name, '') AS subobject, r.sub_index, "
-     "r.right_uuid, r.value, CASE WHEN r.rls_text IS NULL THEN '' ELSE 'RLS' END AS rls "
-     "FROM role_right r JOIN meta_object ro ON ro.id=r.role_id "
-     "LEFT JOIN meta_object t ON t.id=r.target_object_id "
-     "LEFT JOIN meta_attribute a ON a.id=r.target_attr_id "
-     "LEFT JOIN meta_tabular tb ON tb.id=r.target_tabular_id "
-     "WHERE ro.name LIKE '%{имя}%' ORDER BY object, subobject, r.id LIMIT 100"),
-    ('Права на объект (все роли)',
-     "SELECT ro.name AS role, COALESCE(a.name, tb.name, '') AS subobject, "
-     "r.sub_index, r.right_uuid, r.value, "
-     "CASE WHEN r.rls_text IS NULL THEN '' ELSE 'RLS' END AS rls "
-     "FROM role_right r JOIN meta_object ro ON ro.id=r.role_id "
-     "LEFT JOIN meta_attribute a ON a.id=r.target_attr_id "
-     "LEFT JOIN meta_tabular tb ON tb.id=r.target_tabular_id "
-     "WHERE r.target_object_id=(SELECT id FROM meta_object WHERE path='{путь}') "
-     "ORDER BY ro.name, subobject, r.id LIMIT 100"),
-    ('Состояние прав ролей',
-     "SELECT o.name AS role, s.version, s.parsed, s.targets, s.rights, "
-     "s.rls_templates, COALESCE(s.error, '') AS error "
-     "FROM role_rights_state s JOIN meta_object o ON o.id=s.role_id "
-     "ORDER BY s.parsed, s.rights DESC, o.name LIMIT 100"),
-]
-
-MAX_CELL = 60
-MAX_ROWS = 100
 
 
 def _cls():
@@ -149,17 +69,6 @@ def _cf_candidates():
         for pattern in ('*.cf', '*.cfe', '*.epf', os.path.join('cf', '*.cf'), os.path.join('cf', '*.cfe')):
             found += glob.glob(os.path.join(root, pattern))
     return sorted({os.path.abspath(p) for p in found})
-
-
-def _cell(value):
-    if value is None:
-        return ''
-    if isinstance(value, bytes):
-        return f'<BLOB {len(value)} байт>'
-    text = str(value).replace('\n', ' ')
-    if len(text) > MAX_CELL:
-        return text[:MAX_CELL - 3] + '...'
-    return text
 
 
 def load_groups(config):
@@ -295,9 +204,7 @@ class Tui:
             print(' 1. Запустить MCP-сервер (1confdb-knw)')
             print(' 2. Извлечь конфигурацию (.cf/.cfe/.epf -> SQLite)')
             print(' 3. Опции извлечения')
-            print(' 4. Запросы к базе данных')
-            print(' 5. Проверка запросов СКД')
-            print(' 6. Группы баз: именованные наборы для MCP-сервера')
+            print(' 4. Группы баз: именованные наборы для MCP-сервера')
             print(' 0. Выход')
             if self.last_db:
                 print(f'Последняя БД: {self.last_db}')
@@ -309,10 +216,6 @@ class Tui:
             elif choice == '3':
                 self._options_menu()
             elif choice == '4':
-                self._query_menu()
-            elif choice == '5':
-                self._check_queries()
-            elif choice == '6':
                 self._groups_menu()
             elif choice in ('0', 'q', 'exit', 'выход'):
                 _cls()
@@ -517,8 +420,6 @@ class Tui:
         if stats.get('db') and not self.build_fts and _yes_no(
                 'Индекс не строился. Построить FTS-индекс по телам методов сейчас?', False):
             self._build_fts(stats['db'])
-        if self.last_db and _yes_no('Открыть запросы к полученной базе?', True):
-            self._query_menu(self.last_db)
         input('Нажмите Enter…')
 
     def _run_extract_dump(self):
@@ -561,8 +462,6 @@ class Tui:
                    f'объектов: {stats.get("objects")}, '
                    f'модулей: {stats.get("modules")}')
         print(f'Готово за {stats["elapsed"]}. {summary}')
-        if self.last_db and _yes_no('Открыть запросы к полученной базе?', True):
-            self._query_menu(self.last_db)
         input('Нажмите Enter…')
 
     def _build_fts(self, db_path):
@@ -1194,102 +1093,6 @@ class Tui:
         self.recent_src = _remember(self.recent_src, self.src)
         self._save()
         input('Нажмите Enter…')
-
-    # ---------- проверка СКД ----------
-
-    def _check_queries(self):
-        db = self._pick_db('Проверка запросов СКД: файл базы')
-        if not db:
-            return
-        _cls()
-        from .__main__ import run_check
-        run_check(db)
-        input('Нажмите Enter…')
-
-    # ---------- запросы ----------
-
-    def _query_menu(self, db=None):
-        if not db:
-            db = self._pick_db('Запросы к базе: файл базы')
-            if not db:
-                return
-        while True:
-            _cls()
-            print(f'--- Запросы к {os.path.basename(db)} ---')
-            for i, (name, _) in enumerate(PRESETS, 1):
-                print(f' {i}. {name}')
-            print(' s. Свой запрос')
-            print(' 0. Назад')
-            choice = input('Выбор: ').strip()
-            if choice == '0':
-                return
-            if choice == 's':
-                print('Введите SQL (одна строка, без точки с запятой):')
-                sql = input('> ').strip()
-            elif choice.isdigit() and 1 <= int(choice) <= len(PRESETS):
-                sql = self._build_preset(PRESETS[int(choice) - 1])
-                if sql is None:
-                    continue
-            else:
-                print('Неизвестный пункт.')
-                input('Нажмите Enter…')
-                continue
-            if sql:
-                self._exec(db, sql)
-                input('Нажмите Enter…')
-
-    def _build_preset(self, preset):
-        name, sql = preset
-        params = set()
-        for token in ('имя', 'путь', 'модуль', 'метод'):
-            if '{' + token + '}' in sql:
-                params.add(token)
-        values = {}
-        for token in sorted(params):
-            default = {'путь': 'Catalog/Номенклатура', 'модуль': 'obj',
-                       'имя': '', 'метод': ''}[token]
-            values[token] = _ask(f'Параметр "{token}"', default)
-        try:
-            return sql.format(**values)
-        except KeyError as err:
-            print(f'Ошибка шаблона: {err}')
-            return None
-
-    def _exec(self, db, sql):
-        try:
-            conn = sqlite3.connect(db)
-            try:
-                cur = conn.execute(sql)
-                columns = [d[0] for d in cur.description] if cur.description else []
-                rows = cur.fetchmany(MAX_ROWS) if columns else []
-                more = cur.fetchone() is not None if columns else False
-            finally:
-                conn.close()
-        except Exception as err:
-            print(f'Ошибка запроса: {err}')
-            return
-        if not columns:
-            print('Запрос выполнен (без результата для вывода).')
-            return
-        self._print_table(columns, rows)
-        total = f'{len(rows)}+' if more else str(len(rows))
-        print(f'Показано строк: {total}' + (f' (лимит {MAX_ROWS})' if more else ''))
-
-    @staticmethod
-    def _print_table(columns, rows):
-        cells = [[_cell(v) for v in row] for row in rows]
-        widths = [min(MAX_CELL, len(c)) for c in columns]
-        for row in cells:
-            for i, val in enumerate(row):
-                widths[i] = min(MAX_CELL, max(widths[i], len(val)))
-
-        def line(row):
-            return ' | '.join(val[:w].ljust(w) for w, val in zip(widths, row))
-
-        print(line([str(c) for c in columns]))
-        print('-+-'.join('-' * w for w in widths))
-        for row in cells:
-            print(line(row))
 
 
 def main():
