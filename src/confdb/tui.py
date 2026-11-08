@@ -558,7 +558,7 @@ class Tui:
             print('--- MCP-сервер 1confdb-knw: что открыть ---')
             names = list(self.groups)
             if names:
-                print('Группы баз (создать/изменить — пункт 6 главного меню).')
+                print('Группы баз (создать/изменить — пункт 4 главного меню).')
                 print('Несколько групп открываются одновременно и остаются')
                 print('раздельными — в квадратных скобках номер выбранной.')
                 for i, name in enumerate(names, 1):
@@ -567,7 +567,7 @@ class Tui:
                                       for d in self.groups[name])
                     print(f' [{mark}] {i}. {name}: {shown}')
             else:
-                print('Групп баз пока нет — создать можно в пункте 6.')
+                print('Групп баз пока нет — создать можно в пункте 4.')
             print()
             if loose:
                 print('Отдельные базы (вне групп):')
@@ -1004,7 +1004,7 @@ class Tui:
                                       for d in self.groups[name])
                     print(f' {mark} {i}. {name}: {shown}')
             else:
-                print(' В конфиге групп нет — создать можно в пункте 6 '
+                print(' В конфиге групп нет — создать можно в пункте 4 '
                       'главного меню.')
             print()
             print(server.group_list())
