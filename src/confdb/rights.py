@@ -468,6 +468,7 @@ class TargetResolver:
         self.conn = conn
         self._cache = {}
         self._uuid_map = None
+        self._path_map = None
 
     def resolve(self, name):
         if name in self._cache:
@@ -482,25 +483,41 @@ class TargetResolver:
             self._uuid_map = uuid_targets(self.conn)
         return self._uuid_map.get(uuid.lower(), (None, None, None, None))
 
+    def _paths(self):
+        """Карта path -> (id, uuid, type) по всей meta_object (лениво, одним
+        проходом).
+
+        Уникальный индекс meta_object составной — (source_id, path), — и для
+        `WHERE path=?` планировщик его не применяет: каждый запрос сканировал
+        таблицу целиком (~27 мс на 40k строк). При сборке из выгрузки
+        resolve() зовётся для каждой цели прав каждой роли (~25k уникальных
+        имён на БП), и сканы стоили ~11 минут из 13 всей сборки. Один SELECT
+        строит карту, и дальнейшие разрешения становятся словарными.
+        """
+        if self._path_map is None:
+            self._path_map = {}
+            for p, i, u, t in self.conn.execute(
+                    'SELECT path, id, uuid, type FROM meta_object'):
+                self._path_map[p] = (i, u, t)
+        return self._path_map
+
     def _resolve(self, name):
         parts = name.split('.')
         if not parts:
             return None
+        paths = self._paths()
         if parts[0] == 'Configuration':
             # цель «Configuration.<имя конфигурации>» — корневой объект;
             # её права (Администрирование, ВебКлиент, ОсновнойРежимОкна…)
             # имеют собственные uuid видов прав — их покрывает майнинговая
             # таблица dump/rights_map.RIGHT_UUIDS
-            row = self.conn.execute(
-                "SELECT id, uuid FROM meta_object WHERE path=''").fetchone()
+            row = paths.get('')
             return (row[1], row[0], None, None, None) if row else None
         if len(parts) < 2:
             return None
         cls = CLASS_ALIAS.get(parts[0], parts[0])
         obj_path = f'{cls}/{parts[1]}'
-        row = self.conn.execute(
-            'SELECT id, uuid, type FROM meta_object WHERE path=?',
-            (obj_path,)).fetchone()
+        row = paths.get(obj_path)
         if row is None:
             return None
         obj_id, obj_uuid, obj_type = row
@@ -508,12 +525,10 @@ class TargetResolver:
         # вложенные подсистемы: Subsystem.Р.Subsystem.Д[.Subsystem.Е]
         while len(rest) >= 2 and rest[0] == 'Subsystem':
             obj_path = f'{obj_path}/Subsystem/{rest[1]}'
-            row = self.conn.execute(
-                'SELECT id, uuid FROM meta_object WHERE path=?',
-                (obj_path,)).fetchone()
+            row = paths.get(obj_path)
             if row is None:
                 return None
-            obj_id, obj_uuid = row
+            obj_id, obj_uuid = row[0], row[1]
             rest = rest[2:]
         if not rest:
             return (obj_uuid, obj_id, None, None, None)
@@ -545,9 +560,7 @@ class TargetResolver:
             else:
                 sub_type = 'Template'
             sub_path = f'{obj_path}/{sub_type}/{rest[1]}'
-            row = self.conn.execute(
-                'SELECT id, uuid FROM meta_object WHERE path=?',
-                (sub_path,)).fetchone()
+            row = paths.get(sub_path)
             if row:
                 return (row[1], row[0], None, None, None)
             return None

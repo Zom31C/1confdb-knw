@@ -107,18 +107,23 @@ class Builder:
                 self.warnings.append(f'нет XML объекта: {obj["path"]}')
             return None
         try:
-            root = xmlmeta.class_element(xmlmeta.load(obj['xml']))
+            # файл читается ОДИН раз: байты идут и на разбор, и на header_json
+            with open(obj['xml'], 'rb') as f:
+                data = f.read()
+            root = xmlmeta.class_element(xmlmeta.loadb(data))
         except (ET.ParseError, OSError) as err:
             self.warnings.append(f'XML не читается: {obj["path"]}: {err}')
             return None
+        # прежний текстовый режим давал universal newlines (CRLF выгрузки →
+        # LF в header_json) — повторям то же преобразование, байт-в-байт
+        header_text = data.decode('utf-8', errors='replace')
+        header_text = header_text.replace('\r\n', '\n').replace('\r', '\n')
         if kind == 'root':
-            return self._process_root(obj, root)
-        return self._process_meta_object(obj, root)
+            return self._process_root(obj, root, header_text)
+        return self._process_meta_object(obj, root, header_text)
 
-    def _process_root(self, obj, root):
+    def _process_root(self, obj, root, header_text):
         uuid, name, comment = xmlmeta.object_basics(root)
-        with open(obj['xml'], 'r', encoding='utf-8', errors='replace') as f:
-            header_text = f.read()
         # порядок объектов верхнего уровня — из <ChildObjects> конфигурации
         children = xmlmeta.config_children(root)
         known = self.known_paths
@@ -155,7 +160,7 @@ class Builder:
                 continue
             self.bsl_tasks.append((os.path.join(folder, fn), '', code, None))
 
-    def _process_meta_object(self, obj, root):
+    def _process_meta_object(self, obj, root, header_text):
         conn = self.conn
         otype = obj['type']
         uuid, name, comment = xmlmeta.object_basics(root)
@@ -163,7 +168,7 @@ class Builder:
         path = obj['path']
         parent_id = self.path_id.get(obj['parent_path'])
         ord_no = self._ord_for(obj)
-        header_text = self._header_text(obj, root)
+        header_text = self._header_text(obj, header_text)
         cur = conn.execute(
             W.INSERT_SQL['meta_object'],
             (self.source_id, parent_id, ord_no, path, otype,
@@ -282,19 +287,15 @@ class Builder:
         return None
 
     @staticmethod
-    def _header_text(obj, root):
-        """Текст для header_json: файл XML объекта (команды получают фрагмент
-        из родителя — у них нет своего файла).
+    def _header_text(obj, text):
+        """Текст для header_json: файл XML объекта, прочитанный в
+        process_object (команды получают фрагмент из родителя — у них нет
+        своего файла).
 
         Состав плана обмена живёт в отдельном Ext/Content.xml — дописываем его
         за маркером confdb:include, чтобы header_props.exchange_plan_content
         читал состав без обращения к таблице file (как в cf-базах).
         """
-        try:
-            with open(obj['xml'], 'r', encoding='utf-8', errors='replace') as f:
-                text = f.read()
-        except OSError:
-            return ''
         if obj['type'] == 'ExchangePlan' and obj['folder']:
             content = os.path.join(obj['folder'], 'Ext', 'Content.xml')
             if os.path.isfile(content):

@@ -98,6 +98,12 @@ def loads(text):
     return _normalize(ET.fromstring(text))
 
 
+def loadb(data):
+    """То же из байтов файла: файл читается один раз — и на разбор, и на
+    header_json (двойное чтение на 40k объектов стоило фазе 1 ~10 с)."""
+    return _normalize(ET.fromstring(data))
+
+
 def _normalize(root):
     for el in root.iter():
         el.tag = _clean_tag(el.tag)
