@@ -16,10 +16,21 @@ section=табличная часть (row table of an object).
 
 Details are not here: `page {"op":"list"}` names the knowledge-base pages (`db-schema`,
 `gotchas`, `mcp-server-1confdb-knw`, `extraction-pipeline`, `publication-two-repos`,
-`role-rights-format`, …), and `docs/details.md` («Состав», «Схема базы данных») carries
-the module-by-module and column-by-column detail (README.md is the short user-facing
-intro: MCP server first, features, install, quick start). state3 is NOT shipped inside
-`dist\`, so there README+docs/details.md are the fallback.
+`role-rights-format`, `1c-coding-guide`, `agent-rules`, …), and `docs/details.md` («Состав»,
+«Схема базы данных») carries the module-by-module and column-by-column detail (README.md is
+the short user-facing intro: MCP server first, features, install, quick start). state3 is
+NOT shipped inside `dist\`, so there README+docs/details.md are the fallback.
+
+## Rules files and documentation (user decision 2026-11-08)
+
+`AGENTS.md` is the ONLY rules/instruction file in this repository. `CLAUDE.md`, `QWEN.md`
+and `QWEN_ProjectInfo.md` were DELETED (this supersedes the 2026-09-25 "keep CLAUDE.md in
+dist" decision; the CLAUDE.md content lives on as the state3 page `1c-coding-guide`). Work
+is tracked as state3 tasks (`task_*` tools, state root `.state3\state.db`, one open task per
+project) and ALL project documentation is kept in the state3 knowledge base
+(`page`/`search`): a learned fact, decision or guide becomes a PAGE, never a new .md file in
+the repo. README.md and docs/details.md remain the user-facing docs and — together with this
+file and NOTICE.md — the only documentation shipped to `dist\`.
 
 ## Hard constraints
 
