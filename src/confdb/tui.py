@@ -125,6 +125,24 @@ def schema_tail(server, alias):
     return ' — ' + schema_mark(server.dbs[alias]['schema'])
 
 
+def compact_db_list(server):
+    """Список открытых баз для панели TUI: алиас, путь, отметка об устаревании.
+
+    Ответ db_list() рассчитан на LLM и для человека перегружен (числа
+    объектов/модулей/методов, ревизия схемы, версия конфигурации, режим
+    совместимости, SHA-256, указание configuration_info) — на панели нужны
+    только имя, путь и факт, что база устарела.
+    """
+    if not server.dbs:
+        return 'Нет открытых баз.'
+    lines = ['Открытые базы (* — активная):']
+    for alias, info in server.dbs.items():
+        mark = '*' if alias == server.active else ' '
+        lines.append(f'{mark} {alias} — {info["path"]}'
+                     f'{schema_tail(server, alias)}')
+    return '\n'.join(lines)
+
+
 def first_db(dbs, groups=()):
     """База, которая станет активной при таком запуске.
 
@@ -850,7 +868,7 @@ class Tui:
         while True:
             _cls()
             print('--- Управление базами и группами запущенного MCP-сервера ---')
-            print(server.db_list())
+            print(compact_db_list(server))
             # Показываем группы конфигураций
             if server.groups:
                 print()

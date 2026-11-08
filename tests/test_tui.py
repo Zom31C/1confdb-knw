@@ -344,3 +344,31 @@ def test_schema_tail_marks_an_outdated_base(tmp_path_factory):
     tail = schema_tail(server, 'старая')
     assert f'схема {SCHEMA_VERSION - 1} — устарела' in tail
     assert f'сервер ждёт {SCHEMA_VERSION}' in tail
+
+
+def test_compact_db_list_hides_llm_details(tmp_path_factory):
+    """Панель запущенного сервера: алиас и путь, без счётчиков/версии/SHA."""
+    import sqlite3
+
+    from confdb.db.writer import SCHEMA_VERSION
+    from confdb.mcp_server import McpServer
+    from confdb.tui import compact_db_list
+
+    fresh = _real_db(tmp_path_factory, 'свежая.sqlite')
+    stale = _real_db(tmp_path_factory, 'старая.sqlite')
+    conn = sqlite3.connect(stale)
+    conn.execute(f'PRAGMA user_version={SCHEMA_VERSION - 1}')
+    conn.commit()
+    conn.close()
+    server = McpServer([fresh, stale])
+    text = compact_db_list(server)
+    assert f'* свежая — {fresh}' in text          # активная отмечена
+    assert f'старая — {stale}' in text
+    # отметка об устаревании сохранена — с ней базу видно до запроса к ней
+    assert f'схема {SCHEMA_VERSION - 1} — устарела' in text
+    # подробности db_list() (они для LLM) на панель не попадают
+    for noise in ('объектов:', 'модулей:', 'методов:', 'SHA-256',
+                  'configuration_info', 'режим совместимости',
+                  f'схема {SCHEMA_VERSION})'):
+        assert noise not in text
+    assert compact_db_list(McpServer(None)) == 'Нет открытых баз.'
