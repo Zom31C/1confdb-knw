@@ -83,6 +83,18 @@ def load_groups(config):
             if isinstance(dbs, (list, tuple))}
 
 
+def shown_dbs(paths):
+    """Список баз группы для печати: отсутствующие файлы помечены.
+
+    Файлы группы могут исчезнуть (пересборка/перенос) — запуск молча
+    отбрасывает их (resolve_launch_groups), поэтому список сразу показывает,
+    каких баз больше нет.
+    """
+    return ', '.join(
+        os.path.basename(p) + ('' if os.path.isfile(p) else ' (нет файла)')
+        for p in paths)
+
+
 def replace_server_dbs(server, paths):
     """Заменяет открытые базы запущенного сервера на указанный набор.
 
@@ -563,9 +575,8 @@ class Tui:
                 print('раздельными — в квадратных скобках номер выбранной.')
                 for i, name in enumerate(names, 1):
                     mark = str(picked.index(name) + 1) if name in picked else ' '
-                    shown = ', '.join(os.path.basename(d)
-                                      for d in self.groups[name])
-                    print(f' [{mark}] {i}. {name}: {shown}')
+                    print(f' [{mark}] {i}. {name}: '
+                          f'{shown_dbs(self.groups[name])}')
             else:
                 print('Групп баз пока нет — создать можно в пункте 4.')
             print()
@@ -602,8 +613,17 @@ class Tui:
             if choice == '':
                 groups, missing = resolve_launch_groups(self.groups, picked)
                 if not groups and not loose:
-                    print('Ничего не выбрано: отметьте группу или добавьте '
-                          'базы вручную (m).')
+                    if missing:
+                        # выбор был, но все базы выбранных групп исчезли —
+                        # это не «ничего не выбрано», а недоступные файлы
+                        print('Базы выбранных групп не найдены:')
+                        for p in missing:
+                            print(f'  {p}')
+                        print('Поправьте группу (пункт 4 главного меню) или '
+                              'добавьте базы вручную (m).')
+                    else:
+                        print('Ничего не выбрано: отметьте группу или добавьте '
+                              'базы вручную (m).')
                     input('Нажмите Enter…')
                     continue
                 return loose, groups, self._launch_title(groups, loose), missing
@@ -634,9 +654,7 @@ class Tui:
             names = list(self.groups)
             if names:
                 for i, name in enumerate(names, 1):
-                    dbs = self.groups[name]
-                    shown = ', '.join(os.path.basename(d) for d in dbs)
-                    print(f' {i}. {name}: {shown}')
+                    print(f' {i}. {name}: {shown_dbs(self.groups[name])}')
             else:
                 print(' Групп пока нет.')
             print()
@@ -1000,9 +1018,8 @@ class Tui:
                 print('(* — группа уже открыта в сервере)')
                 for i, name in enumerate(names, 1):
                     mark = '*' if self._server_group(server, name) else ' '
-                    shown = ', '.join(os.path.basename(d)
-                                      for d in self.groups[name])
-                    print(f' {mark} {i}. {name}: {shown}')
+                    print(f' {mark} {i}. {name}: '
+                          f'{shown_dbs(self.groups[name])}')
             else:
                 print(' В конфиге групп нет — создать можно в пункте 4 '
                       'главного меню.')

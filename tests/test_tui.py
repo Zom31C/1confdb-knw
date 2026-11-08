@@ -9,7 +9,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from confdb.tui import (Tui, _unquote, first_db,  # noqa: E402
                         group_cli_args, load_groups, replace_server_dbs,
-                        resolve_launch_groups, schema_tail)
+                        resolve_launch_groups, schema_tail, shown_dbs)
 
 
 def test_unquote_stips_surrounding_quotes():
@@ -263,6 +263,26 @@ def test_pick_launch_set_cancel_and_empty_choice(monkeypatch):
     # Enter без выбора не запускает пустой сервер — спрашивает снова
     assert _pick(monkeypatch, {'УНФ': ['D:\\a.db']}, ['', '0']) == (
         [], [], '', [])
+
+
+def test_pick_launch_set_all_missing_names_them(monkeypatch, capsys, tmp_path):
+    # группа отмечена, но файлы её баз исчезли: вместо «ничего не выбрано»
+    # экран называет пропавшие пути и сервер не запускает
+    gone = str(tmp_path / 'пропала.db')
+    assert _pick(monkeypatch, {'qwe': [gone]}, ['1', '']) == ([], [], '', [])
+    out = capsys.readouterr().out
+    assert 'Базы выбранных групп не найдены' in out
+    assert gone in out
+    # отсутствующий файл помечен уже в списке групп
+    assert 'пропала.db (нет файла)' in out
+
+
+def test_shown_dbs_marks_missing(tmp_path):
+    exists = tmp_path / 'a.db'
+    exists.write_text('')
+    assert shown_dbs([str(exists), str(tmp_path / 'нет.db')]) == \
+        'a.db, нет.db (нет файла)'
+    assert shown_dbs([]) == ''
 
 
 def _real_db(tmp_path_factory, name):
