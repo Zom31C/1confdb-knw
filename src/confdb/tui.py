@@ -199,8 +199,11 @@ class Tui:
     def run(self):
         while True:
             _cls()
-            print(f'confdb {__version__} — экстрактор конфигурации 1С в SQLite')
-            print('===========================================================')
+            # название — как у проекта/публикации: MCP-сервер на первом месте
+            title = (f'1confdb-knw {__version__} — '
+                     'MCP-сервер «база знаний конфигурации 1С:Предприятие 8»')
+            print(title)
+            print('=' * len(title))
             print(' 1. Запустить MCP-сервер (1confdb-knw)')
             print(' 2. Извлечь конфигурацию (.cf/.cfe/.epf -> SQLite)')
             print(' 3. Опции извлечения')
