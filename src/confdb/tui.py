@@ -832,7 +832,8 @@ class Tui:
             print('Нужно целое число.')
             input('Нажмите Enter…')
             return
-        from .mcp_server import McpServer, resolve_syntax_db, start_http_server
+        from .mcp_server import (McpServer, _remove_pidfiles, _write_pidfiles,
+                                 resolve_syntax_db, start_http_server)
         try:
             server = McpServer(dbs, groups=list(groups),
                                syntax_db=resolve_syntax_db())
@@ -847,6 +848,8 @@ class Tui:
             input('Нажмите Enter…')
             return
         threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        # pidfile: extract/update назовут этот процесс, если база окажется занятой
+        pidfiles = _write_pidfiles(server, real_port)
         _cls()
         print(f'Сервер слушает http://127.0.0.1:{real_port}/mcp '
               '(legacy SSE: /sse).')
@@ -861,7 +864,11 @@ class Tui:
         finally:
             httpd.shutdown()
             httpd.server_close()
-        print('Сервер остановлен.')
+            _remove_pidfiles(pidfiles)
+            # процесс TUI остаётся жить: открытые sqlite-соединения держали бы
+            # файлы баз (Windows), и пересобрать их из другого окна не вышло бы
+            server.close_all()
+        print('Сервер остановлен, базы закрыты — файлы свободны для пересборки.')
         input('Нажмите Enter…')
 
     def _server_control(self, server):

@@ -251,6 +251,7 @@ def run_update(args):
     except PermissionError as err:
         print(f'Файл базы занят другим процессом (запущен MCP-сервер?): {err}',
               file=sys.stderr)
+        _hint_db_holder(args.db)
         return 1
     except (ValueError, OSError) as err:
         print(f'Ошибка: {err}', file=sys.stderr)
@@ -298,6 +299,7 @@ def run_extract_dump(args):
     except PermissionError as err:
         print(f'Файл базы занят другим процессом (запущен MCP-сервер?): {err}',
               file=sys.stderr)
+        _hint_db_holder(args.db)
         return 1
     except (ValueError, OSError) as err:
         print(f'Ошибка: {err}', file=sys.stderr)
@@ -310,6 +312,24 @@ def run_extract_dump(args):
         elif value is not None:
             print(f'{key}: {value}')
     return 0
+
+
+def _hint_db_holder(db_path):
+    """Подсказка к «файл базы занят»: назвать живой MCP-сервер по pidfile."""
+    server = None
+    if db_path:
+        try:
+            from .dump.update import read_server_pidfile
+            server = read_server_pidfile(db_path)
+        except Exception:  # noqa: BLE001
+            server = None
+    if server:
+        print(f'Файл держит MCP-сервер (pid {server.get("pid")}). Остановите '
+              'его; остановка HTTP-сервера из консольного интерфейса закрывает '
+              'базы и освобождает файлы.', file=sys.stderr)
+    else:
+        print('Возможно, базу держит незакрытый MCP-сервер или консольный '
+              'интерфейс (confdb-ui).', file=sys.stderr)
 
 
 def _hbk_db_path(explicit):
@@ -495,7 +515,19 @@ def main(argv=None):
     except FileNotFoundError as err:
         print(f'Файл не найден: {err}', file=sys.stderr)
         return 2
+    except PermissionError as err:
+        # Windows: открытое sqlite-соединение чужого процесса держит файл —
+        # пересборка базы (os.remove) невозможна без внятной подсказки
+        print(f'Файл базы занят другим процессом: {err}', file=sys.stderr)
+        _hint_db_holder(args.db)
+        return 1
     except Exception as err:
+        import sqlite3
+        if isinstance(err, sqlite3.OperationalError) \
+                and 'locked' in str(err).lower():
+            print(f'База занята другим процессом: {err}', file=sys.stderr)
+            _hint_db_holder(args.db)
+            return 1
         print(f'Ошибка: {err}', file=sys.stderr)
         return 1
 

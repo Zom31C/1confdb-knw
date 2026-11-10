@@ -83,6 +83,31 @@ def test_tools_list(tmp_path_factory):
         assert tool['description'] and tool['inputSchema']['type'] == 'object'
 
 
+def test_close_all_releases_db_files(tmp_path_factory, tmp_path):
+    """close_all освобождает файлы: Windows держит их, пока соединение живо.
+
+    Сценарий пользователя: HTTP-сервер остановлен из панели TUI, но процесс
+    жив — без закрытия соединений extract/update не могут пересобрать базу.
+    """
+    server = _server(tmp_path_factory)
+    path = next(iter(server.dbs.values()))['path']
+    # синтакс-помощник закрывается тем же вызовом
+    syntax = tmp_path / 'syntax.db'
+    conn = sqlite3.connect(str(syntax))
+    conn.execute('CREATE TABLE topics(id INTEGER PRIMARY KEY, parent_id'
+                 ' INTEGER, name_ru TEXT, name_en TEXT)')
+    conn.commit()
+    conn.close()
+    server.attach_syntax_db(str(syntax))
+
+    server.close_all()
+    assert server.dbs == {} and server.active is None
+    assert server.groups == {} and server.syntax is None
+    # с закрытыми соединениями файл базы удаляется (иначе WinError 32)
+    os.remove(path)
+    os.remove(str(syntax))
+
+
 def test_find_objects_and_card(tmp_path_factory):
     server = _server(tmp_path_factory)
     text = _call(server, 'find_objects', mask='Справочник1')['content'][0]['text']

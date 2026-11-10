@@ -785,6 +785,37 @@ class McpServer:
                 aliases.remove(alias)
         return alias
 
+    @_synchronized
+    def close_all(self):
+        """Закрыть ВСЕ соединения: базы, шарды FTS, синтакс-помощник.
+
+        Освобождает файлы баз (Windows: открытое sqlite-соединение держит
+        файл, и os.remove в extract/update падает WinError 32). Вызывается
+        при остановке HTTP-сервера, когда процесс продолжает жить (панель
+        TUI): без этого файлы нельзя пересобрать, не закрыв весь интерфейс.
+        """
+        for alias in list(self.dbs):
+            info = self.dbs.pop(alias)
+            try:
+                info['conn'].close()
+            except sqlite3.Error:
+                pass
+            for shard in info.get('fts_conn') or ():
+                try:
+                    shard.close()
+                except sqlite3.Error:
+                    pass
+            info['fts_conn'] = None
+        self.active = None
+        self.groups = {}
+        self.active_group = None
+        if self.syntax:
+            try:
+                self.syntax['conn'].close()
+            except sqlite3.Error:
+                pass
+            self.syntax = None
+
     def _alias(self, alias=None):
         """Разрешает алиас (None = активная база); ValueError, если не найден."""
         if not alias:
@@ -5328,6 +5359,9 @@ def serve_http(db_paths, host='127.0.0.1', port=8765, groups=None,
             _remove_pidfiles(pidfiles)
         except NameError:
             pass
+        # соединения закрываются явно: процесс может ещё жить (встроенный
+        # запуск из TUI), а файлы баз должны стать свободными для пересборки
+        server.close_all()
     return 0
 
 

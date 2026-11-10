@@ -372,3 +372,39 @@ def test_compact_db_list_hides_llm_details(tmp_path_factory):
                   f'схема {SCHEMA_VERSION})'):
         assert noise not in text
     assert compact_db_list(McpServer(None)) == 'Нет открытых баз.'
+
+
+def test_serve_interactive_closes_dbs_on_stop(monkeypatch, tmp_path_factory):
+    """HTTP-сервер остановлен из панели — базы ЗАКРЫТЫ, файлы можно пересобрать.
+
+    Регрессия сценария пользователя: сервер выключен, окно confdb-ui открыто —
+    sqlite-соединения держали файлы баз (Windows), и extract в тот же файл
+    обрывался на удалении/записи.
+    """
+    from confdb import mcp_server
+
+    db = _real_db(tmp_path_factory, 'серверная.sqlite')
+
+    class _FakeHttpd:
+        def serve_forever(self):
+            pass
+
+        def shutdown(self):
+            pass
+
+        def server_close(self):
+            pass
+
+    monkeypatch.setattr(mcp_server, 'start_http_server',
+                        lambda server, host, port: (_FakeHttpd(), port))
+    monkeypatch.setattr(mcp_server, 'resolve_syntax_db',
+                        lambda explicit=None: None)
+    monkeypatch.setattr('confdb.tui._cls', lambda: None)
+    tui = _Tui()
+    # порт → «0» (остановить сервер и выйти из панели) → Enter после остановки
+    _feed(monkeypatch, ['8765', '0', ''])
+    tui._serve_interactive([db])
+    # соединения закрыты: файл базы удаляется (Windows держит его при живом
+    # соединении), pidfile убран
+    os.remove(db)
+    assert not os.path.exists(db + '.server.json')

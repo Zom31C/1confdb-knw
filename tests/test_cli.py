@@ -218,3 +218,22 @@ def test_extract_dump_dir_then_update(tmp_path):
 def test_update_rejects_non_dump_dir(tmp_path):
     db = str(tmp_path / 'o.db')
     assert main(['update', str(tmp_path), '--db', db]) == 2
+
+
+def test_main_extract_permission_error_hints_holder(tmp_path, monkeypatch,
+                                                    capsys):
+    """Занятую базу extract называет понятно: кто держит и что делать."""
+    import confdb.__main__ as cli
+
+    def boom(*args, **kwargs):
+        raise PermissionError(32, 'Процесс не может получить доступ к файлу')
+
+    monkeypatch.setattr(cli, 'check_same_source',
+                        lambda *a, **kw: (None, False))
+    monkeypatch.setattr(cli, 'extract', boom)
+    rc = cli.main(['extract', str(tmp_path / 'a.cf'),
+                   '--db', str(tmp_path / 'a.db')])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert 'занят другим процессом' in err
+    assert 'MCP-сервер' in err  # подсказка: возможный держатель файла
