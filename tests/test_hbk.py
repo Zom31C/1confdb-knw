@@ -437,6 +437,13 @@ def test_mcp_syntax_tools(mini_db):
     # PRIMER рассказывает про помощник
     resp = server.handle({'jsonrpc': '2.0', 'id': 1, 'method': 'initialize'})
     assert 'PLATFORM SYNTAX HELPER' in resp['result']['instructions']
+    # регрессия отзыва 2026-11-10: устаревшее «сервер не проверяет синтаксис,
+    # нужен 1confdb-knw-lsp» противоречило встроенному check_syntax
+    assert 'does NOT check 1C code syntax' not in resp['result']['instructions']
+    # db_list заранее показывает состояние помощника (версия, число тем)
+    lst = _call(server, 'db_list')['content'][0]['text']
+    assert 'Синтакс-помощник платформы: подключён' in lst
+    assert 'тем:' in lst
 
 
 def test_mcp_syntax_not_attached(mini_db):
@@ -446,6 +453,12 @@ def test_mcp_syntax_not_attached(mini_db):
     assert '--syntax-db' in res['content'][0]['text']
     res = _call(server, 'syntax_card', id=1)
     assert res.get('isError')
+    # db_list сообщает об отсутствии помощника и как его подключить —
+    # LLM видит это до первого вызова syntax_*, а не по ошибке инструмента
+    lst = _call(server, 'db_list')['content'][0]['text']
+    assert 'Синтакс-помощник платформы: НЕ подключён' in lst
+    assert '--syntax-db' in lst and 'syntax_db' in lst
+    assert 'confdb hbk' in lst  # команда сборки syntax.db из .hbk
 
 
 def test_mcp_syntax_bad_file(tmp_path):

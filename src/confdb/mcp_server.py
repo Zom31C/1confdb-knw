@@ -477,7 +477,7 @@ COMMON MODULES: in BSL code a common module is called by its bare name: 'Имя�
 
 DATABASE FILE: the SQLite file is internal to the server. Do NOT search for it, open it, read it from disk, or ask the user for its location — you have no filesystem access to it. Everything is available through the tools below; the sql tool runs arbitrary read-only SELECTs.
 
-PLATFORM SYNTAX HELPER: when the server runs with --syntax-db, three extra tools answer from the 1C platform's BUILT-IN SYNTAX HELPER — documentation of the standard library itself, independent of any configuration: syntax_search (fuzzy search over ~25300 topics: global-context methods, types and their members, system-table fields; RU/EN names, word parts and typos all work), syntax_card(id) (the full card: RU/EN signatures, parameters with types, availability per platform — server/thick/thin/web/mobile, since-version, description, example, cross-links), syntax_children(id) (tree navigation; no id = the two roots). Use them to verify that a global method exists and to get its exact signature, parameters and execution contexts BEFORE writing code; ids marked '(id=N)' inside card texts are syntax_card targets. The division of labor: configuration bases tell what THIS configuration contains, the syntax helper tells what the PLATFORM offers. If the helper is not attached, the tools say so — a server setup fact, not a query error; do not retry.
+PLATFORM SYNTAX HELPER: when the server runs with --syntax-db, three extra tools answer from the 1C platform's BUILT-IN SYNTAX HELPER — documentation of the standard library itself, independent of any configuration: syntax_search (fuzzy search over ~25300 topics: global-context methods, types and their members, system-table fields; RU/EN names, word parts and typos all work), syntax_card(id) (the full card: RU/EN signatures, parameters with types, availability per platform — server/thick/thin/web/mobile, since-version, description, example, cross-links), syntax_children(id) (tree navigation; no id = the two roots). Use them to verify that a global method exists and to get its exact signature, parameters and execution contexts BEFORE writing code; ids marked '(id=N)' inside card texts are syntax_card targets. The division of labor: configuration bases tell what THIS configuration contains, the syntax helper tells what the PLATFORM offers. db_list reports the helper's status up front (attached: platform version and topic count; not attached: how to attach it) — read it there BEFORE the first syntax_* call. If the helper is not attached, the tools say so — a server setup fact, not a query error; do not retry: tell the user the server must be started with --syntax-db <path to syntax.db> (or the syntax_db key in ~/.confdb/config.json, then restarted); syntax.db is built from the platform's help file: 'confdb hbk unpack <shcntx_ru.hbk from the platform bin directory> -o <dir>' then 'confdb hbk build <dir> --db syntax.db'.
 
 MULTIPLE DATABASES: the server can hold several knowledge bases at once — typically the MAIN configuration plus extensions/data processors (.cfe/.epf extracted into their own .db files). Each open base has an alias. All tools query the ACTIVE base; to query a specific base without switching, pass its alias as the db parameter (e.g. find_objects(mask=…, db='расш_интеграция')). Management tools: db_list (what is open, which is active), db_open (open another base file while the server runs — the path comes from the user), db_use (switch the active base), db_close. An extension usually adds/overrides objects of the main configuration — if something is not found in one base, check the other. Special db value '*': run a tool on every open base at once (the answer is sectioned per base) — one call to compare the main configuration with all extensions.
 
@@ -513,7 +513,7 @@ DATABASE SCHEMA (for the sql tool; path columns store the legacy slash form 'Cat
 
 1C QUERY LANGUAGE: Russian keywords, dotted paths, table names 'Справочник.Имя', 'Документ.Имя', 'РегистрСведений.Имя', 'РегистрНакопления.Имя.Обороты' (virtual tables: Остатки, Обороты, СрезПоследних…). Grouping clause is 'СГРУППИРОВАТЬ ПО' — the form 'СГРУППИРОВАНО' does NOT exist in the 1C query language. Example: ВЫБРАТЬ Т.Запасы.Номенклатура.Наименование ИЗ Документ.ЗаказПокупателя КАК Т ГДЕ Т.Сумма > 0.
 
-RECOMMENDED WORKFLOW to write a query or 1C code: 1) configuration_info to know which configuration and release you are in, find_objects to locate objects; 2) object_card for its fields, sections, references and the event subscriptions fired on it (the platform calls those handlers, so there is no call site to find in code); 3) skd_of / find_skd to see how THIS configuration queries the same tables (best examples); 4) find_methods — by mask for a name/signature/description, or by text to search INSIDE method bodies: that is how you find EVERY place touching something (all writes to a register, all calls of a common module, all uses of a field) without falling back to a full-text sql query, and every hit carries its module line number; find_methods(text='"Имя"') finds all places where a string literal is mentioned (useful for dynamic calls); then find_method_context for a window around the call you need (it also gives stable insertion markers) and get_method for the full body — reuse existing code instead of inventing; 5) check_query to validate your query before use, and check_syntax to validate the SYNTAX of any BSL module code before you deliver it — pass text=<the code you wrote> (an empty result means the grammar is correct; it also checks an existing module by path+code_name); add semantic=True to resolve the code against THIS configuration (missing/non-export common-module methods, nonexistent metadata objects like Справочники.Х, queries embedded in the module, client-to-server common module calls, unused local variables, deprecated/insecure global calls) — a separate ERROR/WARNING/INFO section. Syntax checking is now BUILT IN (native parser, no Java / no separate 1confdb-knw-lsp variant); 6) method_dependencies before porting code to another configuration (it lists everything the code needs there — including dynamic calls via Вычислить/Выполнить with string literals, resolved against the configuration's modules and objects); when several releases or extensions are open at once, pass scope=[aliases] — the exact combination of bases where missing dependencies may be resolved — and expect={alias: sha256-prefix from configuration_info} to pin snapshots: a dependency found only OUTSIDE the scope is reported as such, never silently borrowed from another release; callers=True adds the INBOUND call graph (who calls this method — each edge names the module line, its enclosing conditions and how it was resolved; event subscriptions and extension interceptions appear as PLATFORM links: registration is not an execution fact, string dispatch stays unconfirmed), depth=2..3 expands the graph transitively, diff_db=<alias> marks every graph node with whether the method changed vs another base; compare_object / extension_diff to see how two configurations differ; 7) method_result_schema when a stock function returns a temporary table and you need its columns; 8) role_rights / object_rights for access analysis — what a role is given and which roles carry explicit rights on an object (its fields and tabular sections included); effective_rights(roles=[…]) to combine several roles and see which role carries each right; role_diff(roles_a, roles_b) to see what one set has that another lacks; role_impact(role) or role_impact(roles_before, roles_after) to assess what methods, SKD queries, and programmatic checks lose a right when a role is narrowed — shows layers (static rights, RLS, programmatic checks as heuristic, UI visibility out of scope) and names the boundary of static analysis (privileged mode, dynamic calls). This server does NOT check 1C code syntax — for that use the 1confdb-knw-lsp variant (BSL Language Server).
+RECOMMENDED WORKFLOW to write a query or 1C code: 1) configuration_info to know which configuration and release you are in, find_objects to locate objects; 2) object_card for its fields, sections, references and the event subscriptions fired on it (the platform calls those handlers, so there is no call site to find in code); 3) skd_of / find_skd to see how THIS configuration queries the same tables (best examples); 4) find_methods — by mask for a name/signature/description, or by text to search INSIDE method bodies: that is how you find EVERY place touching something (all writes to a register, all calls of a common module, all uses of a field) without falling back to a full-text sql query, and every hit carries its module line number; find_methods(text='"Имя"') finds all places where a string literal is mentioned (useful for dynamic calls); then find_method_context for a window around the call you need (it also gives stable insertion markers) and get_method for the full body — reuse existing code instead of inventing; 5) check_query to validate your query before use, and check_syntax to validate the SYNTAX of any BSL module code before you deliver it — pass text=<the code you wrote> (an empty result means the grammar is correct; it also checks an existing module by path+code_name); add semantic=True to resolve the code against THIS configuration (missing/non-export common-module methods, nonexistent metadata objects like Справочники.Х, queries embedded in the module, client-to-server common module calls, unused local variables, deprecated/insecure global calls) — a separate ERROR/WARNING/INFO section. Syntax checking is now BUILT IN (native parser, no Java / no separate 1confdb-knw-lsp variant); 6) method_dependencies before porting code to another configuration (it lists everything the code needs there — including dynamic calls via Вычислить/Выполнить with string literals, resolved against the configuration's modules and objects); when several releases or extensions are open at once, pass scope=[aliases] — the exact combination of bases where missing dependencies may be resolved — and expect={alias: sha256-prefix from configuration_info} to pin snapshots: a dependency found only OUTSIDE the scope is reported as such, never silently borrowed from another release; callers=True adds the INBOUND call graph (who calls this method — each edge names the module line, its enclosing conditions and how it was resolved; event subscriptions and extension interceptions appear as PLATFORM links: registration is not an execution fact, string dispatch stays unconfirmed), depth=2..3 expands the graph transitively, diff_db=<alias> marks every graph node with whether the method changed vs another base; compare_object / extension_diff to see how two configurations differ; 7) method_result_schema when a stock function returns a temporary table and you need its columns; 8) role_rights / object_rights for access analysis — what a role is given and which roles carry explicit rights on an object (its fields and tabular sections included); effective_rights(roles=[…]) to combine several roles and see which role carries each right; role_diff(roles_a, roles_b) to see what one set has that another lacks; role_impact(role) or role_impact(roles_before, roles_after) to assess what methods, SKD queries, and programmatic checks lose a right when a role is narrowed — shows layers (static rights, RLS, programmatic checks as heuristic, UI visibility out of scope) and names the boundary of static analysis (privileged mode, dynamic calls).
 
 All tools are read-only. Prefer the dedicated tools over raw sql; use sql only for what is not covered. ANTI-LOOP: never issue more than two sql calls in a row — if sql did not answer the question, switch to the dedicated tools (find_objects, object_card, find_field, skd_of, refs_of). The schema is EXACTLY as documented above — never waste calls on PRAGMA / sqlite_master / schema guessing.
 
@@ -4166,9 +4166,40 @@ class McpServer:
         return '\n'.join(out)
 
     @_synchronized
+    def _syntax_status(self):
+        """Строка db_list: состояние синтакс-помощника платформы.
+
+        LLM должен видеть доступность syntax_* ЗАРАНЕЕ, а не узнавать о ней
+        из ошибки первого вызова (отзыв 2026-11-10): подключён — версия
+        платформы и число тем, не подключён — как подключить (пути-
+        плейсхолдеры: конкретный syntax.db у каждого свой).
+        """
+        if not self.syntax:
+            return ('Синтакс-помощник платформы: НЕ подключён — '
+                    'syntax_search/syntax_card/syntax_children не работают. '
+                    'Подключение: перезапустить сервер с --syntax-db <путь к '
+                    'syntax.db> либо прописать тот же путь ключом syntax_db в '
+                    '~/.confdb/config.json; syntax.db собирается из файла '
+                    'справки платформы: confdb hbk unpack <shcntx_ru.hbk из '
+                    'bin платформы> -o <каталог>, затем confdb hbk build '
+                    '<каталог> --db syntax.db.')
+        topics = None
+        try:
+            topics = self.syntax['conn'].execute(
+                'SELECT COUNT(*) FROM topics').fetchone()[0]
+        except sqlite3.Error:
+            pass
+        platform = self.syntax.get('platform')
+        ver = platform or '1С'  # meta.platform уже содержит «1С:Предприятие …»
+        count = f', тем: {topics}' if topics else ''
+        return (f'Синтакс-помощник платформы: подключён — {ver}{count} '
+                f'({self.syntax["path"]})')
+
     def db_list(self):
+        syntax_line = self._syntax_status()
         if not self.dbs:
-            return 'нет открытых баз — откройте через db_open'
+            return (f'нет открытых баз — откройте через db_open'
+                    f'\n{syntax_line}')
         out = []
         for alias, info in self.dbs.items():
             nobj, nmod, nmeth = self.db_stats(alias)
@@ -4186,6 +4217,7 @@ class McpServer:
                 continue
             name, meta = self.cfg_summary(alias)
             out.append(f'    {name}: {meta} (configuration_info — подробно)')
+        out.append(syntax_line)
         return 'Открытые базы (* — активная):\n' + '\n'.join(out)
 
     def db_open(self, path, alias=None):
@@ -4848,8 +4880,9 @@ TOOLS = [
          McpServer.check_syntax),
     Tool('syntax_search',
          'Fuzzy search in the PLATFORM SYNTAX HELPER — the built-in 1C '
-         'documentation (attached with --syntax-db; a separate database, NOT '
-         'a configuration base): global-context methods, types and their '
+         'documentation (a separate database, NOT a configuration base; '
+         'attached with --syntax-db — db_list reports whether it is): '
+         'global-context methods, types and their '
          'members, system-table fields. RU and EN names, word parts and '
          'typos all work (FTS5 + substring + Levenshtein). Each hit: id, '
          'kind, name, and its parent (same member names in different types '
@@ -4954,7 +4987,10 @@ TOOLS = [
          'the source file (.cf/.cfe/.epf/.erf), its version and compatibility '
          'mode, plus the configuration group(s) each base belongs to; * marks '
          'the ACTIVE base that the other tools query by default. Several '
-         'groups can be open at once — group_list shows the division.',
+         'groups can be open at once — group_list shows the division. The '
+         'last line reports the PLATFORM SYNTAX HELPER status: attached '
+         '(platform version, topic count) or not (and how to attach it) — '
+         'check it before the first syntax_* call.',
          _schema({}),
          McpServer.db_list),
     Tool('db_open',
