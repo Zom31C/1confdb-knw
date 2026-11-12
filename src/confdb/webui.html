@@ -332,16 +332,20 @@ function viewServer(){
       <span class="grow"></span>
       <button class="btn danger" id="srv-stop">Остановить сервер</button></div>
     <p class="hint">Конфигурация клиента: <code>{"mcpServers":{"1confdb-knw":{"url":"${esc(sv.url)}"}}}</code>. Остановка закрывает базы и освобождает файлы для пересборки.</p>
-    <h3>Открытые базы</h3><table><thead><tr><th>Тип</th><th></th><th>База</th><th></th></tr></thead><tbody>${dbs}</tbody></table>
-    <h3>Добавить отдельную базу</h3>
+    <h3>Открытые базы</h3>
+    <p class="hint">Активная база отвечает на запросы LLM по умолчанию (без параметра db/group); к любой базе можно обратиться явно по алиасу.</p>
+    <table><thead><tr><th>Тип</th><th></th><th>База</th><th></th></tr></thead><tbody>${dbs}</tbody></table>
+    <h3>Группы конфигураций</h3><table><tbody>${groups}</tbody></table>
+    </div>
+    <div class="card"><h2>Добавить в сервер</h2>
+    <h3>Отдельную базу</h3>
     <div class="row">
       <div class="grow"><select id="add-db-sel">${dbOptions||'<option value="">— нет доступных баз —</option>'}</select></div>
       <button class="btn ghost" id="add-db-btn" style="align-self:flex-end">Добавить базу</button>
     </div>
-    <p class="hint">Файл SQLite из списка откроется в уже запущенном сервере как отдельная база (вне групп). Каталоги поиска баз настраиваются на вкладке «Настройки».</p>
-    <h3>Группы конфигураций в сервере</h3><table><tbody>${groups}</tbody></table>
-    <h3>Добавить группы баз в сервер</h3>
-    <p class="hint">Группы создаются и редактируются на вкладке «Группы баз». Отметьте группы — их базы откроются в уже запущенном сервере, прочие группы и базы останутся.</p>
+    <p class="hint">Файл SQLite из списка откроется как отдельная база (вне групп). Каталоги поиска баз — вкладка «Настройки».</p>
+    <h3>Группы баз из конфига</h3>
+    <p class="hint">Группы создаются и редактируются на вкладке «Группы баз». Отметьте группы — их базы откроются в сервере, прочие группы и базы останутся.</p>
     <div class="checks">${cfgChecks}</div>
     <div class="row" style="margin-top:12px">
       <button class="btn" id="cfg-add-selected">Добавить выбранные группы</button>
