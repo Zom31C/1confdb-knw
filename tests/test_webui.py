@@ -196,6 +196,26 @@ def test_http_server_start_stop(tmp_path, monkeypatch):
     os.remove(db)
 
 
+def test_http_add_config_group_to_running_server(tmp_path, monkeypatch):
+    """«Добавить группы баз в сервер»: группа из конфига открывается в работающем
+    сервере, прежние базы остаются (замена «открыть ещё базу» по пути)."""
+    db1 = _real_db(tmp_path, 'основная.sqlite')
+    db2 = _real_db(tmp_path, 'расширение.sqlite')
+    with _http(monkeypatch, tmp_path) as (web, port):
+        _req(port, 'POST', '/api/groups', {'name': 'БП', 'paths': [db2]})
+        _req(port, 'POST', '/api/server/start',
+             {'dbs': [db1], 'groups': [], 'port': 0})
+        code, r = _req(port, 'POST', '/api/server/apply_group',
+                       {'name': 'БП', 'replace': False})
+        assert code == 200
+        paths = {d['path'] for d in r['status']['dbs']}
+        assert paths == {db1, db2}                 # прежняя база осталась
+        assert any(g['name'] == 'БП' for g in r['status']['groups'])
+        _req(port, 'POST', '/api/server/stop', {})
+    os.remove(db1)
+    os.remove(db2)
+
+
 def test_http_scan_task(tmp_path, monkeypatch):
     from confdb.extract import file_sha256
     cf_dir = tmp_path / 'cf'

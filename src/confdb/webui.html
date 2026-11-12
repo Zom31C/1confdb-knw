@@ -110,6 +110,7 @@ const $ = s => document.querySelector(s);
 const esc = s => String(s==null?"":s).replace(/[&<>"']/g, c =>
   ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const base = p => String(p).split(/[\\/]/).pop();
+const val = id => { const el = $("#"+id); return el ? el.value : ""; };
 
 function toast(msg, kind="info"){
   const el = document.createElement("div");
@@ -176,8 +177,12 @@ function viewServer(){
       <td><b>${esc(g.name)}</b><div class="muted small">${esc(g.aliases.join(", "))||"(пусто)"}</div></td>
       <td><button class="btn ghost sm" data-gclose="${esc(g.name)}">убрать</button></td></tr>`).join("")
     || `<tr><td colspan="3" class="empty">Групп в сервере нет.</td></tr>`;
-  const cfgGroups = Object.keys(S.groups).map(n=>`<option value="${esc(n)}">${esc(n)}</option>`).join("");
-  const aliasOpts = sv.dbs.map(d=>`<option value="${esc(d.alias)}">${esc(d.alias)}</option>`).join("");
+  const cfgNames = Object.keys(S.groups);
+  const cfgChecks = cfgNames.map(n=>
+    `<label><input type="checkbox" class="cfg-add-check" value="${esc(n)}">
+     <span><b>${esc(n)}</b> <span class="muted small">${esc(S.groups[n].map(base).join(", "))}</span></span></label>`).join("")
+    || `<div class="empty">Групп в конфиге нет — создайте на вкладке «Группы баз».</div>`;
+  const cfgGroups = cfgNames.map(n=>`<option value="${esc(n)}">${esc(n)}</option>`).join("");
   return `<div class="card"><h2>Сервер запущен</h2>
     <div class="row"><span class="badge b-current">работает</span>
       <code id="srv-url">${esc(sv.url)}</code>
@@ -186,22 +191,16 @@ function viewServer(){
       <button class="btn danger" id="srv-stop">Остановить сервер</button></div>
     <p class="hint">Конфигурация клиента: <code>{"mcpServers":{"1confdb-knw":{"url":"${esc(sv.url)}"}}}</code>. Остановка закрывает базы и освобождает файлы для пересборки.</p>
     <h3>Открытые базы</h3><table><tbody>${dbs}</tbody></table>
-    <div class="row" style="margin-top:12px"><div class="grow"><label>Открыть ещё базу (путь к .db/.sqlite)</label>
-      <input type="text" id="open-path" placeholder="D:\\bases\\ext.sqlite"></div>
-      <button class="btn ghost" id="open-db" style="align-self:flex-end">Открыть</button></div>
     <h3>Группы конфигураций в сервере</h3><table><tbody>${groups}</tbody></table>
-    <div class="grid2" style="margin-top:12px">
-      <div class="row"><div class="grow"><label>Новая группа</label><input type="text" id="ng-name" placeholder="имя"></div>
-        <button class="btn ghost" id="ng-create" style="align-self:flex-end">Создать</button></div>
-      <div class="row"><div class="grow"><label>Добавить базу в группу</label>
-        <select id="ag-group">${sv.groups.map(g=>`<option>${esc(g.name)}</option>`).join("")}</select></div>
-        <div class="grow"><label>&nbsp;</label><select id="ag-alias">${aliasOpts}</select></div>
-        <button class="btn ghost" id="ag-add" style="align-self:flex-end">Добавить</button></div>
+    <h3>Добавить группы баз в сервер</h3>
+    <p class="hint">Группы создаются и редактируются на вкладке «Группы баз». Отметьте группы — их базы откроются в уже запущенном сервере, прочие группы и базы останутся.</p>
+    <div class="checks">${cfgChecks}</div>
+    <div class="row" style="margin-top:12px">
+      <button class="btn" id="cfg-add-selected">Добавить выбранные группы</button>
+      <span class="grow"></span>
+      <div style="min-width:200px"><select id="cfg-group">${cfgGroups||'<option value="">— нет групп —</option>'}</select></div>
+      <button class="btn ghost" id="cfg-replace">Заменить всё одной группой</button>
     </div>
-    <h3>Группы из конфига</h3>
-    <div class="row"><div class="grow"><select id="cfg-group">${cfgGroups||'<option value="">— нет групп —</option>'}</select></div>
-      <button class="btn ghost" id="cfg-add">Добавить в сервер</button>
-      <button class="btn ghost" id="cfg-replace">Заменить всё</button></div>
     </div>`;
 }
 
@@ -310,7 +309,6 @@ function viewSettings(){
 // ---------- привязка обработчиков ----------
 function bind(){
   const on = (id,ev,fn)=>{ const el=$("#"+id); if(el) el.addEventListener(ev,fn); };
-  const val = id => ($("#"+id)?$("#"+id).value:"");
   const checked = id => $("#"+id) && $("#"+id).checked;
 
   // сервер
@@ -324,10 +322,7 @@ function bind(){
   });
   on("srv-stop","click",async()=>{ try{ await api("/api/server/stop","POST",{}); toast("Сервер остановлен, базы закрыты","ok"); await refresh(); }catch(e){ toast(e.message,"err"); } });
   on("copy-url","click",()=>{ navigator.clipboard&&navigator.clipboard.writeText($("#srv-url").textContent); toast("URL скопирован","ok"); });
-  on("open-db","click",async()=>{ try{ const r=await api("/api/server/open","POST",{path:val("open-path")}); toast("Открыта база: "+r.alias,"ok"); await refresh(); }catch(e){ toast(e.message,"err"); } });
-  on("ng-create","click",async()=>{ try{ await api("/api/server/group/create","POST",{name:val("ng-name")}); await refresh(); }catch(e){ toast(e.message,"err"); } });
-  on("ag-add","click",async()=>{ try{ await api("/api/server/group/add","POST",{group:val("ag-group"),alias:val("ag-alias")}); await refresh(); }catch(e){ toast(e.message,"err"); } });
-  on("cfg-add","click",()=>applyCfg(false));
+  on("cfg-add-selected","click",addSelectedGroups);
   on("cfg-replace","click",()=>applyCfg(true));
   document.querySelectorAll("[data-use]").forEach(b=>b.onclick=async()=>{ try{ await api("/api/server/use","POST",{alias:b.dataset.use}); await refresh(); }catch(e){ toast(e.message,"err"); } });
   document.querySelectorAll("[data-close]").forEach(b=>b.onclick=async()=>{ try{ await api("/api/server/close","POST",{alias:b.dataset.close}); await refresh(); }catch(e){ toast(e.message,"err"); } });
@@ -370,6 +365,20 @@ async function applyCfg(replace){
     const res=r.result; toast("Группа "+res[0]+": "+(res[1].join(", ")||"без баз"), "ok");
     if(res[2]&&res[2].length) toast("Ошибки: "+res[2].join("; "),"err"); await refresh();
   }catch(e){ toast(e.message,"err"); }
+}
+async function addSelectedGroups(){
+  const names=[...document.querySelectorAll(".cfg-add-check:checked")].map(x=>x.value);
+  if(!names.length){toast("Отметьте хотя бы одну группу","err");return;}
+  const errors=[]; let added=0;
+  for(const name of names){
+    try{ const r=await api("/api/server/apply_group","POST",{name,replace:false});
+      const res=r.result; added++;
+      if(res[2]&&res[2].length) errors.push(name+": "+res[2].join("; "));
+    }catch(e){ errors.push(name+": "+e.message); }
+  }
+  toast("Добавлено групп: "+added+" из "+names.length, errors.length?"err":"ok");
+  if(errors.length) toast(errors.join(" | "),"err");
+  await refresh();
 }
 function batchSelected(all){
   let items;
