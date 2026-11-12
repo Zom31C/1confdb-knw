@@ -38,7 +38,7 @@ file and NOTICE.md — the only documentation shipped to `dist\`.
   3.10, so green tests do NOT prove 3.9 compatibility — check new syntax by eye.
 - Windows-oriented: `.bat` wrappers in repo root, venv in `.venv`. Comments, docstrings and
   user-facing text are in **Russian**.
-- Package version is `<major>.<schema revision>.<tool patch>` — now **1.9.5** (schema rev 9).
+- Package version is `<major>.<schema revision>.<tool patch>` — now **1.9.6** (schema rev 9).
   User rule (2026-11-08): the SECOND digit follows the DB schema revision
   (`writer.SCHEMA_VERSION` = `PRAGMA user_version` of built bases) and resets the last digit
   to 0; the LAST digit increments on tool improvements/fixes (MCP/CLI). Guards:

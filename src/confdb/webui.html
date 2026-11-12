@@ -236,14 +236,43 @@ async function api(path, method="GET", body){
   if(!r.ok || data.error) throw new Error(data.error || ("HTTP "+r.status));
   return data;
 }
-async function refresh(){ S = await api("/api/state"); $("#ver").textContent = "v"+S.version; render(); }
+async function refresh(full=false){ S = await api("/api/state"); $("#ver").textContent = "v"+S.version; render(full); }
 
 // ---------- навигация ----------
 $("#nav").addEventListener("click", e=>{
   const b = e.target.closest("button[data-tab]"); if(!b) return;
   TAB = b.dataset.tab;
   document.querySelectorAll("#nav button[data-tab]").forEach(x=>x.classList.toggle("active", x===b));
-  render();
+  render(true);
+});
+
+// ---------- кнопки MCP-сервера: делегирование на #main ----------
+// Привязано ОДИН раз: живой опрос перерисовывает #srv-status, но обработчики
+// не теряются и не дублируются. Действия, меняющие состав сервера, делают
+// полное обновление (refresh(true)); прочие — бережное (сохраняет формы).
+$("#main").addEventListener("click", async e=>{
+  const b = e.target.closest("button"); if(!b) return;
+  const id = b.id;
+  try{
+    if(id==="srv-start"){
+      const groups=[...document.querySelectorAll(".srv-group:checked")].map(x=>x.value);
+      const dbs=[...document.querySelectorAll(".srv-db:checked")].map(x=>x.value);
+      const r=await api("/api/server/start","POST",{dbs,groups,port:val("srv-port")});
+      if(r.missing&&r.missing.length) toast("Пропущены (нет файла): "+r.missing.map(base).join(", "),"info");
+      toast("Сервер запущен на порту "+r.port,"ok"); await refresh(true);
+    }
+    else if(id==="srv-stop"){ await api("/api/server/stop","POST",{}); toast("Сервер остановлен, базы закрыты","ok"); await refresh(true); }
+    else if(id==="copy-url"){ if(navigator.clipboard) navigator.clipboard.writeText($("#srv-url").textContent); toast("URL скопирован","ok"); }
+    else if(id==="add-db-btn"){ const path=val("add-db-sel");
+      if(!path){toast("Выберите базу из списка","err");return;}
+      const r=await api("/api/server/open","POST",{path}); toast("Открыта база: "+r.alias,"ok"); await refresh(true); }
+    else if(id==="cfg-add-selected"){ await addSelectedGroups(); }
+    else if(id==="cfg-replace"){ await applyCfg(true); }
+    else if(b.dataset.use){ await api("/api/server/use","POST",{alias:b.dataset.use}); await refresh(); }
+    else if(b.dataset.close){ await api("/api/server/close","POST",{alias:b.dataset.close}); await refresh(true); }
+    else if(b.dataset.guse){ await api("/api/server/group/use","POST",{name:b.dataset.guse}); await refresh(); }
+    else if(b.dataset.gclose){ await api("/api/server/group/close","POST",{name:b.dataset.gclose}); await refresh(true); }
+  }catch(err){ toast(err.message,"err"); }
 });
 
 // ---------- панель журнала: свернуть/развернуть ----------
@@ -272,11 +301,23 @@ $("#log-copy").addEventListener("click", ()=>{
   // на узких экранах панель по умолчанию свёрнута (выдвижная), на широких — открыта
   setLogCollapsed(stored!==null ? stored==="1" : window.innerWidth<=1100);
 })();
-function render(){
+function render(full=false){
   if(!S) return;
   const m = $("#main");
-  if(TAB==="server") m.innerHTML = viewServer();
-  else if(TAB==="extract") m.innerHTML = viewExtract();
+  if(TAB==="server"){
+    const sv = S.server;
+    if(!sv.running){ m.innerHTML = serverStartHtml(); return; }
+    if(full || !$("#srv-add")){
+      m.innerHTML = `<div class="card" id="srv-status">${serverStatusHtml(sv)}</div>`
+                  + `<div class="card" id="srv-add">${serverAddHtml(sv)}</div>`;
+    } else {
+      // живое обновление: перерисовываем ТОЛЬКО статус открытых баз/групп;
+      // карту добавления не трогаем — выделение пользователя сохраняется
+      $("#srv-status").innerHTML = serverStatusHtml(sv);
+    }
+    return;   // кнопки сервера работают через делегирование (bind не нужен)
+  }
+  if(TAB==="extract") m.innerHTML = viewExtract();
   else if(TAB==="catalog") m.innerHTML = viewCatalog();
   else if(TAB==="groups") m.innerHTML = viewGroups();
   else if(TAB==="settings") m.innerHTML = viewSettings();
@@ -284,26 +325,29 @@ function render(){
 }
 
 // ---------- вкладка: MCP-сервер ----------
-function viewServer(){
-  const sv = S.server;
-  if(!sv.running){
-    const groups = Object.keys(S.groups);
-    const gHtml = groups.length ? groups.map(n=>
-      `<label><input type="checkbox" class="srv-group" value="${esc(n)}">
-       <span><b>${esc(n)}</b> <span class="muted small">${esc(S.groups[n].map(p=>dbName(p)).join(", "))}</span></span></label>`).join("")
-      : `<div class="empty">Групп нет — создайте на вкладке «Группы баз».</div>`;
-    const dHtml = S.db_candidates.map(p=>
-      `<label><input type="checkbox" class="srv-db" value="${esc(p)}"> ${dbBadge(p)} <span><b>${esc(dbName(p))}</b><div class="path">${esc(p)}</div></span></label>`).join("")
-      || `<div class="empty">Базы не найдены — укажите каталог в настройках.</div>`;
-    return `<div class="card"><h2>Запуск MCP-сервера</h2>
-      <p class="muted small">Отметьте группы и/или отдельные базы. Группы откроются одновременно и останутся раздельными (запрос к группе — параметр <code>group</code>).</p>
-      <h3>Группы баз</h3><div class="checks">${gHtml}</div>
-      <h3>Отдельные базы</h3><div class="checks">${dHtml}</div>
-      <div class="row" style="margin-top:14px">
-        <div style="width:140px"><label>Порт</label><input type="number" id="srv-port" value="8765"></div>
-        <button class="btn" id="srv-start" style="align-self:flex-end">Запустить сервер</button>
-      </div></div>`;
-  }
+// Панель разделена на независимые карты: #srv-status (открытые базы/группы,
+// обновляется живым опросом) и #srv-add (формы добавления). Живой опрос
+// перерисовывает ТОЛЬКО #srv-status, поэтому выделение в формах добавления
+// (чекбоксы групп, выбор базы) не сбрасывается каждые несколько секунд.
+function serverStartHtml(){
+  const groups = Object.keys(S.groups);
+  const gHtml = groups.length ? groups.map(n=>
+    `<label><input type="checkbox" class="srv-group" value="${esc(n)}">
+     <span><b>${esc(n)}</b> <span class="muted small">${esc(S.groups[n].map(p=>dbName(p)).join(", "))}</span></span></label>`).join("")
+    : `<div class="empty">Групп нет — создайте на вкладке «Группы баз».</div>`;
+  const dHtml = S.db_candidates.map(p=>
+    `<label><input type="checkbox" class="srv-db" value="${esc(p)}"> ${dbBadge(p)} <span><b>${esc(dbName(p))}</b><div class="path">${esc(p)}</div></span></label>`).join("")
+    || `<div class="empty">Базы не найдены — укажите каталог в настройках.</div>`;
+  return `<div class="card"><h2>Запуск MCP-сервера</h2>
+    <p class="muted small">Отметьте группы и/или отдельные базы. Группы откроются одновременно и останутся раздельными (запрос к группе — параметр <code>group</code>).</p>
+    <h3>Группы баз</h3><div class="checks">${gHtml}</div>
+    <h3>Отдельные базы</h3><div class="checks">${dHtml}</div>
+    <div class="row" style="margin-top:14px">
+      <div style="width:140px"><label>Порт</label><input type="number" id="srv-port" value="8765"></div>
+      <button class="btn" id="srv-start" style="align-self:flex-end">Запустить сервер</button>
+    </div></div>`;
+}
+function serverStatusHtml(sv){
   const dbs = sv.dbs.map(d=>`<tr>
       <td>${dbBadge(d.path)}</td>
       <td>${d.active?'<span class="badge b-active">активна</span>':`<button class="btn ghost sm" data-use="${esc(d.alias)}">сделать активной</button>`}</td>
@@ -315,6 +359,19 @@ function viewServer(){
       <td><b>${esc(g.name)}</b><div class="muted small">${esc(g.aliases.join(", "))||"(пусто)"}</div></td>
       <td><button class="btn ghost sm" data-gclose="${esc(g.name)}">убрать</button></td></tr>`).join("")
     || `<tr><td colspan="3" class="empty">Групп в сервере нет.</td></tr>`;
+  return `<h2>Сервер запущен</h2>
+    <div class="row"><span class="badge b-current">работает</span>
+      <code id="srv-url">${esc(sv.url)}</code>
+      <button class="btn ghost sm" id="copy-url">копировать</button>
+      <span class="grow"></span>
+      <button class="btn danger" id="srv-stop">Остановить сервер</button></div>
+    <p class="hint">Конфигурация клиента: <code>{"mcpServers":{"1confdb-knw":{"url":"${esc(sv.url)}"}}}</code>. Остановка закрывает базы и освобождает файлы для пересборки.</p>
+    <h3>Открытые базы</h3>
+    <p class="hint">Активная база отвечает на запросы LLM по умолчанию (без параметра db/group); к любой базе можно обратиться явно по алиасу.</p>
+    <table><thead><tr><th>Тип</th><th></th><th>База</th><th></th></tr></thead><tbody>${dbs}</tbody></table>
+    <h3>Группы конфигураций</h3><table><tbody>${groups}</tbody></table>`;
+}
+function serverAddHtml(sv){
   const cfgNames = Object.keys(S.groups);
   const cfgChecks = cfgNames.map(n=>
     `<label><input type="checkbox" class="cfg-add-check" value="${esc(n)}">
@@ -325,19 +382,7 @@ function viewServer(){
   const openPaths = new Set(sv.dbs.map(d=>d.path));
   const availDbs = S.db_candidates.filter(p=>!openPaths.has(p));
   const dbOptions = availDbs.map(p=>`<option value="${esc(p)}">${esc(((dbMeta(p).ext||"?").toUpperCase())+" · "+dbName(p)+" — "+base(p))}</option>`).join("");
-  return `<div class="card"><h2>Сервер запущен</h2>
-    <div class="row"><span class="badge b-current">работает</span>
-      <code id="srv-url">${esc(sv.url)}</code>
-      <button class="btn ghost sm" id="copy-url">копировать</button>
-      <span class="grow"></span>
-      <button class="btn danger" id="srv-stop">Остановить сервер</button></div>
-    <p class="hint">Конфигурация клиента: <code>{"mcpServers":{"1confdb-knw":{"url":"${esc(sv.url)}"}}}</code>. Остановка закрывает базы и освобождает файлы для пересборки.</p>
-    <h3>Открытые базы</h3>
-    <p class="hint">Активная база отвечает на запросы LLM по умолчанию (без параметра db/group); к любой базе можно обратиться явно по алиасу.</p>
-    <table><thead><tr><th>Тип</th><th></th><th>База</th><th></th></tr></thead><tbody>${dbs}</tbody></table>
-    <h3>Группы конфигураций</h3><table><tbody>${groups}</tbody></table>
-    </div>
-    <div class="card"><h2>Добавить в сервер</h2>
+  return `<h2>Добавить в сервер</h2>
     <h3>Отдельную базу</h3>
     <div class="row">
       <div class="grow"><select id="add-db-sel">${dbOptions||'<option value="">— нет доступных баз —</option>'}</select></div>
@@ -352,7 +397,6 @@ function viewServer(){
       <span class="grow"></span>
       <div style="min-width:200px"><select id="cfg-group">${cfgGroups||'<option value="">— нет групп —</option>'}</select></div>
       <button class="btn ghost" id="cfg-replace">Заменить всё одной группой</button>
-    </div>
     </div>`;
 }
 
@@ -474,27 +518,6 @@ function bind(){
   const on = (id,ev,fn)=>{ const el=$("#"+id); if(el) el.addEventListener(ev,fn); };
   const checked = id => $("#"+id) && $("#"+id).checked;
 
-  // сервер
-  on("srv-start","click",async()=>{
-    const groups=[...document.querySelectorAll(".srv-group:checked")].map(x=>x.value);
-    const dbs=[...document.querySelectorAll(".srv-db:checked")].map(x=>x.value);
-    try{ const r=await api("/api/server/start","POST",{dbs,groups,port:val("srv-port")});
-      if(r.missing&&r.missing.length) toast("Пропущены (нет файла): "+r.missing.map(base).join(", "),"info");
-      toast("Сервер запущен на порту "+r.port,"ok"); await refresh();
-    }catch(e){ toast(e.message,"err"); }
-  });
-  on("srv-stop","click",async()=>{ try{ await api("/api/server/stop","POST",{}); toast("Сервер остановлен, базы закрыты","ok"); await refresh(); }catch(e){ toast(e.message,"err"); } });
-  on("copy-url","click",()=>{ navigator.clipboard&&navigator.clipboard.writeText($("#srv-url").textContent); toast("URL скопирован","ok"); });
-  on("add-db-btn","click",async()=>{ const path=val("add-db-sel");
-    if(!path){toast("Выберите базу из списка","err");return;}
-    try{ const r=await api("/api/server/open","POST",{path}); toast("Открыта база: "+r.alias,"ok"); await refresh(); }catch(e){ toast(e.message,"err"); } });
-  on("cfg-add-selected","click",addSelectedGroups);
-  on("cfg-replace","click",()=>applyCfg(true));
-  document.querySelectorAll("[data-use]").forEach(b=>b.onclick=async()=>{ try{ await api("/api/server/use","POST",{alias:b.dataset.use}); await refresh(); }catch(e){ toast(e.message,"err"); } });
-  document.querySelectorAll("[data-close]").forEach(b=>b.onclick=async()=>{ try{ await api("/api/server/close","POST",{alias:b.dataset.close}); await refresh(); }catch(e){ toast(e.message,"err"); } });
-  document.querySelectorAll("[data-guse]").forEach(b=>b.onclick=async()=>{ try{ await api("/api/server/group/use","POST",{name:b.dataset.guse}); await refresh(); }catch(e){ toast(e.message,"err"); } });
-  document.querySelectorAll("[data-gclose]").forEach(b=>b.onclick=async()=>{ try{ await api("/api/server/group/close","POST",{name:b.dataset.gclose}); await refresh(); }catch(e){ toast(e.message,"err"); } });
-
   // извлечение
   on("ex-src-sel","change",()=>{ if(val("ex-src-sel")) $("#ex-src").value=val("ex-src-sel"); });
   on("ex-run","click",async()=>{ const src=val("ex-src").trim(); if(!src){toast("Укажите файл или каталог","err");return;}
@@ -529,7 +552,7 @@ async function applyCfg(replace){
   const name=val("cfg-group"); if(!name){toast("Нет групп в конфиге","err");return;}
   try{ const r=await api("/api/server/apply_group","POST",{name,replace});
     const res=r.result; toast("Группа "+res[0]+": "+(res[1].join(", ")||"без баз"), "ok");
-    if(res[2]&&res[2].length) toast("Ошибки: "+res[2].join("; "),"err"); await refresh();
+    if(res[2]&&res[2].length) toast("Ошибки: "+res[2].join("; "),"err"); await refresh(true);
   }catch(e){ toast(e.message,"err"); }
 }
 async function addSelectedGroups(){
@@ -544,7 +567,7 @@ async function addSelectedGroups(){
   }
   toast("Добавлено групп: "+added+" из "+names.length, errors.length?"err":"ok");
   if(errors.length) toast(errors.join(" | "),"err");
-  await refresh();
+  await refresh(true);
 }
 function batchSelected(all){
   let items;
