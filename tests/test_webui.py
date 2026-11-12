@@ -222,6 +222,29 @@ def test_http_add_config_group_to_running_server(tmp_path, monkeypatch):
     os.remove(db2)
 
 
+def test_db_meta_classification(tmp_path):
+    """Классификация базы: тип исходника (cf) + имя/тип корневого объекта."""
+    from confdb.ui_core import db_meta
+    db = _real_db(tmp_path, 'классификация.sqlite')
+    meta = db_meta(db)
+    assert meta['ext'] == 'cf'                  # исходник — .cf
+    assert meta['root_type'] == 'Configuration'
+    assert meta['name']                         # имя корневого объекта есть
+    # несуществующая база — пустая классификация, без ошибки
+    assert db_meta(str(tmp_path / 'нет.sqlite'))['ext'] == ''
+
+
+def test_http_state_includes_db_meta(tmp_path, monkeypatch):
+    db = _real_db(tmp_path, 'мета.sqlite')
+    with _http(monkeypatch, tmp_path) as (web, port):
+        web.core.db_dirs = [str(tmp_path)]
+        code, state = _req(port, 'GET', '/api/state')
+        assert code == 200
+        assert state['db_meta'][db]['ext'] == 'cf'
+        assert state['db_meta'][db]['name']
+    os.remove(db)
+
+
 def test_http_open_db_to_running_server(tmp_path, monkeypatch):
     """«Добавить отдельную базу»: выбранный файл SQLite открывается в работающем
     сервере как отдельная база, прежние остаются."""

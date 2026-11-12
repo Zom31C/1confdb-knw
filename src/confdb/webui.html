@@ -290,10 +290,10 @@ function viewServer(){
     const groups = Object.keys(S.groups);
     const gHtml = groups.length ? groups.map(n=>
       `<label><input type="checkbox" class="srv-group" value="${esc(n)}">
-       <span><b>${esc(n)}</b> <span class="muted small">${esc(S.groups[n].map(base).join(", "))}</span></span></label>`).join("")
+       <span><b>${esc(n)}</b> <span class="muted small">${esc(S.groups[n].map(p=>dbName(p)).join(", "))}</span></span></label>`).join("")
       : `<div class="empty">Групп нет — создайте на вкладке «Группы баз».</div>`;
     const dHtml = S.db_candidates.map(p=>
-      `<label><input type="checkbox" class="srv-db" value="${esc(p)}"> <span class="path">${esc(p)}</span></label>`).join("")
+      `<label><input type="checkbox" class="srv-db" value="${esc(p)}"> ${dbBadge(p)} <span><b>${esc(dbName(p))}</b><div class="path">${esc(p)}</div></span></label>`).join("")
       || `<div class="empty">Базы не найдены — укажите каталог в настройках.</div>`;
     return `<div class="card"><h2>Запуск MCP-сервера</h2>
       <p class="muted small">Отметьте группы и/или отдельные базы. Группы откроются одновременно и останутся раздельными (запрос к группе — параметр <code>group</code>).</p>
@@ -305,10 +305,11 @@ function viewServer(){
       </div></div>`;
   }
   const dbs = sv.dbs.map(d=>`<tr>
+      <td>${dbBadge(d.path)}</td>
       <td>${d.active?'<span class="badge b-active">активна</span>':`<button class="btn ghost sm" data-use="${esc(d.alias)}">сделать активной</button>`}</td>
-      <td><b>${esc(d.alias)}</b>${d.outdated?' <span class="badge b-outdated">устарела</span>':''}<div class="path">${esc(d.path)}</div></td>
+      <td><b>${esc(dbName(d.path))}</b> <span class="pill path">${esc(d.alias)}</span>${d.outdated?' <span class="badge b-outdated">устарела</span>':''}<div class="path">${esc(d.path)}</div></td>
       <td><button class="btn ghost sm" data-close="${esc(d.alias)}">закрыть</button></td></tr>`).join("")
-    || `<tr><td colspan="3" class="empty">Нет открытых баз.</td></tr>`;
+    || `<tr><td colspan="4" class="empty">Нет открытых баз.</td></tr>`;
   const groups = sv.groups.map(g=>`<tr>
       <td>${g.active?'<span class="badge b-active">активна</span>':`<button class="btn ghost sm" data-guse="${esc(g.name)}">активировать</button>`}</td>
       <td><b>${esc(g.name)}</b><div class="muted small">${esc(g.aliases.join(", "))||"(пусто)"}</div></td>
@@ -317,13 +318,13 @@ function viewServer(){
   const cfgNames = Object.keys(S.groups);
   const cfgChecks = cfgNames.map(n=>
     `<label><input type="checkbox" class="cfg-add-check" value="${esc(n)}">
-     <span><b>${esc(n)}</b> <span class="muted small">${esc(S.groups[n].map(base).join(", "))}</span></span></label>`).join("")
+     <span><b>${esc(n)}</b> <span class="muted small">${esc(S.groups[n].map(p=>dbName(p)).join(", "))}</span></span></label>`).join("")
     || `<div class="empty">Групп в конфиге нет — создайте на вкладке «Группы баз».</div>`;
   const cfgGroups = cfgNames.map(n=>`<option value="${esc(n)}">${esc(n)}</option>`).join("");
   // отдельные базы-кандидаты, ещё не открытые в сервере (выбор из списка)
   const openPaths = new Set(sv.dbs.map(d=>d.path));
   const availDbs = S.db_candidates.filter(p=>!openPaths.has(p));
-  const dbOptions = availDbs.map(p=>`<option value="${esc(p)}">${esc(base(p))} — ${esc(p)}</option>`).join("");
+  const dbOptions = availDbs.map(p=>`<option value="${esc(p)}">${esc(((dbMeta(p).ext||"?").toUpperCase())+" · "+dbName(p)+" — "+base(p))}</option>`).join("");
   return `<div class="card"><h2>Сервер запущен</h2>
     <div class="row"><span class="badge b-current">работает</span>
       <code id="srv-url">${esc(sv.url)}</code>
@@ -331,7 +332,7 @@ function viewServer(){
       <span class="grow"></span>
       <button class="btn danger" id="srv-stop">Остановить сервер</button></div>
     <p class="hint">Конфигурация клиента: <code>{"mcpServers":{"1confdb-knw":{"url":"${esc(sv.url)}"}}}</code>. Остановка закрывает базы и освобождает файлы для пересборки.</p>
-    <h3>Открытые базы</h3><table><tbody>${dbs}</tbody></table>
+    <h3>Открытые базы</h3><table><thead><tr><th>Тип</th><th></th><th>База</th><th></th></tr></thead><tbody>${dbs}</tbody></table>
     <h3>Добавить отдельную базу</h3>
     <div class="row">
       <div class="grow"><select id="add-db-sel">${dbOptions||'<option value="">— нет доступных баз —</option>'}</select></div>
@@ -379,6 +380,10 @@ function viewExtract(){
 const TYPE_KIND = {cf:"конфигурация", cfe:"расширение конфигурации",
                    epf:"внешняя обработка", erf:"внешний отчёт"};
 const typeBadge = ext => `<span class="badge t-${esc(ext||'x')}" title="${esc(TYPE_KIND[ext]||'файл 1С')}">${esc((ext||"?").toUpperCase())}</span>`;
+// классификация готовой базы (тип исходника + имя корневого объекта) — из snapshot
+const dbMeta = p => (S && S.db_meta && S.db_meta[p]) || {};
+const dbBadge = p => typeBadge(dbMeta(p).ext);
+const dbName = p => dbMeta(p).name || base(p);
 function viewCatalog(){
   const rows = scanRows.map((r,i)=>{
     const badge = r.status==="current"?'<span class="badge b-current">актуальна</span>'
@@ -416,9 +421,9 @@ function viewGroups(){
     <div class="row"><b>${esc(n)}</b><span class="grow"></span>
       <button class="btn ghost sm" data-edit="${esc(n)}">изменить</button>
       <button class="btn danger sm" data-del="${esc(n)}">удалить</button></div>
-    <div style="margin-top:6px">${S.groups[n].map(p=>`<span class="pill path">${esc(base(p))}</span>`).join("")||'<span class="muted">пусто</span>'}</div>
+    <div style="margin-top:6px">${S.groups[n].map(p=>`<span class="pill" title="${esc(p)}">${dbBadge(p)} <b>${esc(dbName(p))}</b></span>`).join("")||'<span class="muted">пусто</span>'}</div>
     </div>`).join("") || `<div class="card empty">Групп пока нет.</div>`;
-  const dbChecks = S.db_candidates.map(p=>`<label><input type="checkbox" class="grp-db" value="${esc(p)}"> <span class="path">${esc(p)}</span></label>`).join("")
+  const dbChecks = S.db_candidates.map(p=>`<label><input type="checkbox" class="grp-db" value="${esc(p)}"> ${dbBadge(p)} <span><b>${esc(dbName(p))}</b><div class="path">${esc(p)}</div></span></label>`).join("")
     || `<div class="empty">Базы не найдены.</div>`;
   return `<div class="card"><h2>Группы баз для MCP-сервера</h2>
     <p class="muted small">База может входить в несколько групп. Первая база группы становится активной при запуске.</p>

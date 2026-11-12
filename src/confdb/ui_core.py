@@ -195,6 +195,36 @@ def scan_cf_sources(cf_dir, db_pool, log=print):
     return records
 
 
+# ---------- классификация баз (тип исходника + имя корневого объекта) ----------
+
+_DB_META_CACHE = {}
+
+
+def db_meta(db_path):
+    """Классификация базы знаний: {'ext','name','root_type'}.
+
+    ext — тип ИСХОДНИКА (cf/cfe/epf/erf из source.file), name/root_type — имя и
+    тип корневого объекта метаданных (source.root_name/root_type). Та же
+    классификация, что в каталоге cf, но для готовой базы. Кэш по mtime/size:
+    повторные снимки состояния не перечитывают неизменившиеся базы.
+    """
+    from .extract import source_info
+    try:
+        st = os.stat(db_path)
+        key = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return {'ext': '', 'name': None, 'root_type': None}
+    cached = _DB_META_CACHE.get(db_path)
+    if cached and cached[0] == key:
+        return cached[1]
+    info = source_info(db_path) or {}
+    ext = os.path.splitext(info.get('file') or '')[1].lstrip('.').lower()
+    meta = {'ext': ext, 'name': info.get('root_name'),
+            'root_type': info.get('root_type')}
+    _DB_META_CACHE[db_path] = (key, meta)
+    return meta
+
+
 # ---------- вспомогательное для панели запущенного сервера ----------
 
 def replace_server_dbs(server, paths):
@@ -572,6 +602,18 @@ class UiCore:
 
     # ---------- сводка для интерфейса ----------
 
+    def db_meta_map(self):
+        """Классификация всех баз, видимых интерфейсу: {путь: db_meta}."""
+        paths = set(self.db_candidates())
+        for grp in self.groups.values():
+            paths.update(grp)
+        paths.update(self.recent_db)
+        if self.last_db:
+            paths.add(self.last_db)
+        if self.runner.running:
+            paths.update(info['path'] for info in self.runner.server.dbs.values())
+        return {p: db_meta(p) for p in sorted(paths) if os.path.isfile(p)}
+
     def snapshot(self):
         return {'version': __version__,
                 'options': self.options_dict(),
@@ -582,4 +624,5 @@ class UiCore:
                 'last_db': self.last_db,
                 'cf_candidates': self.cf_candidates(),
                 'db_candidates': self.db_candidates(),
+                'db_meta': self.db_meta_map(),
                 'server': self.server_status()}
