@@ -509,6 +509,8 @@ DATABASE SCHEMA (for the sql tool; path columns store the legacy slash form 'Cat
 - xdto_type(object_id, ord, name, kind, base, base_ns, facets, enum_values) — the types an XDTO package declares: kind is objectType, valueType (a simple/enumeration type) or typeDef (an anonymous type nested in a property); base/base_ns name the base type and the namespace it comes from; facets holds the remaining XML attributes as 'name=value; …' (maxLength, totalDigits, localName…); enum_values lists the allowed values of an enumeration type. xdto_property(type_id, object_id, ord, name, type, type_ns, lower_bound, upper_bound, nillable, form, extra, nested_type_id) — properties: lower_bound=1 = obligatory, upper_bound=-1 = a list, form = Attribute|Element, nested_type_id → an anonymous nested type, extra = the remaining attributes; type_id NULL = a property declared by the package itself, outside any type. xdto_import(object_id, ord, namespace) — the namespaces the package imports. Prefer xdto_of/find_xdto over querying these directly.
 - skd_query(object_id, ord, query) — report queries in the 1C query language (Russian keywords ВЫБРАТЬ/ИЗ/ГДЕ/СОЕДИНЕНИЕ/ОБЪЕДИНИТЬ).
 - enum_value(object_id, ord, name, synonym) — enum values: name is the identifier (what Строка(Перечисление.Х.Значение) returns), synonym is the human-readable display string (NULL when absent/equal); an Enum with no rows here has no declared values. predefined(object_id, ord, parent_ord, uuid, name, code, display) — predefined elements (catalog items, chart-of-accounts accounts, characteristic-chart values) in depth-first order: parent_ord is the ord of the parent, and NULL only for the root node ('Счета'/'Элементы'), which is not an element; uuid identifies the element and is what a subconto kind points at; predefined_subconto(predefined_id, ord, uuid, kind_id, flags) — the subconto kinds of a predefined account: kind_id → the predefined element of the characteristic chart that names the kind, flags = 'Суммовой;Валютный;Количественный'; common_target(common_id, target_id) — objects a common attribute is attached to; subsystem_content — subsystem composition; source(file, created, root_type/root_name/root_uuid, file_size, file_sha256) — which .cf/.cfe/.epf the base was built from, when, and the SHA-256 of that file: equal digests in two bases mean the very same source file, so nothing has to be re-extracted; file.
+- form_attribute(form_id, ord, name, type_str, main_attr, saved_data) — a form's attributes (form_id → the form's meta_object.id): name is directly usable in the form module; main_attr=1 marks the main attribute (the form's owner object, or a dynamic list for list forms). form_command(form_id, ord, name, action, modifies_data) — form commands, action = the handler method in the form module. form_event(form_id, ord, event, handler) — form event handlers (handler = a method of the form module; event may be NULL for cf bases). form_parameter(form_id, ord, name, type_str, key_param) — form parameters. These are the names to resolve when reading/writing form-module code; object_card of a form prints them.
+- object_property(object_id, ord, name, value) — object link-properties: ScheduledJob name='MethodName' value='CommonModule.M.Method' (the handler the platform runs); FunctionalOption name='Location' (where the flag is stored); Constant/SessionParameter name='Type'; DocumentJournal name='RegisteredDocument' / Sequences name='Document' — composition, one row per member document (value = a path). object_card prints them.
 - role_right(role_id, target_uuid, target_object_id, target_attr_id, target_tabular_id, sub_index, collection_uuid, target_flags, right_uuid, value, rls_text) — explicit role rights, SPARSE (no row = the right is not set); target_flags keeps the flags of the target record verbatim (their meaning is NOT confirmed — they only tell two targets sharing one uuid apart); role_rls_template(role_id, ord, name, text) — the role RLS templates; role_rights_state(role_id, version, parsed, targets, rights, rls_templates, error) — parsed=0 means the rights file could NOT be read (the reason is in error), which is not the same as a role without rights. Prefer role_rights / object_rights over querying these.
 - source(file, created, root_type/root_name/root_uuid, file_size, file_sha256, extractor_version) — which .cf/.cfe/.epf the base was built from, when, the SHA-256 of that file, and the extractor version (confdb.__version__); equal digests in two bases mean the very same source file, so nothing has to be re-extracted; file. extractor_version NULL = the base was built before revision 7 (2026-10-09).
 
@@ -1325,6 +1327,12 @@ class McpServer:
                 out.append(f'Табличная часть {sec}: полей не извлечено')
         if row[0] == 'Enum':
             out.extend(self._enum_card_lines(q, oid, row[4]))
+        if (row[0] or '').endswith('Form'):
+            out.extend(self._form_card_lines(q, oid))
+        oprops = q('SELECT name, value FROM object_property '
+                   'WHERE object_id=? ORDER BY ord', (oid,)).fetchall()
+        if oprops:
+            out.extend(self._object_property_lines(oprops))
         predef = q('SELECT ord, parent_ord, name, code, display FROM predefined '
                    'WHERE object_id=? ORDER BY ord', (oid,)).fetchall()
         if predef:
@@ -1391,6 +1399,59 @@ class McpServer:
             return [f'Значения: не извлечено (объявлено {declared}) — '
                     f'пересоберите базу']
         return ['Значения: не извлечены либо не объявлены (состав неизвестен)']
+
+    @staticmethod
+    def _form_card_lines(q, form_id):
+        """Содержимое формы: реквизиты, команды, события, параметры.
+
+        Команды и события показывают обработчик (метод модуля формы);
+        реквизиты — тип и признак основного. Таблицы form_attribute/
+        form_command/form_event/form_parameter доступны и через sql.
+        """
+        out = []
+        attrs = q('SELECT name, type_str, main_attr FROM form_attribute '
+                  'WHERE form_id=? ORDER BY ord', (form_id,)).fetchall()
+        if attrs:
+            parts = [n + (': ' + ru_type_str(t) if t else '') +
+                     (' [основной]' if m else '') for n, t, m in attrs]
+            out.append(f'Реквизиты формы ({len(attrs)}): ' + '; '.join(parts))
+        cmds = q('SELECT name, action FROM form_command WHERE form_id=? '
+                 'ORDER BY ord', (form_id,)).fetchall()
+        if cmds:
+            parts = [n + (f' → {a}' if a else '') for n, a in cmds]
+            out.append(f'Команды формы ({len(cmds)}): ' + '; '.join(parts))
+        evs = q('SELECT event, handler FROM form_event WHERE form_id=? '
+                'ORDER BY ord', (form_id,)).fetchall()
+        if evs:
+            parts = [(f'{e} → {h}' if e else h) for e, h in evs]
+            out.append(f'События формы ({len(evs)}): ' + '; '.join(parts))
+        pars = q('SELECT name, type_str, key_param FROM form_parameter '
+                 'WHERE form_id=? ORDER BY ord', (form_id,)).fetchall()
+        if pars:
+            parts = [n + (': ' + ru_type_str(t) if t else '') +
+                     (' [ключевой]' if k else '') for n, t, k in pars]
+            out.append(f'Параметры формы ({len(pars)}): ' + '; '.join(parts))
+        return out
+
+    @staticmethod
+    def _object_property_lines(props):
+        """Свойства-ссылки объекта: обработчик, место хранения, тип, составы."""
+        out = []
+        comp_names = ('RegisteredDocument', 'Document')
+        labels = {'MethodName': 'Обработчик', 'Location': 'Хранится в',
+                  'Type': 'Тип', 'Group': 'Группа',
+                  'ParameterUseMode': 'Режим параметра'}
+        comps = {}
+        for n, v in props:
+            if n in comp_names:
+                comps.setdefault(n, []).append(v)
+            else:
+                out.append(f'{labels.get(n, n)}: {v}')
+        for n, vs in comps.items():
+            label = 'Документы журнала' if n == 'RegisteredDocument' \
+                else 'Документы последовательности'
+            out.append(f'{label} ({len(vs)}): ' + ', '.join(ru_path(v) for v in vs))
+        return out
 
     @staticmethod
     def _children_lines(q, oid):
@@ -4024,13 +4085,20 @@ class McpServer:
             label = f'{path} ({code_name})'
             o_type, o_name, m_context, o_id = row[3], row[4], row[2], row[5]
             # в модулях объектов реквизиты и табличные части доступны напрямую,
-            # без префикса — это неявные имена области видимости
+            # без префикса — это неявные имена области видимости; в модулях
+            # форм — реквизиты/команды/параметры формы (form_attribute/…)
             extra_scope = set()
             for tbl in ('meta_attribute', 'meta_tabular'):
                 for (nm,) in conn.execute(
                         f'SELECT name FROM {tbl} WHERE object_id=?', (o_id,)):
                     if nm:
                         extra_scope.add(nm)
+            if (o_type or '').endswith('Form'):
+                for tbl in ('form_attribute', 'form_command', 'form_parameter'):
+                    for (nm,) in conn.execute(
+                            f'SELECT name FROM {tbl} WHERE form_id=?', (o_id,)):
+                        if nm:
+                            extra_scope.add(nm)
             sem_kwargs = {
                 'self_module': o_name if o_type == 'CommonModule' else None,
                 'is_form_module': (o_type or '').endswith('Form'),

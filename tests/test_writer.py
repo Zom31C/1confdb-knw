@@ -551,7 +551,9 @@ def test_write_db(tmp_path):
                      'predefined': 2, 'subconto': 0, 'common_targets': 1, 'tabular': 3,
                      'xdto_types': 3, 'xdto_properties': 5,
                      'role_rights': 0, 'role_rls_templates': 0,
-                     'role_rights_failed': 0}
+                     'role_rights_failed': 0,
+                     'form_attributes': 0, 'form_commands': 0, 'form_events': 0,
+                     'form_parameters': 0, 'object_properties': 0}
 
     conn = sqlite3.connect(db_path)
     q = conn.execute
@@ -1071,3 +1073,66 @@ def test_version_places_are_in_sync():
         m = re.search(r'^version = "([^"]+)"', f.read(), re.M)
     assert m and m.group(1) == __version__, \
         f'pyproject.toml: {m.group(1) if m else "?"} != {__version__}'
+
+
+# -- содержимое форм и свойства-ссылки объектов (ревизия 11) -----------------
+
+def test_extract_form_elem_attrs_commands_params():
+    from confdb.db.writer import _TypeResolver, _extract_form_elem
+    r = _TypeResolver({}, {}, {}, {}, {})
+    prop_raw = ['9', ['1'], '0', '"Реквизит"', ['1', '0'],
+                ['"Pattern"', ['"S"']], ['0'], ['0'], ['0'], ['0'], '0', '1']
+    main_raw = ['9', ['1'], '0', '"Объект"', ['1', '0'],
+                ['"Pattern"', ['"#"', 'Родитель']],
+                ['0'], ['0'], ['0'], ['0'], '1', '1']
+    cmd_raw = ['9', ['1', 'uuid'], '"Команда"', ['t'], ['t'],
+               ['0', ['0', ['"B"', '1'], '0']], ['0'], ['0'],
+               '"ОбработчикКоманды"', '3']
+    par_raw = ['0', '"Параметр"', ['"Pattern"', ['"S"']], '1']
+    elem = {'props': [{'name': 'Реквизит', 'raw': prop_raw},
+                      {'name': 'Объект', 'raw': main_raw}],
+            'commands': [{'name': 'Команда', 'raw': cmd_raw}],
+            'params': [{'name': 'Параметр', 'raw': par_raw}]}
+    attrs, cmds, pars = _extract_form_elem(elem, r, 'Catalog/Справ1')
+    assert attrs == [('Реквизит', 'Строка', 0, 1),
+                     ('Объект', 'Ссылка: Catalog/Справ1', 1, 1)]
+    assert cmds == [('Команда', 'ОбработчикКоманды', 1)]
+    assert pars == [('Параметр', 'Строка', 1)]
+    # список: главный реквизит «Список» — динамический список, не объект
+    list_raw = list(main_raw)
+    list_raw[3] = '"Список"'
+    elem2 = {'props': [{'name': 'Список', 'raw': list_raw}]}
+    a2, _, _ = _extract_form_elem(elem2, r, 'Catalog/Справ1')
+    assert a2 == [('Список', 'Ссылка', 1, 1)]
+
+
+def test_extract_form_events():
+    from confdb.db.writer import _extract_form_events
+    u1 = '11111111-1111-1111-1111-111111111111'
+    u2 = '22222222-2222-2222-2222-222222222222'
+    block = ['2', u1, '"ПриСозданииНаСервере"', u2, '"ПередЗаписью"', '1', '0']
+    header = {'form': [[['1', 'x', block]]]}
+    assert _extract_form_events(header) == \
+        [(None, 'ПриСозданииНаСервере'), (None, 'ПередЗаписью')]
+    assert _extract_form_events({}) == []
+
+
+def test_extract_object_properties():
+    from confdb.db.writer import _TypeResolver, _extract_object_properties
+    r = _TypeResolver({}, {}, {}, {}, {})
+    hdr_const = {'header': [['1', ['16', ['27', ['2', ['core'],
+                                          ['"Pattern"', ['"B"']]]]]]]}
+    assert _extract_object_properties(hdr_const, 'Constant', r, {}) == \
+        [('Type', 'Булево')]
+    doc_u = '33333333-3333-3333-3333-333333333333'
+    block = ['0', '1', ['"#"', 'type-uuid', ['1', doc_u]]]
+    hdr_dj = {'header': [['1', ['26', 'u1', 'u2', ['core'], 'u3', '1', block]]]}
+    assert _extract_object_properties(
+        hdr_dj, 'DocumentJournal', r, {doc_u: 'Document/Док1'}) == \
+        [('RegisteredDocument', 'Document/Док1')]
+    mod_u = '44444444-4444-4444-4444-444444444444'
+    hdr_sj = {'header': [['1', ['2', ['core'], '""', '"описание"', '0', '0',
+                                mod_u, '"МетодОбработчик"', '3', '10']]]}
+    assert _extract_object_properties(
+        hdr_sj, 'ScheduledJob', r, {mod_u: 'CommonModule/Модуль1'}) == \
+        [('MethodName', 'CommonModule.Модуль1.МетодОбработчик')]

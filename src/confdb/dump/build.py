@@ -111,6 +111,8 @@ class Builder:
             'common_targets': 0, 'tabular': 0, 'xdto_types': 0,
             'xdto_properties': 0, 'role_rights': 0, 'role_rls_templates': 0,
             'role_rights_failed': 0, 'dump_files': 0, 'subsystem_content': 0,
+            'form_attributes': 0, 'form_commands': 0, 'form_events': 0,
+            'form_parameters': 0, 'object_properties': 0,
         }
 
     # -- фаза 1: объекты -----------------------------------------------------
@@ -291,6 +293,13 @@ class Builder:
                 self.common_targets.append((path, content))
         elif otype == 'Role':
             self.roles.append((obj_id, path))
+        # свойства-ссылки объекта (MethodName/Location/Type/составы)
+        prop_rows = xmlmeta.object_properties(root, otype, self.types)
+        if prop_rows:
+            self.conn.executemany(
+                W.INSERT_SQL['object_property'],
+                [(obj_id, i, n, v) for i, (n, v) in enumerate(prop_rows)])
+            self.stats['object_properties'] += len(prop_rows)
         return obj_id
 
     def _ord_for(self, obj):
@@ -368,6 +377,28 @@ class Builder:
             return
         conn = self.conn
         ext = os.path.join(folder, 'Ext')
+        # содержимое формы: реквизиты/команды/события/параметры из макета
+        if obj['kind'] == 'form':
+            form_xml = os.path.join(ext, 'Form.xml')
+            if os.path.isfile(form_xml):
+                try:
+                    form_el = xmlmeta.class_element(xmlmeta.load(form_xml))
+                    fa, fc, fe, fp = xmlmeta.form_content(
+                        form_el, self.types, obj['parent_path'])
+                except (ET.ParseError, OSError):
+                    fa, fc, fe, fp = [], [], [], []
+                conn.executemany(W.INSERT_SQL['form_attribute'],
+                                 [(obj_id, i) + r for i, r in enumerate(fa)])
+                conn.executemany(W.INSERT_SQL['form_command'],
+                                 [(obj_id, i) + r for i, r in enumerate(fc)])
+                conn.executemany(W.INSERT_SQL['form_event'],
+                                 [(obj_id, i) + r for i, r in enumerate(fe)])
+                conn.executemany(W.INSERT_SQL['form_parameter'],
+                                 [(obj_id, i) + r for i, r in enumerate(fp)])
+                self.stats['form_attributes'] += len(fa)
+                self.stats['form_commands'] += len(fc)
+                self.stats['form_events'] += len(fe)
+                self.stats['form_parameters'] += len(fp)
         # предопределённые данные
         predef_xml = os.path.join(ext, 'Predefined.xml')
         if os.path.isfile(predef_xml):

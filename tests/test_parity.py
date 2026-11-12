@@ -235,9 +235,24 @@ def make_cf_tree(base):
 
     form_dir = os.path.join(cat_dir, 'CatalogForm', 'ФормаЭлемента')
     _json(os.path.join(form_dir, 'CatalogForm.json'),
-          {'name': 'ФормаЭлемента', 'obj_version': '803', 'header': {}})
+          {'name': 'ФормаЭлемента', 'obj_version': '803', 'header': {},
+           'form': [[['1', 'x', ['1', 'cccccccc-0000-0000-0000-00000000f017',
+                                 '"ПриСозданииНаСервере"', '1', '0']]]]})
     _json(os.path.join(form_dir, 'CatalogForm.id.json'), {'uuid': FORM_UUID})
     _write(os.path.join(form_dir, 'CatalogForm.obj.bsl'), FORM_BSL)
+    # содержимое формы: реквизит/команда/параметр (как в реальном elem.json)
+    _json(os.path.join(form_dir, 'CatalogForm.elem.json'), {
+        'params': [{'name': 'Параметр1',
+                    'raw': ['0', '"Параметр1"', ['"Pattern"', ['"S"']], '1']}],
+        'props': [{'name': 'Объект', 'id': '1',
+                   'raw': ['9', ['1'], '0', '"Объект"', ['1', '0'],
+                           ['"Pattern"', ['"#"', 'Родитель']],
+                           ['0'], ['0'], ['0'], ['0'], '1', '1']}],
+        'commands': [{'name': 'Команда1', 'id': '1',
+                      'raw': ['9', ['1', 'uuid'], '"Команда1"', ['t'], ['t'],
+                              ['0', '0'], ['0'], ['0'], '"Команда1"', '3']}],
+        'tree': [], 'data': {},
+    })
 
     cm_dir = os.path.join(base, 'CommonModule', 'ОбщийМодуль1')
     _json(os.path.join(cm_dir, 'CommonModule.json'), {
@@ -408,8 +423,22 @@ def make_xml_dump(base):
        '</MetaDataObject>' % (NS, FORM_UUID))
     _w(base, 'Catalogs/Справочник1/Forms/ФормаЭлемента/Ext/Form.xml',
        '<?xml version="1.0" encoding="UTF-8"?>\n'
-       '<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" version="2.20">\n'
-       '\t<Attributes><Attribute><Name>Объект</Name></Attribute></Attributes>\n'
+       '<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" '
+       'xmlns:v8="http://v8.1c.ru/8.1/data/core" version="2.20">\n'
+       '\t<Attributes>\n'
+       '\t\t<Attribute name="Объект" id="1">\n'
+       '\t\t\t<Type><v8:Type>cfg:CatalogObject.Справочник1</v8:Type></Type>\n'
+       '\t\t\t<MainAttribute>true</MainAttribute>\n'
+       '\t\t\t<SavedData>true</SavedData>\n'
+       '\t\t</Attribute>\n'
+       '\t</Attributes>\n'
+       '\t<Commands><Command name="Команда1"><Action>Команда1</Action>'
+       '</Command></Commands>\n'
+       '\t<Events><Event name="OnCreateAtServer">ПриСозданииНаСервере</Event>'
+       '</Events>\n'
+       '\t<Parameters><Parameter name="Параметр1">'
+       '<Type><v8:Type>xs:string</v8:Type></Type>'
+       '<KeyParameter>true</KeyParameter></Parameter></Parameters>\n'
        '</Form>')
     _w(base, 'Catalogs/Справочник1/Forms/ФормаЭлемента/Ext/Form/Module.bsl',
        FORM_BSL)
@@ -570,6 +599,22 @@ QUERIES = {
         SELECT o.path, e.ord, e.name, e.synonym
         FROM enum_value e JOIN meta_object o ON o.id = e.object_id
         ORDER BY o.path, e.ord""",
+    'form_attribute': """
+        SELECT o.path, f.ord, f.name, f.type_str, f.main_attr, f.saved_data
+        FROM form_attribute f JOIN meta_object o ON o.id = f.form_id
+        ORDER BY o.path, f.ord""",
+    'form_command': """
+        SELECT o.path, f.ord, f.name, f.action, f.modifies_data
+        FROM form_command f JOIN meta_object o ON o.id = f.form_id
+        ORDER BY o.path, f.ord""",
+    'form_event': """
+        SELECT o.path, f.handler
+        FROM form_event f JOIN meta_object o ON o.id = f.form_id
+        ORDER BY o.path, f.ord""",
+    'form_parameter': """
+        SELECT o.path, f.ord, f.name, f.type_str, f.key_param
+        FROM form_parameter f JOIN meta_object o ON o.id = f.form_id
+        ORDER BY o.path, f.ord""",
     'predefined': """
         SELECT o.path, p.ord, p.parent_ord, p.uuid, p.name, p.code, p.display
         FROM predefined p JOIN meta_object o ON o.id = p.object_id

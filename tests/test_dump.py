@@ -159,8 +159,19 @@ def make_dump_dir(base):
        '</MetaDataObject>' % (NS, FORM_UUID))
     _w(base, 'Catalogs/Справочник1/Forms/ФормаЭлемента/Ext/Form.xml',
        '<?xml version="1.0" encoding="UTF-8"?>\n'
-       '<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" version="2.20">\n'
-       '\t<Attributes><Attribute><Name>Объект</Name></Attribute></Attributes>\n'
+       '<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" '
+       'xmlns:v8="http://v8.1c.ru/8.1/data/core" version="2.20">\n'
+       '\t<Attributes>\n'
+       '\t\t<Attribute name="Объект" id="1">\n'
+       '\t\t\t<Type><v8:Type>cfg:CatalogObject.Справочник1</v8:Type></Type>\n'
+       '\t\t\t<MainAttribute>true</MainAttribute>\n'
+       '\t\t\t<SavedData>true</SavedData>\n'
+       '\t\t</Attribute>\n'
+       '\t</Attributes>\n'
+       '\t<Commands><Command name="Команда1"><Action>Команда1</Action>'
+       '</Command></Commands>\n'
+       '\t<Events><Event name="OnCreateAtServer">ПриСозданииНаСервере</Event>'
+       '</Events>\n'
        '</Form>')
     _w(base, 'Catalogs/Справочник1/Forms/ФормаЭлемента/Ext/Form/Module.bsl',
        '&НаКлиенте\nПроцедура Команда1()\nКонецПроцедуры')
@@ -474,6 +485,21 @@ def test_enum_and_predefined(db):
     assert pre[0] == (0, None, '0' * 8 + '-0000-0000-0000-000000000000',
                       'Элементы', '', '')
     assert pre[1][3:] == ('ПредЭлемент', '001', 'Предопределённый')
+
+
+def test_form_content(db):
+    """Реквизиты/команды/события формы из макета Ext/Form.xml (ревизия 11)."""
+    fp = 'Catalog/Справочник1/CatalogForm/ФормаЭлемента'
+    fa = q(db, "SELECT f.name, f.type_str, f.main_attr, f.saved_data "
+               "FROM form_attribute f JOIN meta_object o ON o.id=f.form_id "
+               "WHERE o.path=?", (fp,))
+    assert fa == [('Объект', 'Ссылка: Catalog/Справочник1', 1, 1)]
+    fc = q(db, "SELECT f.name, f.action FROM form_command f "
+               "JOIN meta_object o ON o.id=f.form_id WHERE o.path=?", (fp,))
+    assert fc == [('Команда1', 'Команда1')]
+    fe = q(db, "SELECT f.event, f.handler FROM form_event f "
+               "JOIN meta_object o ON o.id=f.form_id WHERE o.path=?", (fp,))
+    assert fe == [('OnCreateAtServer', 'ПриСозданииНаСервере')]
 
 
 def test_skd_query(db):

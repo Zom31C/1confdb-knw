@@ -283,6 +283,11 @@ class Types:
             return 'Ссылка'
         if family == 'DefinedType':
             return self._defined_type(name)
+        if family.endswith('Object'):
+            # главный реквизит формы — объект-владелец (cfg:CatalogObject.Х)
+            path = '%s/%s' % (family[:-6], name)
+            self.links.append(path)
+            return 'Ссылка: %s' % path
         cls = REF_CLASS.get(family, 'unknown')
         if cls:
             path = '%s/%s' % (cls, name)
@@ -420,6 +425,143 @@ def _field(el, types):
     name = _text(props, 'Name')
     type_str, links = types.describe(_find(props, 'Type'))
     return name, type_str, links, el.get('uuid')
+
+
+def _form_type(type_el, types):
+    """type_str реквизита/параметра формы: узел <Type> с v8:Type внутри —
+    тот же формат, что у реквизитов объектов, поэтому Types.describe."""
+    if type_el is None:
+        return None
+    text, _links = types.describe(type_el)
+    return text
+
+
+def _form_type_value(type_el):
+    """Первое значение v8:Type узла <Type> (для распознавания главного реквизита)."""
+    if type_el is None:
+        return None
+    t = _find(type_el, 'v8:Type')
+    return (t.text or '').strip() if t is not None else None
+
+
+def form_content(form_el, types, parent_path=None):
+    """Реквизиты/команды/события/параметры формы из макета Ext/Form.xml.
+
+    Возвращает (attrs, commands, events, params):
+      attrs — (name, type_str, main_attr, saved_data);
+      commands — (name, action, modifies_data);
+      events — (event, handler);
+      params — (name, type_str, key_param).
+    Главный реквизит объектной формы — объект-владелец (parent_path), у формы
+    списка — динамический список («Ссылка»), как в cf-базе.
+    """
+    attrs, commands, events, params = [], [], [], []
+    if form_el is None:
+        return attrs, commands, events, params
+    a_el = _find(form_el, 'Attributes')
+    if a_el is not None:
+        for a in a_el:
+            if a.tag != 'Attribute':
+                continue
+            name = a.get('name')
+            if not name:
+                continue
+            type_el = _find(a, 'Type')
+            main = 1 if _text(a, 'MainAttribute') == 'true' else 0
+            saved = 1 if _text(a, 'SavedData') == 'true' else 0
+            if main and parent_path:
+                tval = _form_type_value(type_el)
+                tstr = 'Ссылка' if tval == 'cfg:DynamicList' \
+                    else 'Ссылка: %s' % parent_path
+            else:
+                tstr = _form_type(type_el, types)
+            attrs.append((name, tstr, main, saved))
+    c_el = _find(form_el, 'Commands')
+    if c_el is not None:
+        for c in c_el:
+            if c.tag != 'Command':
+                continue
+            name = c.get('name')
+            if not name:
+                continue
+            action = _text(c, 'Action')
+            mod = 1 if _text(c, 'ModifiesSavedData') == 'true' else 0
+            commands.append((name, action, mod))
+    e_el = _find(form_el, 'Events')
+    if e_el is not None:
+        for e in e_el:
+            if e.tag != 'Event':
+                continue
+            handler = (e.text or '').strip()
+            if handler:
+                events.append((e.get('name'), handler))
+    p_el = _find(form_el, 'Parameters')
+    if p_el is not None:
+        for p in p_el:
+            if p.tag != 'Parameter':
+                continue
+            name = p.get('name')
+            if not name:
+                continue
+            tstr = _form_type(_find(p, 'Type'), types)
+            key = 1 if _text(p, 'KeyParameter') == 'true' else 0
+            params.append((name, tstr, key))
+    return attrs, commands, events, params
+
+
+def _ref_path(dotted):
+    """«Document.Имя» → «Document/Имя» (путь в стиле БД)."""
+    return dotted.replace('.', '/', 1) if '.' in dotted else dotted
+
+
+def _composition_items(props, tag):
+    """Члены состава (<Item>Document.Имя</Item>) как пути в стиле БД."""
+    el = _find(props, tag)
+    if el is None:
+        return []
+    out = []
+    for item in el:
+        if item.text and item.text.strip():
+            out.append(_ref_path(item.text.strip()))
+    return out
+
+
+def object_properties(obj_el, otype, types):
+    """Свойства-ссылки объекта: список (name, value) для object_property.
+
+    ScheduledJob.MethodName → обработчик; FunctionalOption.Location → где
+    хранится флаг; Constant/SessionParameter.Type → тип; составы журналов
+    документов и последовательностей — по строке на член; CommonCommand —
+    группа и режим использования параметра.
+    """
+    props = properties(obj_el)
+    if props is None:
+        return []
+    out = []
+    if otype == 'ScheduledJob':
+        v = _text(props, 'MethodName')
+        if v:
+            out.append(('MethodName', v))
+    elif otype == 'FunctionalOption':
+        v = _text(props, 'Location')
+        if v:
+            out.append(('Location', v))
+    elif otype in ('Constant', 'SessionParameter'):
+        tstr, _links = types.describe(_find(props, 'Type'))
+        if tstr:
+            out.append(('Type', tstr))
+    elif otype == 'DocumentJournal':
+        for p in _composition_items(props, 'RegisteredDocuments'):
+            out.append(('RegisteredDocument', p))
+    elif otype == 'Sequences':
+        for p in _composition_items(props, 'Documents'):
+            out.append(('Document', p))
+    elif otype == 'CommonCommand':
+        for tag in ('Group', 'ParameterUseMode'):
+            v = _text(props, tag)
+            if v:
+                out.append((tag, v))
+    return out
 
 
 def child_name_lists(obj_el):

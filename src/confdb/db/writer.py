@@ -41,7 +41,7 @@ ROOT_TYPES = ('Configuration', 'ConfigurationExtension', 'ExternalDataProcessor'
 # выгрузки для инкрементального обновления), attribute_ref.target_path
 # (цель ссылки по пути — позволяет переразрешить ссылку, когда объект
 # добавлен позже ссылки) (2026-11-07).
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 RE_UUID = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.I)
 
@@ -637,6 +637,179 @@ def _enum_synonym(core):
     return fallback
 
 
+def _form_flag(raw, idx):
+    """Скалярный флаг '0'/'1' записи формы на позиции idx (иначе 0)."""
+    if idx < len(raw) and isinstance(raw[idx], str):
+        return 1 if raw[idx] == '1' else 0
+    return 0
+
+
+def _form_bflag(node):
+    """Булев флаг из обёртки вида ['0', ['0', ['"B"', 1], '0']] (None если нет)."""
+    if isinstance(node, list):
+        for x in node:
+            if isinstance(x, list) and len(x) >= 2 \
+                    and str(x[0]).strip('"') == 'B':
+                return 1 if str(x[1]) == '1' else 0
+            r = _form_bflag(x)
+            if r is not None:
+                return r
+    return None
+
+
+def _extract_form_elem(elem, resolver, parent_path=None):
+    """Реквизиты/команды/параметры формы из elem.json (декодер cf).
+
+    elem = {params, props, commands, tree, data}; запись — {name, id, raw}.
+    Возвращает (attrs, commands, params):
+      attrs — (name, type_str, main_attr, saved_data);
+      commands — (name, action, modifies_data);
+      params — (name, type_str, key_param).
+    Тип реквизита — raw[5], обработчик команды — raw[8], флаги raw[10]/[11];
+    у параметра тип raw[2], ключевой флаг raw[3]. Главный реквизит ссылается на
+    объект-владелец формы (в cf это имя «Родитель») — разрешаем в parent_path.
+    """
+    attrs, commands, params = [], [], []
+    for p in elem.get('props') or []:
+        name = p.get('name')
+        if not name:
+            continue
+        raw = p.get('raw') or []
+        td = raw[5] if len(raw) > 5 else None
+        main = _form_flag(raw, 10)
+        if main and parent_path:
+            # главный реквизит объектной формы — объект-владелец; у формы
+            # списка главный реквизит «Список» — динамический список
+            tstr = 'Ссылка' if name == 'Список' else f'Ссылка: {parent_path}'
+        else:
+            tstr = resolver.describe(td) if td is not None else None
+        attrs.append((name, tstr, main, _form_flag(raw, 11)))
+    for cm in elem.get('commands') or []:
+        name = cm.get('name')
+        if not name:
+            continue
+        raw = cm.get('raw') or []
+        action = _unquote(raw[8]) if len(raw) > 8 \
+            and isinstance(raw[8], str) else None
+        mod = _form_bflag(raw[5]) if len(raw) > 5 else None
+        commands.append((name, action, mod or 0))
+    for pr in elem.get('params') or []:
+        name = pr.get('name')
+        if not name:
+            continue
+        raw = pr.get('raw') or []
+        tstr = resolver.describe(raw[2]) if len(raw) > 2 else None
+        params.append((name, tstr, _form_flag(raw, 3)))
+    return attrs, commands, params
+
+
+def _extract_form_events(header):
+    """События формы из cf-заголовка: блок [N, uuid, 'Обработчик', …].
+
+    Блок несёт N пар (uuid, имя-обработчика); имя события в cf не хранится,
+    поэтому event=None. Возвращает список (event, handler) без дублей.
+    """
+    events = []
+    seen = set()
+
+    def walk(node):
+        if isinstance(node, list):
+            if node and isinstance(node[0], str) and node[0].isdigit():
+                n = int(node[0])
+                if 0 < n <= 60 and len(node) >= 1 + 2 * n:
+                    names, ok = [], True
+                    for i in range(n):
+                        u, nm = node[1 + 2 * i], node[2 + 2 * i]
+                        if isinstance(u, str) and RE_UUID.match(u) \
+                                and isinstance(nm, str) and nm.startswith('"'):
+                            nm = _unquote(nm)
+                            if nm and ' ' not in nm:
+                                names.append(nm)
+                                continue
+                        ok = False
+                        break
+                    if ok:
+                        for nm in names:
+                            if nm not in seen:
+                                seen.add(nm)
+                                events.append((None, nm))
+            for ch in node:
+                walk(ch)
+        elif isinstance(node, dict):
+            for ch in node.values():
+                walk(ch)
+
+    walk(header.get('form'))
+    return events
+
+
+def _find_type_desc(node):
+    """Первый дескриптор типа (["Pattern", …] или составной ["0", N, …])."""
+    if isinstance(node, list):
+        if node and str(node[0]).strip('"') == 'Pattern':
+            return node
+        if node and str(node[0]) == '0' and len(node) > 1 \
+                and str(node[1]).isdigit():
+            return node
+        for ch in node:
+            r = _find_type_desc(ch)
+            if r is not None:
+                return r
+    elif isinstance(node, dict):
+        for ch in node.values():
+            r = _find_type_desc(ch)
+            if r is not None:
+                return r
+    return None
+
+
+def _extract_object_properties(header, stem, resolver, uuid_to_path):
+    """Свойства-ссылки объекта из cf-заголовка (для object_property).
+
+    Constant/SessionParameter — тип; DocumentJournal/Sequences — состав
+    (блок [0, N, ["#", uuid, ["1", uuid]]…]); ScheduledJob — MethodName
+    (модуль по uuid + имя метода); FunctionalOption — Location по uuid.
+    """
+    try:
+        rec = header['header'][0][1]
+    except (KeyError, IndexError, TypeError):
+        return []
+    if not isinstance(rec, list):
+        return []
+    out = []
+    if stem in ('Constant', 'SessionParameter'):
+        td = _find_type_desc(rec)
+        if td is not None:
+            tstr = resolver.describe(td)
+            if tstr:
+                out.append(('Type', tstr))
+    elif stem in ('DocumentJournal', 'Sequences'):
+        name = 'RegisteredDocument' if stem == 'DocumentJournal' else 'Document'
+        for x in rec:
+            if isinstance(x, list) and len(x) > 2 and str(x[0]) == '0' \
+                    and str(x[1]).isdigit():
+                for entry in x[2:]:
+                    if isinstance(entry, list) and len(entry) >= 3 \
+                            and isinstance(entry[2], list) and len(entry[2]) >= 2:
+                        path = uuid_to_path.get(entry[2][1])
+                        if path:
+                            out.append((name, path))
+                break
+    elif stem == 'ScheduledJob':
+        if len(rec) > 7 and isinstance(rec[6], str) and isinstance(rec[7], str):
+            mod = uuid_to_path.get(rec[6])
+            method = _unquote(rec[7])
+            if mod and mod.startswith('CommonModule/') and method:
+                out.append(('MethodName',
+                            'CommonModule.%s.%s' % (mod.split('/', 1)[1], method)))
+    elif stem == 'FunctionalOption':
+        if len(rec) > 2 and isinstance(rec[2], str):
+            path = uuid_to_path.get(rec[2])
+            if path:
+                out.append(('Location', path.replace('/', '.', 1)))
+    return out
+
+
 def _predef_columns(schema):
     """{colId: (тип, uuid-имя)} из узла схемы ['<n>', desc…].
 
@@ -995,6 +1168,55 @@ CREATE TABLE enum_value (
     synonym TEXT
 );
 CREATE INDEX ix_enum_value_object ON enum_value(object_id, ord);
+-- содержимое форм (реквизиты/команды/события/параметры): form_id → meta_object
+-- формы. Извлекается из макета формы (выгрузка Ext/Form.xml, cf elem.json).
+CREATE TABLE form_attribute (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    form_id INTEGER NOT NULL REFERENCES meta_object(id) ON DELETE CASCADE,
+    ord INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    type_str TEXT,
+    main_attr INTEGER NOT NULL DEFAULT 0,
+    saved_data INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX ix_form_attribute_form ON form_attribute(form_id, ord);
+CREATE TABLE form_command (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    form_id INTEGER NOT NULL REFERENCES meta_object(id) ON DELETE CASCADE,
+    ord INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    action TEXT,
+    modifies_data INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX ix_form_command_form ON form_command(form_id, ord);
+CREATE TABLE form_event (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    form_id INTEGER NOT NULL REFERENCES meta_object(id) ON DELETE CASCADE,
+    ord INTEGER NOT NULL,
+    event TEXT,
+    handler TEXT NOT NULL
+);
+CREATE INDEX ix_form_event_form ON form_event(form_id, ord);
+CREATE TABLE form_parameter (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    form_id INTEGER NOT NULL REFERENCES meta_object(id) ON DELETE CASCADE,
+    ord INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    type_str TEXT,
+    key_param INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX ix_form_parameter_form ON form_parameter(form_id, ord);
+-- свойства-ссылки объектов: MethodName регламентного задания, Location
+-- функциональной опции, тип константы/параметра сессии, составы журналов и
+-- последовательностей (по строке на член). name — вид свойства, value — значение.
+CREATE TABLE object_property (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    object_id INTEGER NOT NULL REFERENCES meta_object(id) ON DELETE CASCADE,
+    ord INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    value TEXT
+);
+CREATE INDEX ix_object_property_object ON object_property(object_id, name);
 CREATE TABLE predefined (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     object_id INTEGER NOT NULL REFERENCES meta_object(id) ON DELETE CASCADE,
@@ -1127,6 +1349,21 @@ INSERT_SQL = {
         ' VALUES (?, ?, ?, ?, ?)',
     'enum_value':
         'INSERT INTO enum_value (object_id, ord, name, synonym)'
+        ' VALUES (?, ?, ?, ?)',
+    'form_attribute':
+        'INSERT INTO form_attribute (form_id, ord, name, type_str, main_attr,'
+        ' saved_data) VALUES (?, ?, ?, ?, ?, ?)',
+    'form_command':
+        'INSERT INTO form_command (form_id, ord, name, action, modifies_data)'
+        ' VALUES (?, ?, ?, ?, ?)',
+    'form_event':
+        'INSERT INTO form_event (form_id, ord, event, handler)'
+        ' VALUES (?, ?, ?, ?)',
+    'form_parameter':
+        'INSERT INTO form_parameter (form_id, ord, name, type_str, key_param)'
+        ' VALUES (?, ?, ?, ?, ?)',
+    'object_property':
+        'INSERT INTO object_property (object_id, ord, name, value)'
         ' VALUES (?, ?, ?, ?)',
     'predefined':
         'INSERT INTO predefined (object_id, ord, parent_ord, uuid, name,'
@@ -1891,6 +2128,11 @@ def write_db(dump_dir, db_path, *, source_file=None, source_sha256=None,
         predef_params = []
         subconto_params = []
         subobject_params = []
+        form_attr_params = []
+        form_cmd_params = []
+        form_evt_params = []
+        form_par_params = []
+        objprop_params = []
         for rel, info in infos.items():
             obj_id = dir_to_id[rel]
             for ord_no, (name, uuid) in enumerate(info['tabular']):
@@ -1907,6 +2149,34 @@ def write_db(dump_dir, db_path, *, source_file=None, source_sha256=None,
             elif info['stem'] == 'CommonAttribute':
                 for target in _extract_common_targets(info['header'], uuid_to_id, obj_id):
                     common_params.append((obj_id, target))
+            elif info['stem'].endswith('Form'):
+                # содержимое формы: реквизиты/команды/параметры из elem.json,
+                # события — из заголовка формы
+                elem_path = os.path.join(info['dirpath'],
+                                         f'{info["stem"]}.elem.json')
+                if os.path.isfile(helper.long_path(elem_path)):
+                    try:
+                        with open(helper.long_path(elem_path),
+                                  encoding='utf-8') as f:
+                            elem = json.load(f)
+                    except (OSError, ValueError):
+                        elem = None
+                    if elem:
+                        fa, fc, fp = _extract_form_elem(
+                            elem, resolver, info['parent_rel'])
+                        for o, row in enumerate(fa):
+                            form_attr_params.append((obj_id, o) + row)
+                        for o, row in enumerate(fc):
+                            form_cmd_params.append((obj_id, o) + row)
+                        for o, row in enumerate(fp):
+                            form_par_params.append((obj_id, o) + row)
+                for o, (ev, h) in enumerate(_extract_form_events(info['header'])):
+                    form_evt_params.append((obj_id, o, ev, h))
+            if info['stem'] in ('Constant', 'SessionParameter', 'DocumentJournal',
+                                'Sequences', 'ScheduledJob', 'FunctionalOption'):
+                for o, (n, v) in enumerate(_extract_object_properties(
+                        info['header'], info['stem'], resolver, uuid_to_path)):
+                    objprop_params.append((obj_id, o, n, v))
             elements, subcontos = _extract_predefined(
                 os.path.join(info['dirpath'], 'Предустановленные данные.bin'),
                 info['header'])
@@ -1920,10 +2190,20 @@ def write_db(dump_dir, db_path, *, source_file=None, source_sha256=None,
         conn.executemany(INSERT_SQL['enum_value'], enum_params)
         conn.executemany(INSERT_SQL['common_target'], common_params)
         conn.executemany(INSERT_SQL['predefined'], predef_params)
+        conn.executemany(INSERT_SQL['form_attribute'], form_attr_params)
+        conn.executemany(INSERT_SQL['form_command'], form_cmd_params)
+        conn.executemany(INSERT_SQL['form_event'], form_evt_params)
+        conn.executemany(INSERT_SQL['form_parameter'], form_par_params)
+        conn.executemany(INSERT_SQL['object_property'], objprop_params)
         stats['tabular'] += len(tab_params)
         stats['enum_values'] += len(enum_params)
         stats['common_targets'] += len(common_params)
         stats['predefined'] += len(predef_params)
+        stats['form_attributes'] = len(form_attr_params)
+        stats['form_commands'] = len(form_cmd_params)
+        stats['form_events'] = len(form_evt_params)
+        stats['form_parameters'] = len(form_par_params)
+        stats['object_properties'] = len(objprop_params)
         if subconto_params:
             # id предопределённых известны только после вставки, а вид субконто — это
             # другой предопределённый элемент (ПВХ), поэтому ссылки разрешаются вторым проходом
