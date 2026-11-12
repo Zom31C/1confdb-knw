@@ -345,7 +345,7 @@ def fields_and_sections(obj_el, types):
         tabulars — [(name, uuid)];
         commands — [(name, uuid)] встроенные команды (метаданные команд лежат
             в XML родителя, папка хранит только модуль);
-        enum_values — [name] значения перечисления;
+        enum_values — [(name, synonym)] значения перечисления;
         subobjects — [(kind, uuid, name)] подобъекты для прав ролей.
     """
     attrs = []
@@ -383,7 +383,7 @@ def fields_and_sections(obj_el, types):
         elif tag == 'EnumValue':
             name = _text(properties(child), 'Name')
             if name:
-                enum_values.append(name)
+                enum_values.append((name, synonym(child)))
         elif tag in SUBOBJECT_TAGS:
             name = _text(properties(child), 'Name')
             if uuid and name:

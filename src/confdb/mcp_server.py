@@ -44,8 +44,8 @@ from urllib.parse import parse_qs, urlparse
 from . import compare
 from . import header_props
 from .config import load_config
-from .db.writer import FTS_TABLE, SCHEMA_VERSION, TYPE_RU, fts_index_info, \
-    fts_shard_paths, tabular_field_counts
+from .db.writer import FTS_TABLE, SCHEMA_VERSION, TYPE_RU, enum_value_count, \
+    fts_index_info, fts_shard_paths, tabular_field_counts
 
 PROTOCOL_VERSION = '2024-11-05'
 
@@ -508,7 +508,7 @@ DATABASE SCHEMA (for the sql tool; path columns store the legacy slash form 'Cat
 - attribute_ref(attribute_id, ord, uuid, object_id) — which metadata objects a field's type references (one row per member; NULL object = a generic platform type, whose uuid matches no object of this configuration). Use for joins and impact analysis ('who references X').
 - xdto_type(object_id, ord, name, kind, base, base_ns, facets, enum_values) — the types an XDTO package declares: kind is objectType, valueType (a simple/enumeration type) or typeDef (an anonymous type nested in a property); base/base_ns name the base type and the namespace it comes from; facets holds the remaining XML attributes as 'name=value; …' (maxLength, totalDigits, localName…); enum_values lists the allowed values of an enumeration type. xdto_property(type_id, object_id, ord, name, type, type_ns, lower_bound, upper_bound, nillable, form, extra, nested_type_id) — properties: lower_bound=1 = obligatory, upper_bound=-1 = a list, form = Attribute|Element, nested_type_id → an anonymous nested type, extra = the remaining attributes; type_id NULL = a property declared by the package itself, outside any type. xdto_import(object_id, ord, namespace) — the namespaces the package imports. Prefer xdto_of/find_xdto over querying these directly.
 - skd_query(object_id, ord, query) — report queries in the 1C query language (Russian keywords ВЫБРАТЬ/ИЗ/ГДЕ/СОЕДИНЕНИЕ/ОБЪЕДИНИТЬ).
-- enum_value(object_id, ord, name) — enum values; predefined(object_id, ord, parent_ord, uuid, name, code, display) — predefined elements (catalog items, chart-of-accounts accounts, characteristic-chart values) in depth-first order: parent_ord is the ord of the parent, and NULL only for the root node ('Счета'/'Элементы'), which is not an element; uuid identifies the element and is what a subconto kind points at; predefined_subconto(predefined_id, ord, uuid, kind_id, flags) — the subconto kinds of a predefined account: kind_id → the predefined element of the characteristic chart that names the kind, flags = 'Суммовой;Валютный;Количественный'; common_target(common_id, target_id) — objects a common attribute is attached to; subsystem_content — subsystem composition; source(file, created, root_type/root_name/root_uuid, file_size, file_sha256) — which .cf/.cfe/.epf the base was built from, when, and the SHA-256 of that file: equal digests in two bases mean the very same source file, so nothing has to be re-extracted; file.
+- enum_value(object_id, ord, name, synonym) — enum values: name is the identifier (what Строка(Перечисление.Х.Значение) returns), synonym is the human-readable display string (NULL when absent/equal); an Enum with no rows here has no declared values. predefined(object_id, ord, parent_ord, uuid, name, code, display) — predefined elements (catalog items, chart-of-accounts accounts, characteristic-chart values) in depth-first order: parent_ord is the ord of the parent, and NULL only for the root node ('Счета'/'Элементы'), which is not an element; uuid identifies the element and is what a subconto kind points at; predefined_subconto(predefined_id, ord, uuid, kind_id, flags) — the subconto kinds of a predefined account: kind_id → the predefined element of the characteristic chart that names the kind, flags = 'Суммовой;Валютный;Количественный'; common_target(common_id, target_id) — objects a common attribute is attached to; subsystem_content — subsystem composition; source(file, created, root_type/root_name/root_uuid, file_size, file_sha256) — which .cf/.cfe/.epf the base was built from, when, and the SHA-256 of that file: equal digests in two bases mean the very same source file, so nothing has to be re-extracted; file.
 - role_right(role_id, target_uuid, target_object_id, target_attr_id, target_tabular_id, sub_index, collection_uuid, target_flags, right_uuid, value, rls_text) — explicit role rights, SPARSE (no row = the right is not set); target_flags keeps the flags of the target record verbatim (their meaning is NOT confirmed — they only tell two targets sharing one uuid apart); role_rls_template(role_id, ord, name, text) — the role RLS templates; role_rights_state(role_id, version, parsed, targets, rights, rls_templates, error) — parsed=0 means the rights file could NOT be read (the reason is in error), which is not the same as a role without rights. Prefer role_rights / object_rights over querying these.
 - source(file, created, root_type/root_name/root_uuid, file_size, file_sha256, extractor_version) — which .cf/.cfe/.epf the base was built from, when, the SHA-256 of that file, and the extractor version (confdb.__version__); equal digests in two bases mean the very same source file, so nothing has to be re-extracted; file. extractor_version NULL = the base was built before revision 7 (2026-10-09).
 
@@ -1149,6 +1149,21 @@ class McpServer:
             oid, path = row
         return path
 
+    def _object_missing_note(self, path, db=None):
+        """«объект не найден», если пути нет в meta_object; иначе None.
+
+        Фильтр path обязан отличать «объект не существует» от «у объекта нет
+        совпадений»: переданная категория («Документ») вместо пути конкретного
+        объекта — не объект, и голый «ничего не найдено» вводит в заблуждение.
+        """
+        if self.conn(db).execute(
+                'SELECT 1 FROM meta_object WHERE path=? LIMIT 1',
+                (path,)).fetchone():
+            return None
+        return (f'объект не найден: {path}. Укажите путь конкретного объекта '
+                f'(например Document/ИмяДокумента или Документ.ИмяДокумента), '
+                f'а не категорию; список объектов — find_objects.')
+
     @_synchronized
     def handle(self, msg):
         method = msg.get('method')
@@ -1308,6 +1323,8 @@ class McpServer:
                 out.append(f'Табличная часть {sec}: полей не объявлено')
             else:
                 out.append(f'Табличная часть {sec}: полей не извлечено')
+        if row[0] == 'Enum':
+            out.extend(self._enum_card_lines(q, oid, row[4]))
         predef = q('SELECT ord, parent_ord, name, code, display FROM predefined '
                    'WHERE object_id=? ORDER BY ord', (oid,)).fetchall()
         if predef:
@@ -1353,6 +1370,27 @@ class McpServer:
         if rev:
             out.append('На него ссылаются: ' + ', '.join(ru_path(p) for p in rev))
         return '\n'.join(out)
+
+    @staticmethod
+    def _enum_card_lines(q, oid, header_json):
+        """Значения перечисления с синонимами; различает «нет» и «не извлечено».
+
+        Имя значения — то, что возвращает Строка(Перечисление.Х.Значение);
+        синоним — человекочитаемое представление (enum_value.synonym),
+        показывается, когда отличается от имени.
+        """
+        vals = q('SELECT name, synonym FROM enum_value WHERE object_id=? '
+                 'ORDER BY ord', (oid,)).fetchall()
+        if vals:
+            parts = [n + (f' ({s})' if s and s != n else '') for n, s in vals]
+            return [f'Значения ({len(vals)}): ' + '; '.join(parts)]
+        declared = enum_value_count(header_json)
+        if declared == 0:
+            return ['Значения: не объявлено (перечисление пустое)']
+        if declared:
+            return [f'Значения: не извлечено (объявлено {declared}) — '
+                    f'пересоберите базу']
+        return ['Значения: не извлечены либо не объявлены (состав неизвестен)']
 
     @staticmethod
     def _children_lines(q, oid):
@@ -1710,6 +1748,9 @@ class McpServer:
 
     def refs_of(self, path, direction='both', limit=30, offset=0, db=None):
         path = self.resolve_path(path, db)
+        missing = self._object_missing_note(path, db)
+        if missing:
+            return missing
         limit, offset = page_limit(limit), page_offset(offset)
         joined = (' FROM attribute_ref r '
                   'JOIN meta_attribute a ON a.id=r.attribute_id '
@@ -3346,6 +3387,9 @@ class McpServer:
         row = self._method_row(path, code_name, name, db)
         if not row:
             path = self.resolve_path(path, db)
+            missing = self._object_missing_note(path, db)
+            if missing:
+                return missing
             return f'метод не найден: {path} ({code_name}) :: {name}'
         head = f'{row[0]} {row[1]}({row[2]})' + (' Экспорт' if row[6] else '')
         parts = [head]
@@ -3367,7 +3411,11 @@ class McpServer:
         """Фрагмент тела метода вокруг вхождения match + маркеры точки вставки."""
         row = self._method_row(path, code_name, name, db)
         if not row:
-            return (f'метод не найден: {self.resolve_path(path, db)} '
+            rpath = self.resolve_path(path, db)
+            missing = self._object_missing_note(rpath, db)
+            if missing:
+                return missing
+            return (f'метод не найден: {rpath} '
                     f'({code_name}) :: {name}')
         lines = (row[5] or '').splitlines()
         start = row[8] or 1
@@ -3430,7 +3478,11 @@ class McpServer:
         from .bsl_analyzer import analyze, caller_context, split_params
         row = self._method_row(path, code_name, name, db)
         if not row:
-            return (f'метод не найден: {self.resolve_path(path, db)} '
+            rpath = self.resolve_path(path, db)
+            missing = self._object_missing_note(rpath, db)
+            if missing:
+                return missing
+            return (f'метод не найден: {rpath} '
                     f'({code_name}) :: {name}')
         in_scope, outside, rejected = self.resolve_scope(db, scope, expect)
         kind, mname, sig, dirs, _desc, body, exp, mod_ctx, start = row
@@ -3750,6 +3802,9 @@ class McpServer:
 
     def skd_of(self, path, db=None):
         path = self.resolve_path(path, db)
+        missing = self._object_missing_note(path, db)
+        if missing:
+            return missing
         rows = self.conn(db).execute(
             'SELECT q.query FROM skd_query q JOIN meta_object o '
             'ON o.id=q.object_id WHERE o.path=? ORDER BY q.ord',

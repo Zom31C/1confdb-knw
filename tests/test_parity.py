@@ -437,9 +437,15 @@ def make_xml_dump(base):
        '\t\t<Properties><Name>Перечисление1</Name></Properties>\n'
        '\t\t<ChildObjects>\n'
        '\t\t\t<EnumValue uuid="%s"><Properties>'
-       '<Name>Значение1</Name></Properties></EnumValue>\n'
+       '<Name>Значение1</Name>'
+        '<Synonym><v8:item><v8:lang>ru</v8:lang>'
+        '<v8:content>Значение1</v8:content></v8:item></Synonym>'
+        '</Properties></EnumValue>\n'
        '\t\t\t<EnumValue uuid="%s"><Properties>'
-       '<Name>Значение2</Name></Properties></EnumValue>\n'
+       '<Name>Значение2</Name>'
+        '<Synonym><v8:item><v8:lang>ru</v8:lang>'
+        '<v8:content>Значение2</v8:content></v8:item></Synonym>'
+        '</Properties></EnumValue>\n'
        '\t\t</ChildObjects>\n'
        '\t</Enum>\n'
        '</MetaDataObject>' % (NS, ENUM_UUID, EV1_UUID, EV2_UUID))
@@ -561,7 +567,7 @@ QUERIES = {
         JOIN meta_object o ON o.id = m.object_id
         ORDER BY o.path, m.code_name, me.ord""",
     'enum_value': """
-        SELECT o.path, e.ord, e.name
+        SELECT o.path, e.ord, e.name, e.synonym
         FROM enum_value e JOIN meta_object o ON o.id = e.object_id
         ORDER BY o.path, e.ord""",
     'predefined': """

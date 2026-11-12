@@ -41,7 +41,7 @@ ROOT_TYPES = ('Configuration', 'ConfigurationExtension', 'ExternalDataProcessor'
 # выгрузки для инкрементального обновления), attribute_ref.target_path
 # (цель ссылки по пути — позволяет переразрешить ссылку, когда объект
 # добавлен позже ссылки) (2026-11-07).
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 RE_UUID = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.I)
 
@@ -202,7 +202,8 @@ class _TypeResolver:
         self.links = []
 
     def describe(self, desc):
-        """Тип реквизита: простая форма ["Pattern", T] или составная ["0", N, T1..TN].
+        """Тип реквизита: простая форма ["Pattern", T], составная под обёрткой
+        ["Pattern", T1, T2, …] или составная ["0", N, T1..TN].
 
         Параллельно заполняет self.links — список (uuid, путь или None) для
         таблицы attribute_ref: зависимость реквизита от объектов метаданных.
@@ -212,7 +213,21 @@ class _TypeResolver:
             return None
         head = str(desc[0]).strip('"')
         if head == 'Pattern':
-            text = self._single(desc[1]) if len(desc) > 1 else None
+            if len(desc) <= 1:
+                text = None
+            elif len(desc) == 2:
+                text = self._single(desc[1])
+            else:
+                # составной тип под обёрткой Pattern: ["Pattern", T1, T2, …].
+                # Раньше читался только desc[1] — первый член, остальные типы
+                # терялись (пробел из отзыва 2026-11-12: ДокументОснование
+                # показывал один документ вместо 28). Разбираем все члены.
+                parts = []
+                for entry in desc[1:]:
+                    part = self._composite_entry(entry)
+                    if part and part not in parts:
+                        parts.append(part)
+                text = ' | '.join(parts) or None
         elif head == '0' and len(desc) > 1 and str(desc[1]).isdigit():
             parts = []
             for entry in desc[2:]:
@@ -292,6 +307,13 @@ class _TypeResolver:
             if members:
                 return f'ОпределяемыйТип: {path} ({" | ".join(members)})'
             return f'ОпределяемыйТип: {path}'
+        # прямое разрешение по uuid объекта (включая алиасы заголовка): ссылки
+        # новых платформ адресуют объект uuid'ом, которого нет ни в таблице .10,
+        # ни среди определяемых типов, но который есть в uuid_to_path
+        path = self.uuid_to_path.get(uuid)
+        if path is not None and self._is_ref_target(path):
+            self.links.append((uuid, path))
+            return f'Ссылка: {path}'
         # uuid не соответствует ни одному объекту и отсутствует в таблице .10:
         # обобщённый тип платформы (ЛюбаяСсылка, Характеристика) — конкретной
         # цели у него нет и в конфигурации она не описана
@@ -521,11 +543,50 @@ def tabular_field_counts(header_json):
     return counts
 
 
-def _extract_enum_values(header):
-    """Имена значений перечисления в порядке объявления.
+# канонический uuid блока значений перечисления в заголовке объекта
+ENUM_VALUES_KEY = 'bee0a08c-07eb-40c0-8544-5c364c171465'
 
-    Запись значения — обёртка [[0, CORE], x], где CORE как у реквизита:
-    ["3", [..uuid..], ИМЯ, ..].
+
+def enum_value_count(header_json):
+    """Объявленное число значений перечисления из meta_object.header_json.
+
+    Блок значений — [ENUM_VALUES_KEY, '<count>', [записи]]; счётчик доступен
+    в готовой базе без переизвлечения и позволяет отличить «значений не
+    объявлено» от «значения не извлечены». None — блок не найден/не разобран
+    (в т.ч. у dump-баз, где header_json хранит XML, а не скобкофайл).
+    """
+    try:
+        header = json.loads(header_json)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(header, dict):
+        return None
+    found = []
+
+    def walk(node):
+        if isinstance(node, list):
+            if (len(node) >= 2 and node[0] == ENUM_VALUES_KEY
+                    and isinstance(node[1], str) and node[1].isdigit()):
+                found.append(int(node[1]))
+            for child in node:
+                walk(child)
+        elif isinstance(node, dict):
+            for child in node.values():
+                walk(child)
+
+    walk(header.get('header'))
+    return found[0] if found else None
+
+
+def _extract_enum_values(header):
+    """Значения перечисления в порядке объявления: список (имя, синоним).
+
+    Запись значения — обёртка [["0", CORE], x], где CORE как у реквизита:
+    [МАРКЕР, [флаг, флаг, uuid], ИМЯ, СИНОНИМ, …]. МАРКЕР записи значения
+    бывает '0', '1', '2' или '3' — это варианты формата, а не тип объекта;
+    раньше принимался только '3', из-за чего перечисления с маркерами
+    '0'/'1'/'2' оставались без значений (пробел из отзыва 2026-11-12).
+    Имя — CORE[2], синоним — CORE[3]; синоним None, если не задан.
     """
     result = []
     seen = set()
@@ -539,17 +600,41 @@ def _extract_enum_values(header):
             return
         if (len(node) == 2 and isinstance(node[0], list) and len(node[0]) >= 2
                 and str(node[0][0]) == '0' and isinstance(node[0][1], list)
-                and len(node[0][1]) >= 3 and str(node[0][1][0]) == '3'
+                and len(node[0][1]) >= 3
+                and str(node[0][1][0]) in ('0', '1', '2', '3')
                 and isinstance(node[0][1][2], str)):
-            name = _unquote(node[0][1][2])
+            core = node[0][1]
+            name = _unquote(core[2])
             if name and name not in seen:
                 seen.add(name)
-                result.append(name)
+                result.append((name, _enum_synonym(core)))
         for child in node:
             walk(child)
 
     walk(header.get('header'))
     return result
+
+
+def _enum_synonym(core):
+    """Синоним значения перечисления из CORE[3] = [N, 'ru', 'Строка', …].
+
+    Возвращает строку на языке ru, либо на первом доступном языке; None,
+    если синоним не задан. Пустая строка трактуется как отсутствие синонима.
+    """
+    if len(core) < 4 or not isinstance(core[3], list):
+        return None
+    sl = core[3]
+    fallback = None
+    for i in range(1, len(sl) - 1, 2):
+        lang = _unquote(sl[i])
+        content = _unquote(sl[i + 1])
+        if not isinstance(content, str) or not content:
+            continue
+        if lang == 'ru':
+            return content
+        if fallback is None:
+            fallback = content
+    return fallback
 
 
 def _predef_columns(schema):
@@ -906,7 +991,8 @@ CREATE TABLE enum_value (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     object_id INTEGER NOT NULL REFERENCES meta_object(id) ON DELETE CASCADE,
     ord INTEGER NOT NULL,
-    name TEXT NOT NULL
+    name TEXT NOT NULL,
+    synonym TEXT
 );
 CREATE INDEX ix_enum_value_object ON enum_value(object_id, ord);
 CREATE TABLE predefined (
@@ -1040,7 +1126,8 @@ INSERT_SQL = {
         'INSERT INTO meta_subobject (object_id, kind, ord, uuid, name)'
         ' VALUES (?, ?, ?, ?, ?)',
     'enum_value':
-        'INSERT INTO enum_value (object_id, ord, name) VALUES (?, ?, ?)',
+        'INSERT INTO enum_value (object_id, ord, name, synonym)'
+        ' VALUES (?, ?, ?, ?)',
     'predefined':
         'INSERT INTO predefined (object_id, ord, parent_ord, uuid, name,'
         ' code, display) VALUES (?, ?, ?, ?, ?, ?, ?)',
@@ -1223,6 +1310,33 @@ def _uuid_first_index(header):
     for pos, value in enumerate(flat):
         index.setdefault(value, pos)
     return index
+
+
+def _header_alias_uuids(header):
+    """Ведущие скалярные uuid записи заголовка header[0][1] (до первого списка).
+
+    Это собственные идентификаторы объекта в разных пространствах (внутренний,
+    ссылочный, прав и т.д.). Ссылки реквизитов конфигураций новых платформ
+    адресуют объект НЕ по uuid из .id.json, а по одному из этих uuid (у
+    Catalog/Document — rec[3], у Enum — rec[1], …). Без них как alias ссылки
+    не разрешаются: на ЗУП_РФ так оставались неразрешёнными 94% ссылок.
+    Нулевой uuid-заполнитель пропускаем. Коллизий между объектами нет
+    (проверено на ЗУП/БП/УНФ: каждый алиас принадлежит ровно одному объекту).
+    """
+    try:
+        rec = header['header'][0][1]
+    except (KeyError, IndexError, TypeError):
+        return []
+    if not isinstance(rec, list):
+        return []
+    out = []
+    for x in rec[1:]:
+        if isinstance(x, str) and RE_UUID.match(x):
+            if x != '00000000-0000-0000-0000-000000000000':
+                out.append(x)
+        else:
+            break
+    return out
 
 
 def _common_module_context(header):
@@ -1729,6 +1843,13 @@ def write_db(dump_dir, db_path, *, source_file=None, source_sha256=None,
         rel_to_id = {rel: dir_to_id[rel] for rel in infos}
         uuid_to_id = {i['uuid']: rel_to_id[r] for r, i in infos.items() if i['uuid']}
         uuid_to_path = {i['uuid']: r for r, i in infos.items() if i['uuid']}
+        # алиасы: ссылочные uuid новых платформ — ведущие uuid заголовка объекта
+        # (см. _header_alias_uuids). setdefault — первичный uuid (.id.json) важнее;
+        # коллизий между объектами нет, проверено на реальных конфигурациях
+        for rel, info in infos.items():
+            for alias in _header_alias_uuids(info['header']):
+                uuid_to_path.setdefault(alias, rel)
+                uuid_to_id.setdefault(alias, rel_to_id[rel])
 
         # реквизиты объектов (имя + тип) в порядке объявления
         name2paths = {}
@@ -1780,8 +1901,9 @@ def write_db(dump_dir, db_path, *, source_file=None, source_sha256=None,
                 subobject_params.append(
                     (obj_id, kind, len(subobject_params), sub_uuid, sub_name))
             if info['stem'] == 'Enum':
-                for ord_no, name in enumerate(_extract_enum_values(info['header'])):
-                    enum_params.append((obj_id, ord_no, name))
+                for ord_no, (name, syn) in enumerate(
+                        _extract_enum_values(info['header'])):
+                    enum_params.append((obj_id, ord_no, name, syn))
             elif info['stem'] == 'CommonAttribute':
                 for target in _extract_common_targets(info['header'], uuid_to_id, obj_id):
                     common_params.append((obj_id, target))

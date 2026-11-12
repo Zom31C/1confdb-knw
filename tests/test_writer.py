@@ -707,9 +707,10 @@ def test_write_db(tmp_path):
         [('КорневойЭлемент', 'xs:string', 'localName=root')]
 
     # значения перечислений, предопределённые, привязки общих реквизитов
-    assert [r[0] for r in q(
-        'SELECT e.name FROM enum_value e JOIN meta_object o ON o.id=e.object_id'
-        " WHERE o.path='Enum/ТестПеречисление' ORDER BY e.ord")] == ['Значение1', 'Значение2']
+    assert q('SELECT e.name, e.synonym FROM enum_value e JOIN meta_object o '
+             "ON o.id=e.object_id WHERE o.path='Enum/ТестПеречисление' "
+             'ORDER BY e.ord').fetchall() == \
+        [('Значение1', 'Значение1'), ('Значение2', 'Значение2')]
     assert q("SELECT name, code, display FROM predefined WHERE name='ПредЗначение'"
              ).fetchone() == ('ПредЗначение', '001', 'Предопределенное значение')
     # корневой узел «Элементы» элементом не является, но хранится: parent_ord NULL,
@@ -888,6 +889,67 @@ def test_write_db_without_fts_and_late_build(tmp_path):
         total += shard.execute(f'SELECT COUNT(*) FROM {FTS_TABLE}').fetchone()[0]
         shard.close()
     assert total == methods
+
+
+# -- значения перечислений: маркеры {0,1,2,3}, синонимы, счётчик -------------
+
+def test_enum_values_all_markers_and_synonyms():
+    from confdb.db.writer import _extract_enum_values
+
+    def rec(marker, name, syn):
+        core = [marker, ['1', '0', 'uuid'], f'"{name}"',
+                ['1', '"ru"', f'"{syn}"'], '""']
+        return [['0', core], '0']
+
+    header = {'header': [rec('0', 'А', 'Альфа'), rec('1', 'Б', 'Бета'),
+                         rec('2', 'В', 'Гамма'), rec('3', 'Г', 'Дельта')]}
+    assert _extract_enum_values(header) == [
+        ('А', 'Альфа'), ('Б', 'Бета'), ('В', 'Гамма'), ('Г', 'Дельта')]
+
+
+def test_enum_synonym_lang_priority_and_absent():
+    from confdb.db.writer import _extract_enum_values
+    core_ru = ['3', ['1', '0', 'u'], '"Имя"',
+               ['2', '"en"', '"Name"', '"ru"', '"Имя-рус"'], '""']
+    core_none = ['0', ['1', '0', 'u'], '"Имя2"', '""', '""']
+    header = {'header': [[['0', core_ru], '0'], [['0', core_none], '0']]}
+    assert _extract_enum_values(header) == [('Имя', 'Имя-рус'), ('Имя2', None)]
+
+
+def test_enum_value_count():
+    from confdb.db.writer import ENUM_VALUES_KEY, enum_value_count
+    assert enum_value_count(json.dumps(
+        {'header': [[ENUM_VALUES_KEY, '3', []]]})) == 3
+    assert enum_value_count(json.dumps(
+        {'header': [[ENUM_VALUES_KEY, '0', []]]})) == 0
+    assert enum_value_count(json.dumps({'header': []})) is None
+    assert enum_value_count('<xml/>') is None  # dump-база: header_json — XML
+
+
+def test_header_alias_uuids():
+    from confdb.db.writer import _header_alias_uuids
+    u1 = '11111111-1111-1111-1111-111111111111'
+    u2 = '22222222-2222-2222-2222-222222222222'
+    u3 = '33333333-3333-3333-3333-333333333333'
+    header = {'header': [['1', ['40', u1, u2, u3, ['0', 'core'], '0',
+                                '00000000-0000-0000-0000-000000000000']]]}
+    assert _header_alias_uuids(header) == [u1, u2, u3]
+    assert _header_alias_uuids({}) == []
+    assert _header_alias_uuids({'header': [['1', 'not-a-list']]}) == []
+
+
+def test_composite_pattern_and_alias_resolution():
+    from confdb.db.writer import _TypeResolver
+    ua = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+    ub = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'
+    # ссылки адресуют объект алиасом заголовка, первичного uuid в карте нет
+    uuid_to_path = {ua: 'Document/Док1', ub: 'Document/Док2'}
+    r = _TypeResolver(uuid_to_path, {}, {}, {}, {})
+    desc = ['"Pattern"', ['"#"', ua], ['"#"', ub]]
+    assert r.describe(desc) == 'Ссылка: Document/Док1 | Ссылка: Document/Док2'
+    assert r.links == [(ua, 'Document/Док1'), (ub, 'Document/Док2')]
+    # простой Pattern (один член) по-прежнему работает
+    assert r.describe(['"Pattern"', ['"#"', ua]]) == 'Ссылка: Document/Док1'
 
 
 def test_write_db_drops_stale_fts_shards(tmp_path):

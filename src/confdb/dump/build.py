@@ -256,7 +256,7 @@ class Builder:
         if enum_values:
             conn.executemany(
                 W.INSERT_SQL['enum_value'],
-                [(obj_id, i, n) for i, n in enumerate(enum_values)])
+                [(obj_id, i, n, s) for i, (n, s) in enumerate(enum_values)])
             self.stats['enum_values'] += len(enum_values)
         if subobjects:
             conn.executemany(

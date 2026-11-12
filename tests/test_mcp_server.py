@@ -2537,6 +2537,75 @@ def test_primer_explicit_target_rule():
     assert 'MORE THAN ONE base' in mcp_server.PRIMER
 
 
+# -- полнота метаданных: значения перечислений и диагностика фильтра path ----
+
+def test_object_card_enum_values(tmp_path_factory):
+    """object_card печатает значения перечисления (раньше не печатал вовсе)."""
+    server = _server(tmp_path_factory)
+    text = server.object_card('Enum/ТестПеречисление')
+    assert 'Значения (2)' in text
+    assert 'Значение1' in text and 'Значение2' in text
+    server.close_all()
+
+
+class _FakeRows:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def fetchall(self):
+        return self._rows
+
+
+def test_enum_card_lines_synonym_and_empty_states():
+    """Синоним показывается, когда отличается от имени; «нет» ≠ «не извлечено»."""
+    import json
+
+    from confdb.db.writer import ENUM_VALUES_KEY
+    rows = [('Работа', 'Работа'), ('Отпуск', 'Основной отпуск')]
+
+    def q_full(sql, args=()):
+        return _FakeRows(rows)
+
+    assert McpServer._enum_card_lines(q_full, 1, None) == \
+        ['Значения (2): Работа; Отпуск (Основной отпуск)']
+
+    def q_empty(sql, args=()):
+        return _FakeRows([])
+
+    hj0 = json.dumps({'header': [[ENUM_VALUES_KEY, '0', []]]})
+    assert McpServer._enum_card_lines(q_empty, 1, hj0) == \
+        ['Значения: не объявлено (перечисление пустое)']
+    hj5 = json.dumps({'header': [[ENUM_VALUES_KEY, '5', []]]})
+    assert 'не извлечено (объявлено 5)' in \
+        McpServer._enum_card_lines(q_empty, 1, hj5)[0]
+
+
+def test_refs_of_missing_object_diagnostic(tmp_path_factory):
+    """Категория вместо пути объекта — «объект не найден», а не пустая выдача."""
+    server = _server(tmp_path_factory)
+    text = server.refs_of('Документ')
+    assert 'объект не найден' in text
+    assert 'find_objects' in text
+    # существующий объект по-прежнему даёт обычные секции, а не отказ
+    ok = server.refs_of('Catalog/Справочник1')
+    assert 'объект не найден' not in ok
+    assert 'Ссылается на' in ok
+    server.close_all()
+
+
+def test_skd_of_missing_object_diagnostic(tmp_path_factory):
+    server = _server(tmp_path_factory)
+    assert 'объект не найден' in server.skd_of('Документ')
+    server.close_all()
+
+
+def test_get_method_missing_object_diagnostic(tmp_path_factory):
+    server = _server(tmp_path_factory)
+    text = server.get_method('Документ', 'obj', 'Несуществующий')
+    assert 'объект не найден' in text
+    server.close_all()
+
+
 # -- потоки: соединения шардов FTS, общее соединение, temp._fts_hits ---------
 
 
