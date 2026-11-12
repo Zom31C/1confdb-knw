@@ -39,6 +39,26 @@ def _call(server, tool, **args):
     return resp['result']
 
 
+def _typed_db(tmp_path, name, root_type):
+    """Минимальная база confdb с заданным типом корневого объекта (для выбора
+    активной базы в группе): meta_object + source.root_type, своя ревизия."""
+    p = str(tmp_path / name)
+    conn = sqlite3.connect(p)
+    conn.execute('CREATE TABLE meta_object(id INTEGER PRIMARY KEY, path TEXT)')
+    conn.execute('CREATE TABLE module(id INTEGER PRIMARY KEY, object_id INTEGER)')
+    conn.execute('CREATE TABLE method(id INTEGER PRIMARY KEY, module_id INTEGER)')
+    conn.execute('CREATE TABLE source(id INTEGER PRIMARY KEY, file TEXT,'
+                 ' root_type TEXT, root_name TEXT)')
+    ext = {'Configuration': '.cf', 'ConfigurationExtension': '.cfe',
+           'ExternalDataProcessor': '.epf'}.get(root_type, '.cf')
+    conn.execute('INSERT INTO source(file, root_type, root_name) VALUES (?,?,?)',
+                 (name + ext, root_type, name))
+    conn.execute(f'PRAGMA user_version={SCHEMA_VERSION}')
+    conn.commit()
+    conn.close()
+    return p
+
+
 def _stamp(db, revision):
     """Перезаписывает ревизию схемы базы: writer штампует её при создании."""
     conn = sqlite3.connect(db)
@@ -2463,6 +2483,58 @@ def test_format_diagnostic_returns_structured_error():
     diag_locked = mcp_server.format_diagnostic('sql', 'test_db', locked_err)
     assert '[DB_LOCKED]' in diag_locked
     assert 'повторите запрос' in diag_locked
+
+
+# -- активная база в группе: конфигурация (.cf), а не расширение --------------
+
+def test_group_active_prefers_configuration(tmp_path):
+    """В группе активной становится конфигурация (.cf), даже если указана не первой."""
+    cf = _typed_db(tmp_path, 'Конфигурация', 'Configuration')
+    cfe = _typed_db(tmp_path, 'Расширение', 'ConfigurationExtension')
+    # расширение указано ПЕРВЫМ — активной всё равно должна быть конфигурация
+    server = McpServer(groups=[('БП', [cfe, cf])])
+    assert server.dbs[server.active]['root_type'] == 'Configuration'
+    assert server.active == 'Конфигурация'
+    server.close_all()
+
+
+def test_group_active_single_base(tmp_path):
+    """Если база в группе одна — активна она (любого типа)."""
+    cfe = _typed_db(tmp_path, 'Расширение', 'ConfigurationExtension')
+    server = McpServer(groups=[('ТолькоРасш', [cfe])])
+    assert server.active == 'Расширение'
+    server.close_all()
+
+
+def test_use_group_prefers_configuration(tmp_path):
+    """group_use активирует конфигурацию группы, а не её первую базу."""
+    cf = _typed_db(tmp_path, 'Конфигурация', 'Configuration')
+    cfe = _typed_db(tmp_path, 'Расширение', 'ConfigurationExtension')
+    server = McpServer(groups=[('БП', [cfe, cf])])
+    server.create_group('Пустая')
+    server.use_group('Пустая')
+    server.use_group('БП')
+    assert server.active == 'Конфигурация'
+    server.close_all()
+
+
+def test_db_list_hints_explicit_target_when_multiple(tmp_path_factory):
+    """При нескольких базах db_list напоминает указывать db/group явно."""
+    db1 = _make_db(tmp_path_factory, 'первая.sqlite')
+    db2 = _make_db(tmp_path_factory, 'вторая.sqlite')
+    server = McpServer([db1, db2])
+    assert 'указывайте цель явно' in server.db_list()
+    server.close_all()
+    # одна база — напоминания нет
+    server1 = McpServer([db1])
+    assert 'указывайте цель явно' not in server1.db_list()
+    server1.close_all()
+
+
+def test_primer_explicit_target_rule():
+    """PRIMER велит явно указывать базу при нескольких базах/группах."""
+    assert 'EXPLICIT TARGET RULE' in mcp_server.PRIMER
+    assert 'MORE THAN ONE base' in mcp_server.PRIMER
 
 
 # -- потоки: соединения шардов FTS, общее соединение, temp._fts_hits ---------

@@ -482,6 +482,7 @@ PLATFORM SYNTAX HELPER: when the server runs with --syntax-db, three extra tools
 MULTIPLE DATABASES: the server can hold several knowledge bases at once — typically the MAIN configuration plus extensions/data processors (.cfe/.epf extracted into their own .db files). Each open base has an alias. All tools query the ACTIVE base; to query a specific base without switching, pass its alias as the db parameter (e.g. find_objects(mask=…, db='расш_интеграция')). Management tools: db_list (what is open, which is active), db_open (open another base file while the server runs — the path comes from the user), db_use (switch the active base), db_close. An extension usually adds/overrides objects of the main configuration — if something is not found in one base, check the other. Special db value '*': run a tool on every open base at once (the answer is sectioned per base) — one call to compare the main configuration with all extensions.
 
 CONFIGURATION GROUPS: a group bundles related databases (main configuration + extensions + data processors) as a single unit. SEVERAL groups can be open at the same time — typically two different configurations, or two releases of the same one; group_list shows them all and marks the active one. To query ONE group separately, pass group=<name> to any data tool: it runs on every database of that group and sections the answer per database. group='*' runs the tool on every group at once, keeping the groups apart in the answer. WITHOUT the group parameter only the ACTIVE base is queried — NOT the whole active group — so when several groups are open always name the group you mean; db='*' ignores the division and mixes every open base, so prefer group='*' for a per-group picture. Priority: explicit group > explicit db > the active base. group_use switches the active group and makes its first base the active one. Management tools: group_create (create an empty group), group_add_db (add an open database to a group), group_remove_db (remove a database from a group — the database itself stays open), group_list (all groups with their databases), group_use (switch the active group), group_close (delete a group — databases are NOT closed). compare_object and extension_diff take explicit aliases (db_left/db_right, extension_db/base_db) and know nothing about groups — pick the aliases with db_list/group_list.
+EXPLICIT TARGET RULE: when MORE THAN ONE base OR more than one group is open, ALWAYS name the target explicitly in every data tool — db=<alias> for one base, group=<name> for one group, db='*' / group='*' for all of them. Do NOT rely on the active base: it is only a convenience default for a SINGLE configuration (within a group the active base is the main .cf configuration, not an extension) and it never covers the other open bases or groups. db_list / group_list show what is open — when several are open, read the alias/group from there and pass it. Only when exactly one base is open may you omit db/group.
 A base that cannot answer does NOT sink a fan-out call (group=<name>, group='*', db='*'): its own section carries 'ошибка [КАТЕГОРИЯ]: …' — DB_LOCKED is transient, the same call may pass on a retry — while the other bases answer normally, and the answer ends with 'баз с ошибкой N из M: <aliases>' so a partial answer is never read as a complete one. The call is marked isError only when EVERY base refused; then the per-base sections are still there to show what broke where.
 
 DATABASE IDENTIFIER: every tool response includes a header line identifying the source database and, when the base belongs to a group, the group: '=== группа <имя> / база <алиас> (<путь>) ===' (a base in several groups prints all of them: '=== группы A, B / база …'). Read it before trusting a result: it says which configuration the answer came from. This lets you compare configurations (e.g. standard vs customized) or understand which base contains a method (main configuration vs extension). Use db='*' to query all bases at once and compare results side-by-side.
@@ -749,6 +750,15 @@ class McpServer:
             alias = self._make_alias(path)
         # ревизия схемы: 0 у баз, собранных извлекателем до появления штампа
         schema = conn.execute('PRAGMA user_version').fetchone()[0]
+        # тип корневого объекта: Configuration (.cf) / ConfigurationExtension
+        # (.cfe) / ExternalDataProcessor (.epf) … — чтобы активной в группе
+        # делать именно конфигурацию, а не расширение/обработку
+        try:
+            row = conn.execute(
+                'SELECT root_type FROM source ORDER BY id LIMIT 1').fetchone()
+            root_type = row[0] if row else None
+        except sqlite3.Error:
+            root_type = None
         # data_version меняется при каждом чужом COMMIT — основа hot reload:
         # инкрементальное обновление базы из выгрузки (dump.update_db, WAL)
         # подхватывается живым сервером без перезапуска
@@ -758,7 +768,7 @@ class McpServer:
             data_version = None
         self.dbs[alias] = {'path': path, 'conn': conn, 'ctx': None, 'fts': fts,
                            'fts_shards': fts_shards, 'fts_conn': None,
-                           'schema': int(schema or 0),
+                           'schema': int(schema or 0), 'root_type': root_type,
                            'data_version': data_version}
         if activate or self.active is None:
             self.active = alias
@@ -845,6 +855,22 @@ class McpServer:
         """Отказ для базы чужой ревизии схемы; None — если база своей ревизии."""
         return schema_note(self.schema_of(alias))
 
+    def _preferred_active(self, aliases):
+        """Какой базе быть активной в группе: конфигурации (.cf), а не расширению.
+
+        Активная база — это ответ по умолчанию для запросов без db/group.
+        В группе «конфигурация + расширения/обработки» основной должна быть
+        сама конфигурация (root_type Configuration), даже если она указана не
+        первой. Если конфигурации в группе нет — первая база.
+        """
+        opened = [a for a in aliases if a in self.dbs]
+        if not opened:
+            return None
+        for a in opened:
+            if self.dbs[a].get('root_type') == 'Configuration':
+                return a
+        return opened[0]
+
     # -- группы баз ----------------------------------------------------------
     def create_group(self, name):
         """Создаёт пустую группу баз. Имя группы уникально (регистр не важен)."""
@@ -871,6 +897,13 @@ class McpServer:
         name = str(name).strip() if name else ''
         if not name:
             raise UserError('имя группы не может быть пустым')
+        # первой группе (активной группы ещё нет) достаётся активная группа;
+        # фиксируем ДО create_group, который сам выставляет active_group
+        first_group = self.active_group is None
+        # активной базы ещё нет (старт сервера) — тогда группу открываем «с нуля»
+        # и активной делаем её конфигурацию. Если активная база уже есть
+        # (добавление группы к работающему серверу) — её не трогаем.
+        active_was_none = self.active is None
         group = next((g for g in self.groups if g.lower() == name.lower()), None)
         if group is None:
             group = self.create_group(name)
@@ -884,12 +917,14 @@ class McpServer:
             if alias not in aliases:
                 aliases.append(alias)
         self.groups[group] = aliases
-        if activate or self.active_group is None:
+        if activate or first_group:
             self.active_group = group
-        if activate and aliases:
-            self.active = aliases[0]
-        elif self.active is None and aliases:
-            self.active = aliases[0]
+        # активной делаем конфигурацию группы (.cf), а не первую открытую базу:
+        # open_db уже мог выставить active на первую базу — переопределяем.
+        # Только при явной активации либо когда активной базы ещё не было
+        # (старт); добавление группы к работающему серверу active не меняет.
+        if aliases and (activate or active_was_none):
+            self.active = self._preferred_active(aliases)
         return group, aliases, errors
 
     def drop_group(self, group_name, close_dbs=True):
@@ -965,11 +1000,13 @@ class McpServer:
         return result
 
     def use_group(self, group_name):
-        """Делает группу активной; активной базой становится её первая база.
+        """Делает группу активной; активной базой становится её конфигурация (.cf).
 
         Без параметра group инструменты работают с активной БАЗОЙ, поэтому
         переключение группы обязано переключать и её: иначе запросы «по
         умолчанию» после group_use продолжали бы ходить в прежнюю конфигурацию.
+        Активной делается конфигурация группы (root_type Configuration), а не
+        расширение/обработка — см. _preferred_active.
         """
         if not group_name or not str(group_name).strip():
             raise UserError('имя группы не может быть пустым')
@@ -980,7 +1017,7 @@ class McpServer:
         self.active_group = actual_group
         opened = [a for a in self.groups[actual_group] if a in self.dbs]
         if opened:
-            self.active = opened[0]
+            self.active = self._preferred_active(opened)
         return actual_group
 
     def close_group(self, group_name):
@@ -4217,6 +4254,10 @@ class McpServer:
                 continue
             name, meta = self.cfg_summary(alias)
             out.append(f'    {name}: {meta} (configuration_info — подробно)')
+        if len(self.dbs) > 1 or len(self.groups) > 1:
+            out.append('Открыто несколько баз/групп — указывайте цель явно: '
+                       'db=<алиас> или group=<имя> (по всем — db=\'*\'/group=\'*\'). '
+                       'Активная (*) отвечает только на запросы без db/group.')
         out.append(syntax_line)
         return 'Открытые базы (* — активная):\n' + '\n'.join(out)
 
