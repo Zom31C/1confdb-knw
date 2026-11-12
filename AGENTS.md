@@ -38,7 +38,7 @@ file and NOTICE.md — the only documentation shipped to `dist\`.
   3.10, so green tests do NOT prove 3.9 compatibility — check new syntax by eye.
 - Windows-oriented: `.bat` wrappers in repo root, venv in `.venv`. Comments, docstrings and
   user-facing text are in **Russian**.
-- Package version is `<major>.<schema revision>.<tool patch>` — now **1.9.0** (schema rev 9).
+- Package version is `<major>.<schema revision>.<tool patch>` — now **1.9.1** (schema rev 9).
   User rule (2026-11-08): the SECOND digit follows the DB schema revision
   (`writer.SCHEMA_VERSION` = `PRAGMA user_version` of built bases) and resets the last digit
   to 0; the LAST digit increments on tool improvements/fixes (MCP/CLI). Guards:
@@ -168,7 +168,7 @@ confdb.bat check out.db                               :: validate all SKD querie
 confdb.bat fts out.db --workers 8                      :: body index later, as sidecar shards
 confdb.bat hbk unpack <file.hbk> -o DIR                :: platform help unpacker (shcntx_ru.hbk)
 confdb.bat hbk build DIR --db syntax.db                :: syntax-helper DB; check/search/show/tree/repl
-1confdb-knw.bat out.db [--port 8765] [--group УНФ=unf.db --group БП=bp.db] [--syntax-db syntax.db]
+1confdb-knw out.db [--port 8765] [--group УНФ=unf.db --group БП=bp.db] [--syntax-db syntax.db]
 confdb-ui.bat                                         :: console UI (TUI) over ui_core
 confdb-web.bat [--port 8766] [--no-browser]           :: web UI (browser) over the SAME ui_core
 .venv\Scripts\python.exe -m compileall -q src\confdb  :: static check

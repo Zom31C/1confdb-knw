@@ -36,5 +36,6 @@ echo.
 echo Done. Usage:
 echo   confdb.bat extract file.cf --db out.sqlite [--dump dir]
 echo   confdb-ui.bat              text console interface
-echo   1confdb-knw.bat out.db     MCP server for LLM clients
+echo   confdb-web.bat             web interface (browser)
+echo   1confdb-knw out.db         MCP server for LLM clients
 endlocal

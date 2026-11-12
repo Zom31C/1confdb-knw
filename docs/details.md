@@ -203,18 +203,18 @@ confdb.bat update cf\БП_РФ --db bp.db --fts      :: пересобрать F
 
 ```bat
 :: сервер знаний по конфигурации 1С и BSL; stdio (JSON-RPC, read-only)
-1confdb-knw.bat out.db
+1confdb-knw out.db
 :: то же через CLI: confdb 1confdb-knw out.db
 :: несколько баз сразу: основная конфигурация + расширения/обработки
-1confdb-knw.bat main.db extension.db processor.db
+1confdb-knw main.db extension.db processor.db
 :: несколько групп конфигураций одновременно — повтор флага добавляет базу
 :: в ту же группу, а группы остаются раздельными (запрос к одной — group=<имя>)
-1confdb-knw.bat --group УНФ=unf.db --group УНФ=unf_ext.cfe.db --group БП=bp.db
+1confdb-knw --group УНФ=unf.db --group УНФ=unf_ext.cfe.db --group БП=bp.db
 :: + синтакс-помощник платформы (документация встроенного языка 1С)
-1confdb-knw.bat out.db --syntax-db hbk\syntax.db
+1confdb-knw out.db --syntax-db hbk\syntax.db
 ```
 
-Путь к базе можно не указывать: `1confdb-knw.bat` без аргумента берёт
+Путь к базе можно не указывать: `1confdb-knw` без аргумента берёт
 `last_db` из `~/.confdb/config.json`, а при его отсутствии сам ищет
 `*.db`/`*.sqlite` — в текущем каталоге, `db/` и `_out/` (и в корне
 установки при запуске из venv). Одна база — запускается; несколько —
@@ -223,7 +223,7 @@ confdb.bat update cf\БП_РФ --db bp.db --fts      :: пересобрать F
 сразу «Файл базы не найден» (код 2), без падения на первом запросе.
 Свежая установка с базой, привезённой с другого компьютера, работает
 без ручной правки конфига: достаточно положить файл в `db/` рядом
-с `1confdb-knw.bat`.
+с `1confdb-knw`.
 
 41 инструмент: `find_objects`, `object_card` (паспорт объекта: реквизиты,
 табличные части, модули, формы и команды, ссылки; у регистров — измерения,
@@ -318,7 +318,7 @@ SELECT), `syntax_search` / `syntax_card` / `syntax_children` (синтакс-п�
 confdb extract main.cf --db main.db
 confdb extract ext.cfe --db ext.db
 confdb extract proc.epf --db proc.db
-1confdb-knw.bat main.db ext.db proc.db
+1confdb-knw main.db ext.db proc.db
 ```
 
 — после чего LLM видит метаданные и код всех трёх и может, например,
@@ -356,7 +356,7 @@ confdb extract proc.epf --db proc.db
 и деление при этом сохраняется: сервер знает, какая база в какой группе,
 и печатает это в `db_list`, в `group_list` и в заголовке каждого ответа.
 
-- запуск с группами: `1confdb-knw.bat --group УНФ=unf.db --group УНФ=unf_ext.db
+- запуск с группами: `1confdb-knw --group УНФ=unf.db --group УНФ=unf_ext.db
   --group БП=bp.db` — повтор флага добавляет базу в ту же группу, несколько
   путей можно перечислить через `;`. Первая группа становится активной, а её
   первая база — активной базой;
@@ -410,7 +410,7 @@ confdb extract proc.epf --db proc.db
 legacy SSE для старых клиентов: `GET /sse` + `POST /messages`):
 
 ```bat
-1confdb-knw.bat out.db --port 8765
+1confdb-knw out.db --port 8765
 ```
 
 С другой машины подключение — через SSH-туннель:

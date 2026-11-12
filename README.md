@@ -19,7 +19,7 @@ BSL с разбором до методов, права ролей с RLS, за�
 
 ## Возможности
 
-**MCP-сервер** (`1confdb-knw.bat out.db` — stdio, `--port 8765` — HTTP):
+**MCP-сервер** (`1confdb-knw out.db` — stdio, `--port 8765` — HTTP):
 
 - объекты: `find_objects`, `object_card` (паспорт: реквизиты, ТЧ, модули,
   формы, команды, ссылки; у регистров — измерения/ресурсы/периодичность),
@@ -101,10 +101,10 @@ confdb.bat hbk unpack shcntx_ru.hbk -o extracted         :: распаковка
 confdb.bat hbk build extracted --db syntax.db            :: сборка (~25 тыс. тем)
 
 :: 3. Запустить MCP-сервер
-1confdb-knw.bat out.db                                   :: stdio
-1confdb-knw.bat out.db --port 8765                       :: HTTP
-1confdb-knw.bat --group УНФ=unf.db --group БП=bp.db      :: несколько групп баз
-1confdb-knw.bat out.db --syntax-db syntax.db             :: + синтакс-помощник
+1confdb-knw out.db                                   :: stdio
+1confdb-knw out.db --port 8765                       :: HTTP
+1confdb-knw --group УНФ=unf.db --group БП=bp.db      :: несколько групп баз
+1confdb-knw out.db --syntax-db syntax.db             :: + синтакс-помощник
 ```
 
 Конфигурация MCP-клиента (stdio, в т.ч. через SSH):
