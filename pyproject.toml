@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "confdb"
-version = "1.9.7"
+version = "1.9.8"
 description = "Экстрактор конфигурации 1С:Предприятие 8 (.cf/.cfe/.epf) в SQLite — только распаковка и разбор, на базе алгоритма v8unpack (MIT)"
 requires-python = ">=3.9"
 dependencies = []

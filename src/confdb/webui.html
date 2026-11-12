@@ -71,7 +71,7 @@
   button.sm{padding:5px 11px;font-size:13px}
   .badge{display:inline-block;padding:2px 9px;border-radius:999px;font-size:12px;font-weight:600}
   .b-current{background:#e4f6ee;color:var(--ok)} .b-outdated{background:#fdf0e2;color:var(--warn)}
-  .b-new{background:#e7eefe;color:var(--new)} .b-active{background:#e7eefe;color:var(--brand)}
+  .b-new{background:#e7eefe;color:var(--new)}
   .b-off{background:#eef1f6;color:var(--muted)}
   /* тип файла 1С: cf — конфигурация, cfe — расширение, epf — обработка, erf — отчёт */
   .t-cf{background:#e7eefe;color:#2f6df6} .t-cfe{background:#efe7fb;color:#7c4dcc}
@@ -268,9 +268,7 @@ $("#main").addEventListener("click", async e=>{
       const r=await api("/api/server/open","POST",{path}); toast("Открыта база: "+r.alias,"ok"); await refresh(true); }
     else if(id==="cfg-add-selected"){ await addSelectedGroups(); }
     else if(id==="cfg-replace"){ await applyCfg(true); }
-    else if(b.dataset.use){ await api("/api/server/use","POST",{alias:b.dataset.use}); await refresh(); }
     else if(b.dataset.close){ await api("/api/server/close","POST",{alias:b.dataset.close}); await refresh(true); }
-    else if(b.dataset.guse){ await api("/api/server/group/use","POST",{name:b.dataset.guse}); await refresh(); }
     else if(b.dataset.gclose){ await api("/api/server/group/close","POST",{name:b.dataset.gclose}); await refresh(true); }
   }catch(err){ toast(err.message,"err"); }
 });
@@ -350,15 +348,13 @@ function serverStartHtml(){
 function serverStatusHtml(sv){
   const dbs = sv.dbs.map(d=>`<tr>
       <td>${dbBadge(d.path)}</td>
-      <td>${d.active?'<span class="badge b-active">активна</span>':`<button class="btn ghost sm" data-use="${esc(d.alias)}">сделать активной</button>`}</td>
       <td><b>${esc(dbName(d.path))}</b> <span class="pill path">${esc(d.alias)}</span>${d.outdated?' <span class="badge b-outdated">устарела</span>':''}<div class="path">${esc(d.path)}</div></td>
       <td><button class="btn ghost sm" data-close="${esc(d.alias)}">закрыть</button></td></tr>`).join("")
-    || `<tr><td colspan="4" class="empty">Нет открытых баз.</td></tr>`;
+    || `<tr><td colspan="3" class="empty">Нет открытых баз.</td></tr>`;
   const groups = sv.groups.map(g=>`<tr>
-      <td>${g.active?'<span class="badge b-active">активна</span>':`<button class="btn ghost sm" data-guse="${esc(g.name)}">активировать</button>`}</td>
       <td><b>${esc(g.name)}</b><div class="muted small">${esc(g.aliases.join(", "))||"(пусто)"}</div></td>
       <td><button class="btn ghost sm" data-gclose="${esc(g.name)}">убрать</button></td></tr>`).join("")
-    || `<tr><td colspan="3" class="empty">Групп в сервере нет.</td></tr>`;
+    || `<tr><td colspan="2" class="empty">Групп в сервере нет.</td></tr>`;
   return `<h2>Сервер запущен</h2>
     <div class="row"><span class="badge b-current">работает</span>
       <code id="srv-url">${esc(sv.url)}</code>
@@ -367,8 +363,7 @@ function serverStatusHtml(sv){
       <button class="btn danger" id="srv-stop">Остановить сервер</button></div>
     <p class="hint">Конфигурация клиента: <code>{"mcpServers":{"1confdb-knw":{"url":"${esc(sv.url)}"}}}</code>. Остановка закрывает базы и освобождает файлы для пересборки.</p>
     <h3>Открытые базы</h3>
-    <p class="hint">Активная база отвечает на запросы LLM по умолчанию (без параметра db/group); к любой базе можно обратиться явно по алиасу.</p>
-    <table><thead><tr><th>Тип</th><th></th><th>База</th><th></th></tr></thead><tbody>${dbs}</tbody></table>
+    <table><thead><tr><th>Тип</th><th>База</th><th></th></tr></thead><tbody>${dbs}</tbody></table>
     <h3>Группы конфигураций</h3><table><tbody>${groups}</tbody></table>`;
 }
 function serverAddHtml(sv){
