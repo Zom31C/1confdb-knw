@@ -50,7 +50,7 @@ BSL с разбором до методов, права ролей с RLS, за�
 **Экстрактор и база знаний:**
 
 - сборка из `.cf`/`.cfe`/`.epf` и из выгрузки конфигурации в файлы — одна
-  схема (ревизия 11), значения путей/типов/`code_name` совместимы между базами
+  схема (ревизия 12), значения путей/типов/`code_name` совместимы между базами
   обоих видов, все инструменты работают с ними одинаково;
 - **инкрементальное обновление** `confdb update`: LLM или разработчик правит
   файлы выгрузки — база догоняет за секунды (гранула = объект со всем
@@ -148,10 +148,11 @@ confdb-web [--port 8766] [--no-browser]       :: веб-интерфейс в б
 
 ## База данных
 
-SQLite, ревизия схемы 11 (`PRAGMA user_version`) — сервер отвечает только на
+SQLite, ревизия схемы 12 (`PRAGMA user_version`) — сервер отвечает только на
 базы своей ревизии. Таблицы: `source`, `meta_object`/`meta_attribute`/
 `meta_tabular`, `attribute_ref`, `module`/`method`, `enum_value`, `form_attribute`/
-`form_command`/`form_event`/`form_parameter`, `object_property`, `predefined`
+`form_command`/`form_event`/`form_parameter`, `object_property`, `http_method`/
+`webservice_operation`, `predefined`
 (+`predefined_subconto`), `common_target`, `subsystem_content`, `skd_query`,
 `role_right`/`role_rls_template`/`role_rights_state`, `xdto_import`/
 `xdto_type`/`xdto_property`, `file`; у базы из выгрузки — `dump_state`/

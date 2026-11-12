@@ -316,6 +316,32 @@ def make_cf_tree(base):
     _json(os.path.join(role_dir, 'Role.id.json'), {'uuid': ROLE_UUID})
     _write(os.path.join(role_dir, 'Role.0.c1brace'), ROLE_RIGHTS_CFBRACE)
 
+    # HTTP-сервис: RootURL + URL-шаблон + метод (ревизия 12)
+    http_dir = os.path.join(base, 'HTTPService', 'Сервис1')
+    _json(os.path.join(http_dir, 'HTTPService.json'), {
+        'name': 'Сервис1', 'obj_version': '803',
+        'header': [['1', ['2', '"api"', ['core'], '0', '20'], '1',
+                    ['h0000000-0000-0000-0000-000000000001', '1',
+                     [['0', '"/version"', ['core']], '1',
+                      ['h0000000-0000-0000-0000-000000000002', '1',
+                       [['0', '"ПолучитьВерсию_GET"', '3',
+                         ['3', ['1', '0', 'u'], '"get"'], '0']]]]]]],
+    })
+    _json(os.path.join(http_dir, 'HTTPService.id.json'),
+          {'uuid': 'h0000000-0000-0000-0000-000000000000'})
+    # веб-сервис: Namespace + операция
+    ws_dir = os.path.join(base, 'WebService', 'ВебСервис1')
+    _json(os.path.join(ws_dir, 'WebService.json'), {
+        'name': 'ВебСервис1', 'obj_version': '803',
+        'header': [['1', ['4', '"http://test/ns"', ['core']], '1',
+                    ['w0000000-0000-0000-0000-000000000001', '1',
+                     [['1', ['1', ['0', '0', 'u'], '"Ping"'],
+                       ['0', '"http://www.w3.org/2001/XMLSchema"', '"string"'],
+                       '1', '1', '"ОбработатьЗапрос"', '1'], '1', []]]]],
+    })
+    _json(os.path.join(ws_dir, 'WebService.id.json'),
+          {'uuid': 'w0000000-0000-0000-0000-000000000000'})
+
 
 # --- фикстура 2: иерархическая выгрузка (вход build_db) -----------------------
 
@@ -553,6 +579,40 @@ def make_xml_dump(base):
        '\t</Role>\n'
        '</MetaDataObject>' % (NS, ROLE_UUID))
     _w(base, 'Roles/Роль1/Ext/Rights.xml', RIGHTS_XML)
+    # HTTP-сервис и веб-сервис (ревизия 12) — паритет с cf-фикстурой
+    _w(base, 'HTTPServices/Сервис1.xml',
+       '<?xml version="1.0" encoding="UTF-8"?>\n'
+       '<MetaDataObject %s version="2.20">\n'
+       '\t<HTTPService uuid="h0000000-0000-0000-0000-000000000000">\n'
+       '\t\t<Properties><Name>Сервис1</Name><RootURL>api</RootURL></Properties>\n'
+       '\t\t<ChildObjects>\n'
+       '\t\t\t<URLTemplate uuid="h0000000-0000-0000-0000-000000000001">\n'
+       '\t\t\t\t<Properties><Name>Версия</Name><Template>/version</Template></Properties>\n'
+       '\t\t\t\t<ChildObjects>\n'
+       '\t\t\t\t\t<Method uuid="h0000000-0000-0000-0000-000000000002">\n'
+       '\t\t\t\t\t\t<Properties><Name>get</Name><HTTPMethod>GET</HTTPMethod>'
+       '<Handler>ПолучитьВерсию_GET</Handler></Properties>\n'
+       '\t\t\t\t\t</Method>\n'
+       '\t\t\t\t</ChildObjects>\n'
+       '\t\t\t</URLTemplate>\n'
+       '\t\t</ChildObjects>\n'
+       '\t</HTTPService>\n'
+       '</MetaDataObject>' % NS)
+    _w(base, 'WebServices/ВебСервис1.xml',
+       '<?xml version="1.0" encoding="UTF-8"?>\n'
+       '<MetaDataObject %s version="2.20">\n'
+       '\t<WebService uuid="w0000000-0000-0000-0000-000000000000">\n'
+       '\t\t<Properties><Name>ВебСервис1</Name>'
+       '<Namespace>http://test/ns</Namespace></Properties>\n'
+       '\t\t<ChildObjects>\n'
+       '\t\t\t<Operation uuid="w0000000-0000-0000-0000-000000000001">\n'
+       '\t\t\t\t<Properties><Name>Ping</Name><ProcedureName>ОбработатьЗапрос</ProcedureName>'
+       '<XDTOReturningValueType>xs:string</XDTOReturningValueType>'
+       '<Transactioned>true</Transactioned></Properties>\n'
+       '\t\t\t</Operation>\n'
+       '\t\t</ChildObjects>\n'
+       '\t</WebService>\n'
+       '</MetaDataObject>' % NS)
 
 
 # --- сборка и сравнение -------------------------------------------------------
@@ -615,6 +675,15 @@ QUERIES = {
         SELECT o.path, f.ord, f.name, f.type_str, f.key_param
         FROM form_parameter f JOIN meta_object o ON o.id = f.form_id
         ORDER BY o.path, f.ord""",
+    'http_method': """
+        SELECT o.path, m.ord, m.url_template, m.http_method, m.handler
+        FROM http_method m JOIN meta_object o ON o.id = m.object_id
+        ORDER BY o.path, m.ord""",
+    'webservice_operation': """
+        SELECT o.path, w.ord, w.name, w.procedure_name, w.return_type,
+               w.transactioned
+        FROM webservice_operation w JOIN meta_object o ON o.id = w.object_id
+        ORDER BY o.path, w.ord""",
     'predefined': """
         SELECT o.path, p.ord, p.parent_ord, p.uuid, p.name, p.code, p.display
         FROM predefined p JOIN meta_object o ON o.id = p.object_id
@@ -694,7 +763,7 @@ def test_fixtures_produce_expected_content(bases):
     c1, c2 = bases
     for conn in (c1, c2):
         assert conn.execute(
-            'SELECT COUNT(*) FROM meta_object').fetchone()[0] == 9
+            'SELECT COUNT(*) FROM meta_object').fetchone()[0] == 11
         assert conn.execute(
             'SELECT COUNT(*) FROM module').fetchone()[0] == 4
         assert conn.execute(
@@ -703,6 +772,10 @@ def test_fixtures_produce_expected_content(bases):
             'SELECT COUNT(*) FROM skd_query').fetchone()[0] == 1
         assert conn.execute(
             'SELECT COUNT(*) FROM predefined').fetchone()[0] == 2
+        assert conn.execute(
+            'SELECT COUNT(*) FROM http_method').fetchone()[0] == 1
+        assert conn.execute(
+            'SELECT COUNT(*) FROM webservice_operation').fetchone()[0] == 1
         assert conn.execute(
             'SELECT COUNT(*) FROM attribute_ref').fetchone()[0] == 2
         # все ссылки и цели прав разрешены

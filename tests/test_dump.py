@@ -356,6 +356,89 @@ def make_dump_dir(base):
        '\t\t<AutoRecord>Deny</AutoRecord>\n'
        '\t</Item>\n'
        '</ExchangePlanContent>')
+    # документ с проводками (RegisterRecords) — ревизия 12
+    _w(base, 'Documents/Документ1.xml',
+       '<?xml version="1.0" encoding="UTF-8"?>\n'
+       '<MetaDataObject %s version="2.20">\n'
+       '\t<Document uuid="44444444-5555-6666-7777-888888888888">\n'
+       '\t\t<Properties>\n'
+       '\t\t\t<Name>Документ1</Name>\n'
+       '\t\t\t<RegisterRecords>\n'
+       '\t\t\t\t<Item>InformationRegister.РегистрСведений1</Item>\n'
+       '\t\t\t</RegisterRecords>\n'
+       '\t\t</Properties>\n'
+       '\t\t<ChildObjects/>\n'
+       '\t</Document>\n'
+       '</MetaDataObject>' % NS)
+    # HTTP-сервис: RootURL + URL-шаблон + метод
+    _w(base, 'HTTPServices/Сервис1.xml',
+       '<?xml version="1.0" encoding="UTF-8"?>\n'
+       '<MetaDataObject %s version="2.20">\n'
+       '\t<HTTPService uuid="55555555-6666-7777-8888-999999999999">\n'
+       '\t\t<Properties><Name>Сервис1</Name><RootURL>api</RootURL></Properties>\n'
+       '\t\t<ChildObjects>\n'
+       '\t\t\t<URLTemplate uuid="55555555-6666-7777-8888-99999999999a">\n'
+       '\t\t\t\t<Properties><Name>Версия</Name><Template>/version</Template></Properties>\n'
+       '\t\t\t\t<ChildObjects>\n'
+       '\t\t\t\t\t<Method uuid="55555555-6666-7777-8888-99999999999b">\n'
+       '\t\t\t\t\t\t<Properties><Name>get</Name><HTTPMethod>GET</HTTPMethod>'
+       '<Handler>ПолучитьВерсию_GET</Handler></Properties>\n'
+       '\t\t\t\t\t</Method>\n'
+       '\t\t\t\t</ChildObjects>\n'
+       '\t\t\t</URLTemplate>\n'
+       '\t\t</ChildObjects>\n'
+       '\t</HTTPService>\n'
+       '</MetaDataObject>' % NS)
+    # веб-сервис: Namespace + операция
+    _w(base, 'WebServices/ВебСервис1.xml',
+       '<?xml version="1.0" encoding="UTF-8"?>\n'
+       '<MetaDataObject %s version="2.20">\n'
+       '\t<WebService uuid="66666666-7777-8888-9999-aaaaaaaaaaaa">\n'
+       '\t\t<Properties><Name>ВебСервис1</Name>'
+       '<Namespace>http://test/ns</Namespace></Properties>\n'
+       '\t\t<ChildObjects>\n'
+       '\t\t\t<Operation uuid="66666666-7777-8888-9999-aaaaaaaaaaab">\n'
+       '\t\t\t\t<Properties><Name>Ping</Name><ProcedureName>ОбработатьЗапрос</ProcedureName>'
+       '<XDTOReturningValueType>xs:string</XDTOReturningValueType>'
+       '<Transactioned>true</Transactioned></Properties>\n'
+       '\t\t\t</Operation>\n'
+       '\t\t</ChildObjects>\n'
+       '\t</WebService>\n'
+       '</MetaDataObject>' % NS)
+    # стиль, параметр опции, нумератор, WS-ссылка
+    _w(base, 'StyleItems/Цвет1.xml',
+       '<?xml version="1.0" encoding="UTF-8"?>\n'
+       '<MetaDataObject %s version="2.20">\n'
+       '\t<StyleItem uuid="77777777-8888-9999-aaaa-bbbbbbbbbbbb">\n'
+       '\t\t<Properties><Name>Цвет1</Name><Type>Color</Type><Value>#FF0000</Value></Properties>\n'
+       '\t</StyleItem>\n'
+       '</MetaDataObject>' % NS)
+    _w(base, 'FunctionalOptionsParameters/Параметр1.xml',
+       '<?xml version="1.0" encoding="UTF-8"?>\n'
+       '<MetaDataObject %s version="2.20">\n'
+       '\t<FunctionalOptionsParameter uuid="88888888-9999-aaaa-bbbb-cccccccccccc">\n'
+       '\t\t<Properties><Name>Параметр1</Name>\n'
+       '\t\t\t<Use><Item>InformationRegister.РегистрСведений1</Item></Use>\n'
+       '\t\t</Properties>\n'
+       '\t</FunctionalOptionsParameter>\n'
+       '</MetaDataObject>' % NS)
+    _w(base, 'DocumentNumerators/Нумератор1.xml',
+       '<?xml version="1.0" encoding="UTF-8"?>\n'
+       '<MetaDataObject %s version="2.20">\n'
+       '\t<DocumentNumerator uuid="99999999-aaaa-bbbb-cccc-dddddddddddd">\n'
+       '\t\t<Properties><Name>Нумератор1</Name><NumberType>String</NumberType>'
+       '<NumberLength>11</NumberLength><NumberPeriodicity>Year</NumberPeriodicity>'
+       '<CheckUnique>true</CheckUnique></Properties>\n'
+       '\t</DocumentNumerator>\n'
+       '</MetaDataObject>' % NS)
+    _w(base, 'WSReferences/Ссылка1.xml',
+       '<?xml version="1.0" encoding="UTF-8"?>\n'
+       '<MetaDataObject %s version="2.20">\n'
+       '\t<WSReference uuid="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee">\n'
+       '\t\t<Properties><Name>Ссылка1</Name>'
+       '<LocationURL>file://C:/wsdl.xml</LocationURL></Properties>\n'
+       '\t</WSReference>\n'
+       '</MetaDataObject>' % NS)
 
 
 @pytest.fixture(scope='module')
@@ -500,6 +583,49 @@ def test_form_content(db):
     fe = q(db, "SELECT f.event, f.handler FROM form_event f "
                "JOIN meta_object o ON o.id=f.form_id WHERE o.path=?", (fp,))
     assert fe == [('OnCreateAtServer', 'ПриСозданииНаСервере')]
+
+
+def test_services_and_properties(db):
+    """Проводки документа, HTTP/Web-сервисы и свойства объектов (ревизия 12)."""
+    # проводки документа
+    rr = q(db, "SELECT p.value FROM object_property p JOIN meta_object o "
+               "ON o.id=p.object_id WHERE o.path='Document/Документ1' "
+               "AND p.name='RegisterRecord'")
+    assert rr == [('InformationRegister/РегистрСведений1',)]
+    # HTTP-сервис: RootURL + метод
+    root = q(db, "SELECT p.value FROM object_property p JOIN meta_object o "
+                 "ON o.id=p.object_id WHERE o.path='HTTPService/Сервис1' "
+                 "AND p.name='RootURL'")
+    assert root == [('api',)]
+    hm = q(db, "SELECT m.url_template, m.http_method, m.handler FROM http_method m "
+               "JOIN meta_object o ON o.id=m.object_id "
+               "WHERE o.path='HTTPService/Сервис1'")
+    assert hm == [('/version', 'GET', 'ПолучитьВерсию_GET')]
+    # веб-сервис: Namespace + операция (return_type — локальное имя)
+    ns = q(db, "SELECT p.value FROM object_property p JOIN meta_object o "
+               "ON o.id=p.object_id WHERE o.path='WebService/ВебСервис1' "
+               "AND p.name='Namespace'")
+    assert ns == [('http://test/ns',)]
+    op = q(db, "SELECT w.name, w.procedure_name, w.return_type, w.transactioned "
+               "FROM webservice_operation w JOIN meta_object o ON o.id=w.object_id "
+               "WHERE o.path='WebService/ВебСервис1'")
+    assert op == [('Ping', 'ОбработатьЗапрос', 'string', 1)]
+    # стиль / параметр опции / нумератор / WS-ссылка
+    st = q(db, "SELECT p.name, p.value FROM object_property p JOIN meta_object o "
+               "ON o.id=p.object_id WHERE o.path='StyleItem/Цвет1' ORDER BY p.ord")
+    assert st == [('Type', 'Color'), ('Value', '#FF0000')]
+    use = q(db, "SELECT p.value FROM object_property p JOIN meta_object o "
+                "ON o.id=p.object_id WHERE o.path='FunctionalOptionsParameter/Параметр1' "
+                "AND p.name='Use'")
+    assert use == [('InformationRegister.РегистрСведений1',)]
+    num = q(db, "SELECT p.value FROM object_property p JOIN meta_object o "
+                "ON o.id=p.object_id WHERE o.path='DocumentNumerators/Нумератор1' "
+                "AND p.name='NumberLength'")
+    assert num == [('11',)]
+    ws = q(db, "SELECT p.value FROM object_property p JOIN meta_object o "
+               "ON o.id=p.object_id WHERE o.path='WSReference/Ссылка1' "
+               "AND p.name='LocationURL'")
+    assert ws == [('file://C:/wsdl.xml',)]
 
 
 def test_skd_query(db):

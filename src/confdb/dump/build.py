@@ -113,6 +113,7 @@ class Builder:
             'role_rights_failed': 0, 'dump_files': 0, 'subsystem_content': 0,
             'form_attributes': 0, 'form_commands': 0, 'form_events': 0,
             'form_parameters': 0, 'object_properties': 0,
+            'http_methods': 0, 'webservice_operations': 0,
         }
 
     # -- фаза 1: объекты -----------------------------------------------------
@@ -300,6 +301,21 @@ class Builder:
                 W.INSERT_SQL['object_property'],
                 [(obj_id, i, n, v) for i, (n, v) in enumerate(prop_rows)])
             self.stats['object_properties'] += len(prop_rows)
+        # методы HTTP-сервиса и операции веб-сервиса (карта API → обработчик)
+        if otype == 'HTTPService':
+            rows = xmlmeta.http_methods(root)
+            if rows:
+                self.conn.executemany(
+                    W.INSERT_SQL['http_method'],
+                    [(obj_id, i) + r for i, r in enumerate(rows)])
+                self.stats['http_methods'] += len(rows)
+        elif otype == 'WebService':
+            rows = xmlmeta.webservice_operations(root)
+            if rows:
+                self.conn.executemany(
+                    W.INSERT_SQL['webservice_operation'],
+                    [(obj_id, i) + r for i, r in enumerate(rows)])
+                self.stats['webservice_operations'] += len(rows)
         return obj_id
 
     def _ord_for(self, obj):

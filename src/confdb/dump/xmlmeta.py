@@ -532,7 +532,10 @@ def object_properties(obj_el, otype, types):
     ScheduledJob.MethodName → обработчик; FunctionalOption.Location → где
     хранится флаг; Constant/SessionParameter.Type → тип; составы журналов
     документов и последовательностей — по строке на член; CommonCommand —
-    группа и режим использования параметра.
+    группа и режим использования параметра; Document.RegisterRecords —
+    проводки (регистры документа); FunctionalOptionsParameter.Use — где
+    хранится параметр; StyleItem/DocumentNumerator/WSReference/
+    IntegrationService/HTTPService/WebService —scalar-свойства.
     """
     props = properties(obj_el)
     if props is None:
@@ -556,11 +559,96 @@ def object_properties(obj_el, otype, types):
     elif otype == 'Sequences':
         for p in _composition_items(props, 'Documents'):
             out.append(('Document', p))
+    elif otype == 'Document':
+        for p in _composition_items(props, 'RegisterRecords'):
+            out.append(('RegisterRecord', p))
+    elif otype == 'FunctionalOptionsParameter':
+        use = _find(props, 'Use')
+        if use is not None:
+            for item in use:
+                if item.text and item.text.strip():
+                    out.append(('Use', item.text.strip()))
     elif otype == 'CommonCommand':
         for tag in ('Group', 'ParameterUseMode'):
             v = _text(props, tag)
             if v:
                 out.append((tag, v))
+        tstr, _links = types.describe(_find(props, 'CommandParameterType'))
+        if tstr:
+            out.append(('CommandParameterType', tstr))
+    elif otype == 'StyleItem':
+        for tag in ('Type', 'Value'):
+            v = _text(props, tag)
+            if v:
+                out.append((tag, v))
+    elif otype == 'DocumentNumerators':
+        for tag in ('NumberType', 'NumberLength', 'NumberAllowedLength',
+                    'NumberPeriodicity', 'CheckUnique'):
+            v = _text(props, tag)
+            if v:
+                out.append((tag, v))
+    elif otype == 'WSReference':
+        v = _text(props, 'LocationURL')
+        if v:
+            out.append(('LocationURL', v))
+    elif otype == 'IntegrationService':
+        v = _text(props, 'ExternalIntegrationServiceAddress')
+        if v:
+            out.append(('ExternalIntegrationServiceAddress', v))
+    elif otype == 'HTTPService':
+        v = _text(props, 'RootURL')
+        if v:
+            out.append(('RootURL', v))
+    elif otype == 'WebService':
+        v = _text(props, 'Namespace')
+        if v:
+            out.append(('Namespace', v))
+    return out
+
+
+def http_methods(obj_el):
+    """Методы HTTP-сервиса: (url_template, http_method, handler) по каждому
+    методу каждого URL-шаблона (ChildObjects URLTemplate → Method)."""
+    out = []
+    co = child_objects(obj_el)
+    if co is None:
+        return out
+    for ut in co:
+        if ut.tag != 'URLTemplate':
+            continue
+        template = _text(properties(ut), 'Template')
+        mco = child_objects(ut)
+        if mco is None:
+            continue
+        for m in mco:
+            if m.tag != 'Method':
+                continue
+            mp = properties(m)
+            out.append((template, _text(mp, 'HTTPMethod'), _text(mp, 'Handler')))
+    return out
+
+
+def webservice_operations(obj_el):
+    """Операции веб-сервиса: (name, procedure_name, return_type, transactioned).
+
+    return_type — локальное имя типа возврата (без префикса пространства имён),
+    как и при извлечении из cf; transactioned — 0/1.
+    """
+    out = []
+    co = child_objects(obj_el)
+    if co is None:
+        return out
+    for op in co:
+        if op.tag != 'Operation':
+            continue
+        props = properties(op)
+        name = _text(props, 'Name')
+        if not name:
+            continue
+        ret = _text(props, 'XDTOReturningValueType')
+        ret_local = ret.split(':')[-1] if ret else None
+        trans = 1 if _text(props, 'Transactioned') == 'true' else 0
+        out.append((name, _text(props, 'ProcedureName'), ret_local, trans))
     return out
 
 

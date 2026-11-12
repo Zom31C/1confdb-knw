@@ -553,7 +553,8 @@ def test_write_db(tmp_path):
                      'role_rights': 0, 'role_rls_templates': 0,
                      'role_rights_failed': 0,
                      'form_attributes': 0, 'form_commands': 0, 'form_events': 0,
-                     'form_parameters': 0, 'object_properties': 0}
+                     'form_parameters': 0, 'object_properties': 0,
+                     'http_methods': 0, 'webservice_operations': 0}
 
     conn = sqlite3.connect(db_path)
     q = conn.execute
@@ -1136,3 +1137,68 @@ def test_extract_object_properties():
     assert _extract_object_properties(
         hdr_sj, 'ScheduledJob', r, {mod_u: 'CommonModule/Модуль1'}) == \
         [('MethodName', 'CommonModule.Модуль1.МетодОбработчик')]
+
+
+def test_extract_object_properties_links():
+    """Проводки документа, Use параметра опции, тип параметра команды, стиль,
+    адреса и RootURL/Namespace сервисов (ревизия 12)."""
+    from confdb.db.writer import _TypeResolver, _extract_object_properties
+    r = _TypeResolver({}, {}, {}, {}, {})
+    reg_u = '55555555-5555-5555-5555-555555555555'
+    block = ['0', '1', ['"#"', 'type-uuid', ['1', reg_u]]]
+    hdr_doc = {'header': [['1', ['1', ['core'], block]]]}
+    assert _extract_object_properties(
+        hdr_doc, 'Document', r, {reg_u: 'AccumulationRegister/Рег1'}) == \
+        [('RegisterRecord', 'AccumulationRegister/Рег1')]
+    # FunctionalOptionsParameter.Use — блок состава
+    hdr_fop = {'header': [['1', ['0', ['core'], block]]]}
+    assert _extract_object_properties(
+        hdr_fop, 'FunctionalOptionsParameter', r,
+        {reg_u: 'InformationRegister/Рег1'}) == \
+        [('Use', 'InformationRegister/Рег1')]
+    # CommonCommand.CommandParameterType — Pattern в inner[9]
+    inner = ['0'] * 9 + [['"Pattern"', ['"S"']]]
+    hdr_cc = {'header': [['1', ['2', inner, '0']]]}
+    assert _extract_object_properties(hdr_cc, 'CommonCommand', r, {}) == \
+        [('CommandParameterType', 'Строка')]
+    # StyleItem: Color, BGR-целое 4625920 -> #009646
+    hdr_si = {'header': [['1', ['3', '0',
+                                ['"#"', 'u', '2', ['3', '0', ['4625920']]],
+                                ['core']]]]}
+    assert _extract_object_properties(hdr_si, 'StyleItem', r, {}) == \
+        [('Type', 'Color'), ('Value', '#009646')]
+    # WSReference.LocationURL
+    hdr_ws = {'header': [['1', ['2', ['"file://x"', '0'], ['core'], 'u1', 'u2']]]}
+    assert _extract_object_properties(hdr_ws, 'WSReference', r, {}) == \
+        [('LocationURL', 'file://x')]
+    # HTTPService.RootURL / WebService.Namespace
+    hdr_http = {'header': [['1', ['2', '"api"', ['core'], '0', '20'], '1', []]]}
+    assert _extract_object_properties(hdr_http, 'HTTPService', r, {}) == \
+        [('RootURL', 'api')]
+    hdr_wsvc = {'header': [['1', ['4', '"http://ns"', ['core']], '1', []]]}
+    assert _extract_object_properties(hdr_wsvc, 'WebService', r, {}) == \
+        [('Namespace', 'http://ns')]
+
+
+def test_extract_http_methods():
+    from confdb.db.writer import _extract_http_methods
+    method = ['0', '"ПолучитьВерсию_GET"', '3',
+              ['3', ['1', '0', 'u'], '"get"'], '0']
+    mb = ['muuid', '1', [method]]
+    group = [['0', '"/version"', ['core']], '1', mb]
+    utb = ['uuid', '1', group]
+    header = {'header': [['1', ['2', '"api"', ['core']], '1', utb]]}
+    assert _extract_http_methods(header) == \
+        [('/version', 'GET', 'ПолучитьВерсию_GET')]
+    assert _extract_http_methods({}) == []
+
+
+def test_extract_webservice_operations():
+    from confdb.db.writer import _extract_webservice_operations
+    op = ['1', ['1', ['0', '0', 'u'], '"Ping"'],
+          ['0', '"http://www.w3.org/2001/XMLSchema"', '"string"'],
+          '1', '0', '"Ping"', '1']
+    opb = ['uuid', '1', [op]]
+    header = {'header': [['1', ['4', '"http://ns"', ['core']], '1', opb]]}
+    assert _extract_webservice_operations(header) == [('Ping', 'Ping', 'string', 0)]
+    assert _extract_webservice_operations({}) == []

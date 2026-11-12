@@ -41,7 +41,7 @@ ROOT_TYPES = ('Configuration', 'ConfigurationExtension', 'ExternalDataProcessor'
 # выгрузки для инкрементального обновления), attribute_ref.target_path
 # (цель ссылки по пути — позволяет переразрешить ссылку, когда объект
 # добавлен позже ссылки) (2026-11-07).
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 RE_UUID = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.I)
 
@@ -766,12 +766,17 @@ def _find_type_desc(node):
 def _extract_object_properties(header, stem, resolver, uuid_to_path):
     """Свойства-ссылки объекта из cf-заголовка (для object_property).
 
-    Constant/SessionParameter — тип; DocumentJournal/Sequences — состав
-    (блок [0, N, ["#", uuid, ["1", uuid]]…]); ScheduledJob — MethodName
-    (модуль по uuid + имя метода); FunctionalOption — Location по uuid.
+    Constant/SessionParameter — тип; DocumentJournal/Sequences/Document —
+    состав (блок [0, N, ["#", uuid, ["1", uuid]]…]); ScheduledJob — MethodName
+    (модуль по uuid + имя метода); FunctionalOption — Location по uuid;
+    FunctionalOptionsParameter — Use; CommonCommand — CommandParameterType;
+    StyleItem — цвет (BGR→#RRGGBB); WSReference/IntegrationService — адрес;
+    HTTPService — RootURL; WebService — Namespace. DocumentNumerator и коды
+    типов стиля, кроме Color, в cf не расшифровываются (полнее в выгрузке).
     """
     try:
-        rec = header['header'][0][1]
+        h0 = header['header'][0]
+        rec = h0[1]
     except (KeyError, IndexError, TypeError):
         return []
     if not isinstance(rec, list):
@@ -783,8 +788,11 @@ def _extract_object_properties(header, stem, resolver, uuid_to_path):
             tstr = resolver.describe(td)
             if tstr:
                 out.append(('Type', tstr))
-    elif stem in ('DocumentJournal', 'Sequences'):
-        name = 'RegisteredDocument' if stem == 'DocumentJournal' else 'Document'
+    elif stem in ('DocumentJournal', 'Sequences', 'Document',
+                  'FunctionalOptionsParameter'):
+        name = {'DocumentJournal': 'RegisteredDocument', 'Sequences': 'Document',
+                'Document': 'RegisterRecord',
+                'FunctionalOptionsParameter': 'Use'}[stem]
         for x in rec:
             if isinstance(x, list) and len(x) > 2 and str(x[0]) == '0' \
                     and str(x[1]).isdigit():
@@ -807,6 +815,107 @@ def _extract_object_properties(header, stem, resolver, uuid_to_path):
             path = uuid_to_path.get(rec[2])
             if path:
                 out.append(('Location', path.replace('/', '.', 1)))
+    elif stem == 'CommonCommand':
+        if len(rec) > 1 and isinstance(rec[1], list) and len(rec[1]) > 9:
+            td = rec[1][9]
+            if isinstance(td, list):
+                tstr = resolver.describe(td)
+                if tstr:
+                    out.append(('CommandParameterType', tstr))
+    elif stem == 'StyleItem':
+        # rec[0] — код типа (3=Color); rec[2][3][2][0] — цвет как BGR-целое
+        if str(rec[0]) == '3':
+            out.append(('Type', 'Color'))
+            try:
+                val = int(rec[2][3][2][0])
+                out.append(('Value', '#%02X%02X%02X'
+                            % (val & 0xFF, (val >> 8) & 0xFF, (val >> 16) & 0xFF)))
+            except (IndexError, TypeError, ValueError):
+                pass
+    elif stem == 'WSReference':
+        if len(rec) > 1 and isinstance(rec[1], list) and rec[1] \
+                and isinstance(rec[1][0], str):
+            v = _unquote(rec[1][0])
+            if v:
+                out.append(('LocationURL', v))
+    elif stem == 'IntegrationService':
+        if len(rec) > 4 and isinstance(rec[4], str):
+            v = _unquote(rec[4])
+            if v:
+                out.append(('ExternalIntegrationServiceAddress', v))
+    elif stem in ('HTTPService', 'WebService'):
+        if len(rec) > 1 and isinstance(rec[1], str):
+            v = _unquote(rec[1])
+            if v:
+                out.append(('RootURL' if stem == 'HTTPService' else 'Namespace', v))
+    return out
+
+
+def _block_items(block):
+    """Элементы блока [uuid, count, …]: обёрнутый список block[2] либо
+    block[2:] (в cf встречаются оба формата вложенности)."""
+    if not isinstance(block, list) or len(block) < 3:
+        return []
+    inner = block[2]
+    if isinstance(inner, list) and inner and isinstance(inner[0], list):
+        return inner
+    return block[2:]
+
+
+def _extract_http_methods(header):
+    """Методы HTTP-сервиса из cf: (url_template, http_method, handler).
+
+    header[0][3] — блок URL-шаблонов; группа = [ut-запись, '1', блок методов];
+    шаблон = group[0][1], обработчик = method[1], глагол = имя метода (get→GET).
+    """
+    try:
+        utb = header['header'][0][3]
+    except (KeyError, IndexError, TypeError):
+        return []
+    out = []
+    for group in utb[2:] if isinstance(utb, list) else []:
+        if not isinstance(group, list) or len(group) < 3 \
+                or not isinstance(group[0], list) or len(group[0]) < 2:
+            continue
+        template = _unquote(group[0][1])
+        for m in _block_items(group[2]):
+            if not isinstance(m, list) or len(m) < 4 \
+                    or not isinstance(m[3], list) or len(m[3]) < 3:
+                continue
+            handler = _unquote(m[1])
+            verb = _unquote(m[3][2])
+            out.append((template, verb.upper() if verb else None, handler))
+    return out
+
+
+def _extract_webservice_operations(header):
+    """Операции веб-сервиса из cf: (name, procedure_name, return_type,
+    transactioned). header[0][3] — блок операций; операции сгруппированы как
+    URL-шаблоны HTTP: группа = [op-запись, '1', блок параметров], op = group[0];
+    имя = op[1][2], тип возврата = op[2][2] (локальное имя), Transactioned =
+    op[4], обработчик = op[5]."""
+    try:
+        opb = header['header'][0][3]
+    except (KeyError, IndexError, TypeError):
+        return []
+    out = []
+    for group in opb[2:] if isinstance(opb, list) else []:
+        if isinstance(group, list) and group and isinstance(group[0], list):
+            op = group[0]
+        else:
+            op = group
+        if not isinstance(op, list) or len(op) < 6 \
+                or not isinstance(op[1], list) or len(op[1]) < 3:
+            continue
+        name = _unquote(op[1][2])
+        if not name:
+            continue
+        ret = None
+        if isinstance(op[2], list) and len(op[2]) > 2:
+            ret = _unquote(op[2][2])
+        trans = 1 if str(op[4]) == '1' else 0
+        proc = _unquote(op[5]) if isinstance(op[5], str) else None
+        out.append((name, proc, ret, trans))
     return out
 
 
@@ -1217,6 +1326,27 @@ CREATE TABLE object_property (
     value TEXT
 );
 CREATE INDEX ix_object_property_object ON object_property(object_id, name);
+-- методы HTTP-сервиса: URL-шаблон + глагол + обработчик (карта REST API).
+CREATE TABLE http_method (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    object_id INTEGER NOT NULL REFERENCES meta_object(id) ON DELETE CASCADE,
+    ord INTEGER NOT NULL,
+    url_template TEXT,
+    http_method TEXT,
+    handler TEXT
+);
+CREATE INDEX ix_http_method_object ON http_method(object_id, ord);
+-- операции веб-сервиса: имя, метод-обработчик, тип возврата, транзакционность.
+CREATE TABLE webservice_operation (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    object_id INTEGER NOT NULL REFERENCES meta_object(id) ON DELETE CASCADE,
+    ord INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    procedure_name TEXT,
+    return_type TEXT,
+    transactioned INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX ix_webservice_operation_object ON webservice_operation(object_id, ord);
 CREATE TABLE predefined (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     object_id INTEGER NOT NULL REFERENCES meta_object(id) ON DELETE CASCADE,
@@ -1365,6 +1495,12 @@ INSERT_SQL = {
     'object_property':
         'INSERT INTO object_property (object_id, ord, name, value)'
         ' VALUES (?, ?, ?, ?)',
+    'http_method':
+        'INSERT INTO http_method (object_id, ord, url_template, http_method,'
+        ' handler) VALUES (?, ?, ?, ?, ?)',
+    'webservice_operation':
+        'INSERT INTO webservice_operation (object_id, ord, name,'
+        ' procedure_name, return_type, transactioned) VALUES (?, ?, ?, ?, ?, ?)',
     'predefined':
         'INSERT INTO predefined (object_id, ord, parent_ord, uuid, name,'
         ' code, display) VALUES (?, ?, ?, ?, ?, ?, ?)',
@@ -2133,6 +2269,8 @@ def write_db(dump_dir, db_path, *, source_file=None, source_sha256=None,
         form_evt_params = []
         form_par_params = []
         objprop_params = []
+        http_params = []
+        wsop_params = []
         for rel, info in infos.items():
             obj_id = dir_to_id[rel]
             for ord_no, (name, uuid) in enumerate(info['tabular']):
@@ -2173,10 +2311,19 @@ def write_db(dump_dir, db_path, *, source_file=None, source_sha256=None,
                 for o, (ev, h) in enumerate(_extract_form_events(info['header'])):
                     form_evt_params.append((obj_id, o, ev, h))
             if info['stem'] in ('Constant', 'SessionParameter', 'DocumentJournal',
-                                'Sequences', 'ScheduledJob', 'FunctionalOption'):
+                                'Sequences', 'ScheduledJob', 'FunctionalOption',
+                                'Document', 'FunctionalOptionsParameter',
+                                'CommonCommand', 'StyleItem', 'WSReference',
+                                'IntegrationService', 'HTTPService', 'WebService'):
                 for o, (n, v) in enumerate(_extract_object_properties(
                         info['header'], info['stem'], resolver, uuid_to_path)):
                     objprop_params.append((obj_id, o, n, v))
+            if info['stem'] == 'HTTPService':
+                for o, row in enumerate(_extract_http_methods(info['header'])):
+                    http_params.append((obj_id, o) + row)
+            elif info['stem'] == 'WebService':
+                for o, row in enumerate(_extract_webservice_operations(info['header'])):
+                    wsop_params.append((obj_id, o) + row)
             elements, subcontos = _extract_predefined(
                 os.path.join(info['dirpath'], 'Предустановленные данные.bin'),
                 info['header'])
@@ -2195,6 +2342,8 @@ def write_db(dump_dir, db_path, *, source_file=None, source_sha256=None,
         conn.executemany(INSERT_SQL['form_event'], form_evt_params)
         conn.executemany(INSERT_SQL['form_parameter'], form_par_params)
         conn.executemany(INSERT_SQL['object_property'], objprop_params)
+        conn.executemany(INSERT_SQL['http_method'], http_params)
+        conn.executemany(INSERT_SQL['webservice_operation'], wsop_params)
         stats['tabular'] += len(tab_params)
         stats['enum_values'] += len(enum_params)
         stats['common_targets'] += len(common_params)
@@ -2204,6 +2353,8 @@ def write_db(dump_dir, db_path, *, source_file=None, source_sha256=None,
         stats['form_events'] = len(form_evt_params)
         stats['form_parameters'] = len(form_par_params)
         stats['object_properties'] = len(objprop_params)
+        stats['http_methods'] = len(http_params)
+        stats['webservice_operations'] = len(wsop_params)
         if subconto_params:
             # id предопределённых известны только после вставки, а вид субконто — это
             # другой предопределённый элемент (ПВХ), поэтому ссылки разрешаются вторым проходом

@@ -510,7 +510,8 @@ DATABASE SCHEMA (for the sql tool; path columns store the legacy slash form 'Cat
 - skd_query(object_id, ord, query) — report queries in the 1C query language (Russian keywords ВЫБРАТЬ/ИЗ/ГДЕ/СОЕДИНЕНИЕ/ОБЪЕДИНИТЬ).
 - enum_value(object_id, ord, name, synonym) — enum values: name is the identifier (what Строка(Перечисление.Х.Значение) returns), synonym is the human-readable display string (NULL when absent/equal); an Enum with no rows here has no declared values. predefined(object_id, ord, parent_ord, uuid, name, code, display) — predefined elements (catalog items, chart-of-accounts accounts, characteristic-chart values) in depth-first order: parent_ord is the ord of the parent, and NULL only for the root node ('Счета'/'Элементы'), which is not an element; uuid identifies the element and is what a subconto kind points at; predefined_subconto(predefined_id, ord, uuid, kind_id, flags) — the subconto kinds of a predefined account: kind_id → the predefined element of the characteristic chart that names the kind, flags = 'Суммовой;Валютный;Количественный'; common_target(common_id, target_id) — objects a common attribute is attached to; subsystem_content — subsystem composition; source(file, created, root_type/root_name/root_uuid, file_size, file_sha256) — which .cf/.cfe/.epf the base was built from, when, and the SHA-256 of that file: equal digests in two bases mean the very same source file, so nothing has to be re-extracted; file.
 - form_attribute(form_id, ord, name, type_str, main_attr, saved_data) — a form's attributes (form_id → the form's meta_object.id): name is directly usable in the form module; main_attr=1 marks the main attribute (the form's owner object, or a dynamic list for list forms). form_command(form_id, ord, name, action, modifies_data) — form commands, action = the handler method in the form module. form_event(form_id, ord, event, handler) — form event handlers (handler = a method of the form module; event may be NULL for cf bases). form_parameter(form_id, ord, name, type_str, key_param) — form parameters. These are the names to resolve when reading/writing form-module code; object_card of a form prints them.
-- object_property(object_id, ord, name, value) — object link-properties: ScheduledJob name='MethodName' value='CommonModule.M.Method' (the handler the platform runs); FunctionalOption name='Location' (where the flag is stored); Constant/SessionParameter name='Type'; DocumentJournal name='RegisteredDocument' / Sequences name='Document' — composition, one row per member document (value = a path). object_card prints them.
+- object_property(object_id, ord, name, value) — object link-properties: ScheduledJob name='MethodName' value='CommonModule.M.Method' (the handler the platform runs); FunctionalOption name='Location' / FunctionalOptionsParameter name='Use' (where the flag/parameter is stored); Constant/SessionParameter name='Type'; DocumentJournal name='RegisteredDocument' / Sequences name='Document' / Document name='RegisterRecord' — composition, one row per member (value = a path); Document.RegisterRecord = the registers a document posts to (which documents write to register X); CommonCommand name='CommandParameterType'; StyleItem name='Type'/'Value'; WSReference name='LocationURL'; HTTPService name='RootURL'; WebService name='Namespace'. object_card prints them.
+- http_method(object_id, ord, url_template, http_method, handler) — an HTTP service's REST API map: one row per method of each URL template; url_template = the URL pattern, http_method = GET/POST/…, handler = the method in the service module that handles it. webservice_operation(object_id, ord, name, procedure_name, return_type, transactioned) — a web service's operations: procedure_name = the handler method, return_type = the local return type name. object_card of a service prints them.
 - role_right(role_id, target_uuid, target_object_id, target_attr_id, target_tabular_id, sub_index, collection_uuid, target_flags, right_uuid, value, rls_text) — explicit role rights, SPARSE (no row = the right is not set); target_flags keeps the flags of the target record verbatim (their meaning is NOT confirmed — they only tell two targets sharing one uuid apart); role_rls_template(role_id, ord, name, text) — the role RLS templates; role_rights_state(role_id, version, parsed, targets, rights, rls_templates, error) — parsed=0 means the rights file could NOT be read (the reason is in error), which is not the same as a role without rights. Prefer role_rights / object_rights over querying these.
 - source(file, created, root_type/root_name/root_uuid, file_size, file_sha256, extractor_version) — which .cf/.cfe/.epf the base was built from, when, the SHA-256 of that file, and the extractor version (confdb.__version__); equal digests in two bases mean the very same source file, so nothing has to be re-extracted; file. extractor_version NULL = the base was built before revision 7 (2026-10-09).
 
@@ -1333,6 +1334,8 @@ class McpServer:
                    'WHERE object_id=? ORDER BY ord', (oid,)).fetchall()
         if oprops:
             out.extend(self._object_property_lines(oprops))
+        if row[0] in ('HTTPService', 'WebService'):
+            out.extend(self._service_card_lines(q, oid, row[0]))
         predef = q('SELECT ord, parent_ord, name, code, display FROM predefined '
                    'WHERE object_id=? ORDER BY ord', (oid,)).fetchall()
         if predef:
@@ -1437,10 +1440,21 @@ class McpServer:
     def _object_property_lines(props):
         """Свойства-ссылки объекта: обработчик, место хранения, тип, составы."""
         out = []
-        comp_names = ('RegisteredDocument', 'Document')
+        comp_names = ('RegisteredDocument', 'Document', 'RegisterRecord')
+        comp_labels = {'RegisteredDocument': 'Документы журнала',
+                       'Document': 'Документы последовательности',
+                       'RegisterRecord': 'Регистры документа (проводки)'}
         labels = {'MethodName': 'Обработчик', 'Location': 'Хранится в',
-                  'Type': 'Тип', 'Group': 'Группа',
-                  'ParameterUseMode': 'Режим параметра'}
+                  'Use': 'Хранится в', 'Type': 'Тип', 'Group': 'Группа',
+                  'ParameterUseMode': 'Режим параметра',
+                  'CommandParameterType': 'Тип параметра', 'Value': 'Значение',
+                  'NumberType': 'Тип номера', 'NumberLength': 'Длина номера',
+                  'NumberAllowedLength': 'Допустимая длина',
+                  'NumberPeriodicity': 'Периодичность',
+                  'CheckUnique': 'Контроль уникальности',
+                  'LocationURL': 'Адрес WSDL',
+                  'ExternalIntegrationServiceAddress': 'Адрес сервиса',
+                  'RootURL': 'Корневой URL', 'Namespace': 'Пространство имён'}
         comps = {}
         for n, v in props:
             if n in comp_names:
@@ -1448,9 +1462,31 @@ class McpServer:
             else:
                 out.append(f'{labels.get(n, n)}: {v}')
         for n, vs in comps.items():
-            label = 'Документы журнала' if n == 'RegisteredDocument' \
-                else 'Документы последовательности'
-            out.append(f'{label} ({len(vs)}): ' + ', '.join(ru_path(v) for v in vs))
+            out.append(f'{comp_labels[n]} ({len(vs)}): '
+                       + ', '.join(ru_path(v) for v in vs))
+        return out
+
+    @staticmethod
+    def _service_card_lines(q, oid, otype):
+        """Карта API сервиса: HTTP-методы (URL-шаблон + глагол + обработчик)
+        либо операции веб-сервиса (имя → обработчик, тип возврата)."""
+        out = []
+        if otype == 'HTTPService':
+            rows = q('SELECT url_template, http_method, handler FROM http_method '
+                     'WHERE object_id=? ORDER BY ord', (oid,)).fetchall()
+            if rows:
+                parts = [f'{m or "?"} {t or ""} → {h}' for t, m, h in rows]
+                out.append(f'Методы HTTP ({len(rows)}): ' + '; '.join(parts))
+        else:
+            rows = q('SELECT name, procedure_name, return_type, transactioned '
+                     'FROM webservice_operation WHERE object_id=? ORDER BY ord',
+                     (oid,)).fetchall()
+            if rows:
+                parts = [n + (f' → {p}' if p else '')
+                         + (f' : {r}' if r else '')
+                         + (' [транзакция]' if t else '')
+                         for n, p, r, t in rows]
+                out.append(f'Операции ({len(rows)}): ' + '; '.join(parts))
         return out
 
     @staticmethod
