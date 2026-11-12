@@ -84,11 +84,20 @@ One line each; detail in docs/details.md «Состав» and on the page named 
   hot reload via `PRAGMA data_version` cache invalidation + pidfile `<db>.server.json`;
   FTS rebuilds in shard GENERATIONS so open connections never block the swap). A dump DB is
   schema-rev 9 like cf DBs; the ONLY stop-the-server case is a full rebuild (file delete).
-- `__main__.py` — CLI: `extract` (.cf OR a dump dir), `update`, `check`, `fts`, `bench`, `1confdb-knw`.
+- `__main__.py` — CLI: `extract` (.cf OR a dump dir), `update`, `check`, `fts`, `bench`,
+  `1confdb-knw`, `web`.
 - `mcp_server.py` — the MCP server: read-only tools, multi-base plus configuration GROUPS,
   paged search, stdio and `--port`. Page `mcp-server-1confdb-knw`.
-- `tui.py` — console UI (the user chose console over GUI; do not suggest tkinter). Page
-  `tui-console`.
+- `ui_core.py` — the SHARED logic layer of BOTH frontends (state in `~/.confdb/config.json`,
+  cf/db candidates, `scan_cf_sources` SHA-256 catalog scan, extract/dump/FTS/bench orchestration,
+  groups, `ServerRunner` MCP-HTTP lifecycle with `close_all` on stop). **Rule (user 2026-11-12):
+  TUI and web UI evolve TOGETHER — new interface logic goes here FIRST, then both frontends call
+  it.** Pages `tui-console`, `web-ui`.
+- `tui.py` — console UI, a thin wrapper over `ui_core` (the user chose console over a desktop
+  GUI; do not suggest tkinter). Page `tui-console`.
+- `webui.py` + `webui.html` — web UI (stdlib `http.server` + vanilla-JS SPA, Russian, localhost):
+  the same features as the TUI over `ui_core`; `confdb web` / `confdb-web.bat`, default port 8766;
+  background tasks with a live log (`TaskManager`). Page `web-ui`.
 - `bsl_parser.py`, `bsl_analyzer.py` — split BSL into methods; lexical analysis for
   dependencies and result schemas (`rebuild_module` restores a module's full text from the DB).
 - `bsl_syntax.py` — native BSL syntax checker (lexer + recursive-descent parser, stdlib only),
@@ -160,6 +169,8 @@ confdb.bat fts out.db --workers 8                      :: body index later, as s
 confdb.bat hbk unpack <file.hbk> -o DIR                :: platform help unpacker (shcntx_ru.hbk)
 confdb.bat hbk build DIR --db syntax.db                :: syntax-helper DB; check/search/show/tree/repl
 1confdb-knw.bat out.db [--port 8765] [--group УНФ=unf.db --group БП=bp.db] [--syntax-db syntax.db]
+confdb-ui.bat                                         :: console UI (TUI) over ui_core
+confdb-web.bat [--port 8766] [--no-browser]           :: web UI (browser) over the SAME ui_core
 .venv\Scripts\python.exe -m compileall -q src\confdb  :: static check
 check-sync.bat                                        :: root src/tests vs the dist copy + its site-packages
 ```

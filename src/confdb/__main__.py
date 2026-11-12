@@ -167,6 +167,15 @@ def build_parser():
                         'собирается через "confdb hbk build"): добавляет '
                         'инструменты syntax_search/syntax_card/syntax_children. '
                         'Без флага — путь из syntax_db в ~/.confdb/config.json')
+    w = subparsers.add_parser(
+        'web', help='веб-интерфейс в браузере: MCP-сервер, извлечение, каталог cf, '
+                    'группы баз, настройки (логика общая с консольным TUI)')
+    w.add_argument('--host', default='127.0.0.1',
+                   help='адрес (по умолчанию 127.0.0.1 — только локально)')
+    w.add_argument('--port', type=int, default=8766,
+                   help='порт веб-интерфейса (по умолчанию 8766)')
+    w.add_argument('--no-browser', action='store_true',
+                   help='не открывать браузер автоматически')
     return parser
 
 
@@ -464,6 +473,13 @@ def main(argv=None):
         if args.syntax_db:
             argv += ['--syntax-db', args.syntax_db]
         return mcp_main(argv)
+
+    if args.cmd == 'web':
+        from .webui import main as web_main
+        argv = ['--host', args.host, '--port', str(args.port)]
+        if args.no_browser:
+            argv.append('--no-browser')
+        return web_main(argv)
 
     if args.cmd == 'bench':
         from .bench import bench as run_bench

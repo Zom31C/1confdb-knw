@@ -7,7 +7,6 @@
 в ~/.confdb/config.json.
 Запуск: confdb-ui.bat (или python -m confdb.tui)
 """
-import glob
 import json
 import os
 import subprocess
@@ -20,6 +19,15 @@ from .config import bench_workers
 from .config import load_config as _load_config
 from .config import save_config as _save_config
 from .extract import check_same_source, extract
+# общая логика интерфейсов (TUI и web UI используют один слой — ui_core)
+from .ui_core import CF_EXTS, ServerRunner, cf_files, compact_db_list
+from .ui_core import cf_candidates as _cf_candidates
+from .ui_core import db_candidates as _db_candidates_fn
+from .ui_core import extract_options as _extract_options_fn
+from .ui_core import first_db, group_cli_args, load_groups
+from .ui_core import out_defaults as _out_defaults
+from .ui_core import (replace_server_dbs, resolve_launch_groups,
+                      scan_cf_sources, schema_tail, shown_dbs)
 
 
 def _cls():
@@ -51,218 +59,8 @@ def _yes_no(prompt, default=False):
     return answer in ('да', 'д', 'y', 'yes', '1')
 
 
-def _out_defaults(src):
-    base = os.path.splitext(os.path.basename(src))[0]
-    out_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '_out'))
-    return os.path.join(out_dir, base + '.sqlite'), os.path.join(out_dir, base)
-
-
 def _remember(items, value, limit=6):
     return [value] + [x for x in items if x != value][:limit - 1]
-
-
-def _cf_candidates(extra_dirs=()):
-    roots = [os.getcwd(),
-             os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))]
-    roots += [d for d in extra_dirs if d]
-    found = []
-    for root in dict.fromkeys(roots):
-        for pattern in ('*.cf', '*.cfe', '*.epf', '*.erf',
-                        os.path.join('cf', '*.cf'), os.path.join('cf', '*.cfe')):
-            found += glob.glob(os.path.join(root, pattern))
-    return sorted({os.path.abspath(p) for p in found})
-
-
-# файлы 1С, которые умеет извлекать конвейер (внешние отчёты .erf тоже)
-CF_EXTS = ('.cf', '.cfe', '.epf', '.erf')
-
-
-def cf_files(directory):
-    """Файлы 1С каталога (.cf/.cfe/.epf/.erf), отсортированные по имени."""
-    try:
-        names = os.listdir(directory)
-    except OSError:
-        return []
-    found = []
-    for name in names:
-        full = os.path.join(directory, name)
-        if name.lower().endswith(CF_EXTS) and os.path.isfile(full):
-            found.append(os.path.abspath(full))
-    return sorted(found)
-
-
-def scan_cf_sources(cf_dir, db_pool, log=print):
-    """Сверяет файлы 1С каталога с базами знаний по SHA-256 исходника.
-
-    Для каждого файла каталога ищется база, собранная из него: сначала по
-    совпадению отпечатка (source.file_sha256), затем по имени исходного файла
-    (source.file). Отпечаток считается потоково (file_sha256), поэтому каталог
-    с крупными .cf сканируется без чтения файлов в память целиком.
-
-    :param cf_dir: каталог с файлами 1С;
-    :param db_pool: пути баз-кандидатов (каталоги баз, группы, недавние);
-        несуществующие и не-базы confdb молча пропускаются;
-    :param log: куда печатать прогресс хэширования;
-    :return: список записей по каждому файлу каталога:
-        {'src', 'sha', 'status', 'db', 'found', 'note'}, где status:
-        'current'  — база уже собрана из этого же файла (извлечение не нужно);
-        'outdated' — база из одноимённого файла, но отпечаток другой (замена);
-        'new'      — базы нет (извлечение в путь по умолчанию _out_defaults).
-        db — путь базы для извлечения/замены, found — найденная база или None.
-    """
-    from .extract import file_sha256, source_info
-    files = cf_files(cf_dir)
-    pool = {}
-    for path in db_pool:
-        if not path:
-            continue
-        key = os.path.abspath(path)
-        if key in pool or not os.path.isfile(key):
-            continue
-        info = source_info(key)
-        if info:
-            pool[key] = info
-    records = []
-    for i, src in enumerate(files, 1):
-        log(f'Хэш {i}/{len(files)}: {os.path.basename(src)}')
-        sha = file_sha256(src)
-        base = os.path.basename(src).lower()
-        same_sha = sorted(p for p, inf in pool.items()
-                          if inf.get('file_sha256') == sha)
-        same_name = sorted(p for p, inf in pool.items()
-                           if os.path.basename(inf.get('file') or '').lower() == base)
-        default_db = _out_defaults(src)[0]
-        note = ''
-        if same_sha:
-            # та же конфигурация уже собрана; предпочитаем одноимённую базу
-            found = next((p for p in same_sha if p in same_name), same_sha[0])
-            status, db = 'current', found
-        elif same_name:
-            found = (default_db if default_db in same_name
-                     else max(same_name, key=lambda p: pool[p].get('created') or ''))
-            status, db = 'outdated', found
-            if not pool[found].get('file_sha256'):
-                note = 'в базе нет отпечатка исходника — сравнение по имени'
-        else:
-            status, db, found = 'new', default_db, None
-            if os.path.isfile(default_db):
-                note = 'путь по умолчанию занят другой базой — будет заменён'
-        records.append({'src': src, 'sha': sha, 'status': status,
-                        'db': db, 'found': found, 'note': note})
-    return records
-
-
-def load_groups(config):
-    """Группы баз из конфига; старый ключ 'packs' читается как группы."""
-    raw = config.get('groups')
-    if raw is None:
-        raw = config.get('packs') or {}
-    if not isinstance(raw, dict):
-        return {}
-    return {str(name): [str(p) for p in dbs]
-            for name, dbs in raw.items()
-            if isinstance(dbs, (list, tuple))}
-
-
-def shown_dbs(paths):
-    """Список баз группы для печати: отсутствующие файлы помечены.
-
-    Файлы группы могут исчезнуть (пересборка/перенос) — запуск молча
-    отбрасывает их (resolve_launch_groups), поэтому список сразу показывает,
-    каких баз больше нет.
-    """
-    return ', '.join(
-        os.path.basename(p) + ('' if os.path.isfile(p) else ' (нет файла)')
-        for p in paths)
-
-
-def replace_server_dbs(server, paths):
-    """Заменяет открытые базы запущенного сервера на указанный набор.
-
-    Всё открытое закрывается и открывается заново — свежие соединения,
-    в том числе после пересборки баз. Возвращает (алиасы, ошибки).
-    """
-    for alias in list(server.dbs):
-        server.close_db(alias)
-    opened, errors = [], []
-    for path in paths:
-        try:
-            opened.append(server.open_db(path, activate=False))
-        except ValueError as err:
-            errors.append(str(err))
-    return opened, errors
-
-
-def schema_tail(server, alias):
-    """' — схема 5 — устарела (сервер ждёт 6)' для базы чужой ревизии, иначе ''.
-
-    Сервер читает базы только своей ревизии схемы (writer.SCHEMA_VERSION в
-    PRAGMA user_version), поэтому устаревшую видно до того, как её выбрали:
-    запросы к ней отвечают просьбой пересобрать.
-    """
-    if not server.outdated(alias):
-        return ''
-    from .mcp_server import schema_mark
-    return ' — ' + schema_mark(server.dbs[alias]['schema'])
-
-
-def compact_db_list(server):
-    """Список открытых баз для панели TUI: алиас, путь, отметка об устаревании.
-
-    Ответ db_list() рассчитан на LLM и для человека перегружен (числа
-    объектов/модулей/методов, ревизия схемы, версия конфигурации, режим
-    совместимости, SHA-256, указание configuration_info) — на панели нужны
-    только имя, путь и факт, что база устарела.
-    """
-    if not server.dbs:
-        return 'Нет открытых баз.'
-    lines = ['Открытые базы (* — активная):']
-    for alias, info in server.dbs.items():
-        mark = '*' if alias == server.active else ' '
-        lines.append(f'{mark} {alias} — {info["path"]}'
-                     f'{schema_tail(server, alias)}')
-    return '\n'.join(lines)
-
-
-def first_db(dbs, groups=()):
-    """База, которая станет активной при таком запуске.
-
-    Группы открываются первыми (McpServer.__init__), поэтому активна первая
-    база первой группы; отдельные базы — только когда групп нет.
-    """
-    for _name, paths in groups or ():
-        if paths:
-            return paths[0]
-    return dbs[0] if dbs else None
-
-
-def group_cli_args(groups):
-    """Флаги --group для запуска сервера: по одному на базу.
-
-    По флагу на базу, а не «ИМЯ=путь1;путь2», потому что ';' — допустимый
-    символ в имени файла Windows; повтор флага сервер складывает в ту же группу.
-    """
-    args = []
-    for name, paths in groups or ():
-        for path in paths:
-            args += ['--group', f'{name}={path}']
-    return args
-
-
-def resolve_launch_groups(config_groups, names):
-    """Выбранные имена групп -> ([(имя, [пути])], [недоступные пути]).
-
-    Группа без доступных баз в набор не попадает; порядок `names` сохраняется
-    (первая группа становится активной).
-    """
-    groups, missing = [], []
-    for name in names:
-        raw = list(config_groups.get(name) or ())
-        paths = [p for p in raw if os.path.isfile(p)]
-        missing += [p for p in raw if not os.path.isfile(p)]
-        if paths:
-            groups.append((name, paths))
-    return groups, missing
 
 
 class Tui:
@@ -370,16 +168,7 @@ class Tui:
             return _unquote(choice)
 
     def _db_candidates(self):
-        roots = [os.getcwd(),
-                 os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')),
-                 os.path.abspath(os.path.join(os.path.dirname(__file__),
-                                              '..', '..', '_out'))]
-        roots += [d for d in self.db_dirs if os.path.isdir(d)]
-        found = []
-        for root in dict.fromkeys(roots):
-            for pattern in ('*.db', '*.sqlite'):
-                found += glob.glob(os.path.join(root, pattern))
-        return sorted({os.path.abspath(p) for p in found if os.path.isfile(p)})
+        return _db_candidates_fn(self.db_dirs)
 
     def _pick_db(self, title, candidates=(), allow_empty=False, empty_hint=''):
         while True:
@@ -473,12 +262,9 @@ class Tui:
 
     def _extract_options(self):
         """Опции декодера из настроек TUI (общие для одиночного и пакетного)."""
-        options = {'store_blobs': self.store_blobs}
-        if self.prefix:
-            options['prefix'] = self.prefix
-        if self.skip_errors:
-            options['skip_errors'] = True
-        return options
+        return _extract_options_fn({'store_blobs': self.store_blobs,
+                                    'prefix': self.prefix,
+                                    'skip_errors': self.skip_errors})
 
     def _scan_cf_dir(self):
         """Пакетное извлечение: сканирует каталог cf и предлагает новые/устаревшие.
@@ -1045,24 +831,19 @@ class Tui:
             print('Нужно целое число.')
             input('Нажмите Enter…')
             return
-        from .mcp_server import (McpServer, _remove_pidfiles, _write_pidfiles,
-                                 resolve_syntax_db, start_http_server)
+        # жизненный цикл сервера — общий с веб-интерфейсом (ui_core.ServerRunner):
+        # остановка закрывает соединения и убирает pidfile, освобождая файлы баз
+        runner = ServerRunner()
         try:
-            server = McpServer(dbs, groups=list(groups),
-                               syntax_db=resolve_syntax_db())
+            real_port = runner.start(dbs, groups, int(port))
         except ValueError as err:
             print(f'Не удалось открыть базы: {err}')
             input('Нажмите Enter…')
             return
-        try:
-            httpd, real_port = start_http_server(server, '127.0.0.1', int(port))
         except OSError as err:
             print(f'Не удалось занять порт {port}: {err}')
             input('Нажмите Enter…')
             return
-        threading.Thread(target=httpd.serve_forever, daemon=True).start()
-        # pidfile: extract/update назовут этот процесс, если база окажется занятой
-        pidfiles = _write_pidfiles(server, real_port)
         _cls()
         print(f'Сервер слушает http://127.0.0.1:{real_port}/mcp '
               '(legacy SSE: /sse).')
@@ -1073,14 +854,9 @@ class Tui:
               f'{{"url": "http://127.0.0.1:{real_port}/mcp"}}}}}}')
         print()
         try:
-            self._server_control(server)
+            self._server_control(runner.server)
         finally:
-            httpd.shutdown()
-            httpd.server_close()
-            _remove_pidfiles(pidfiles)
-            # процесс TUI остаётся жить: открытые sqlite-соединения держали бы
-            # файлы баз (Windows), и пересобрать их из другого окна не вышло бы
-            server.close_all()
+            runner.stop()
         print('Сервер остановлен, базы закрыты — файлы свободны для пересборки.')
         input('Нажмите Enter…')
 

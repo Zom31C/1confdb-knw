@@ -441,7 +441,7 @@ def test_scan_cf_sources_statuses(tmp_path, monkeypatch):
     cf_dir = tmp_path / 'cf'
     cf_dir.mkdir()
     out_dir = tmp_path / 'out'
-    monkeypatch.setattr('confdb.tui._out_defaults',
+    monkeypatch.setattr('confdb.ui_core.out_defaults',
                         lambda src: (str(out_dir / (os.path.splitext(
                             os.path.basename(src))[0] + '.sqlite')), str(out_dir)))
     act = cf_dir / 'Актуальная.cf'
@@ -469,7 +469,7 @@ def test_scan_cf_sources_matches_by_sha_and_notes_conflict(tmp_path, monkeypatch
     cf_dir.mkdir()
     out_dir = tmp_path / 'out'
     out_dir.mkdir()
-    monkeypatch.setattr('confdb.tui._out_defaults',
+    monkeypatch.setattr('confdb.ui_core.out_defaults',
                         lambda src: (str(out_dir / (os.path.splitext(
                             os.path.basename(src))[0] + '.sqlite')), str(out_dir)))
     src = cf_dir / 'Конфигурация.cf'
@@ -495,7 +495,7 @@ def test_scan_cf_dir_extracts_new_and_replaces_outdated(tmp_path, monkeypatch):
     cf_dir.mkdir()
     out_dir = tmp_path / 'out'
     out_dir.mkdir()
-    monkeypatch.setattr('confdb.tui._out_defaults',
+    monkeypatch.setattr('confdb.ui_core.out_defaults',
                         lambda src: (str(out_dir / (os.path.splitext(
                             os.path.basename(src))[0] + '.sqlite')), str(out_dir)))
     monkeypatch.setattr('confdb.tui._cls', lambda: None)
