@@ -320,6 +320,10 @@ function viewServer(){
      <span><b>${esc(n)}</b> <span class="muted small">${esc(S.groups[n].map(base).join(", "))}</span></span></label>`).join("")
     || `<div class="empty">Групп в конфиге нет — создайте на вкладке «Группы баз».</div>`;
   const cfgGroups = cfgNames.map(n=>`<option value="${esc(n)}">${esc(n)}</option>`).join("");
+  // отдельные базы-кандидаты, ещё не открытые в сервере (выбор из списка)
+  const openPaths = new Set(sv.dbs.map(d=>d.path));
+  const availDbs = S.db_candidates.filter(p=>!openPaths.has(p));
+  const dbOptions = availDbs.map(p=>`<option value="${esc(p)}">${esc(base(p))} — ${esc(p)}</option>`).join("");
   return `<div class="card"><h2>Сервер запущен</h2>
     <div class="row"><span class="badge b-current">работает</span>
       <code id="srv-url">${esc(sv.url)}</code>
@@ -328,6 +332,12 @@ function viewServer(){
       <button class="btn danger" id="srv-stop">Остановить сервер</button></div>
     <p class="hint">Конфигурация клиента: <code>{"mcpServers":{"1confdb-knw":{"url":"${esc(sv.url)}"}}}</code>. Остановка закрывает базы и освобождает файлы для пересборки.</p>
     <h3>Открытые базы</h3><table><tbody>${dbs}</tbody></table>
+    <h3>Добавить отдельную базу</h3>
+    <div class="row">
+      <div class="grow"><select id="add-db-sel">${dbOptions||'<option value="">— нет доступных баз —</option>'}</select></div>
+      <button class="btn ghost" id="add-db-btn" style="align-self:flex-end">Добавить базу</button>
+    </div>
+    <p class="hint">Файл SQLite из списка откроется в уже запущенном сервере как отдельная база (вне групп). Каталоги поиска баз настраиваются на вкладке «Настройки».</p>
     <h3>Группы конфигураций в сервере</h3><table><tbody>${groups}</tbody></table>
     <h3>Добавить группы баз в сервер</h3>
     <p class="hint">Группы создаются и редактируются на вкладке «Группы баз». Отметьте группы — их базы откроются в уже запущенном сервере, прочие группы и базы останутся.</p>
@@ -466,6 +476,9 @@ function bind(){
   });
   on("srv-stop","click",async()=>{ try{ await api("/api/server/stop","POST",{}); toast("Сервер остановлен, базы закрыты","ok"); await refresh(); }catch(e){ toast(e.message,"err"); } });
   on("copy-url","click",()=>{ navigator.clipboard&&navigator.clipboard.writeText($("#srv-url").textContent); toast("URL скопирован","ok"); });
+  on("add-db-btn","click",async()=>{ const path=val("add-db-sel");
+    if(!path){toast("Выберите базу из списка","err");return;}
+    try{ const r=await api("/api/server/open","POST",{path}); toast("Открыта база: "+r.alias,"ok"); await refresh(); }catch(e){ toast(e.message,"err"); } });
   on("cfg-add-selected","click",addSelectedGroups);
   on("cfg-replace","click",()=>applyCfg(true));
   document.querySelectorAll("[data-use]").forEach(b=>b.onclick=async()=>{ try{ await api("/api/server/use","POST",{alias:b.dataset.use}); await refresh(); }catch(e){ toast(e.message,"err"); } });

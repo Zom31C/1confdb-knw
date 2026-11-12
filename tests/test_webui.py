@@ -222,6 +222,23 @@ def test_http_add_config_group_to_running_server(tmp_path, monkeypatch):
     os.remove(db2)
 
 
+def test_http_open_db_to_running_server(tmp_path, monkeypatch):
+    """«Добавить отдельную базу»: выбранный файл SQLite открывается в работающем
+    сервере как отдельная база, прежние остаются."""
+    db1 = _real_db(tmp_path, 'основная.sqlite')
+    db2 = _real_db(tmp_path, 'дополнительная.sqlite')
+    with _http(monkeypatch, tmp_path) as (web, port):
+        _req(port, 'POST', '/api/server/start',
+             {'dbs': [db1], 'groups': [], 'port': 0})
+        code, r = _req(port, 'POST', '/api/server/open', {'path': db2})
+        assert code == 200 and r['alias']
+        paths = {d['path'] for d in r['status']['dbs']}
+        assert paths == {db1, db2}
+        _req(port, 'POST', '/api/server/stop', {})
+    os.remove(db1)
+    os.remove(db2)
+
+
 def test_http_scan_task(tmp_path, monkeypatch):
     from confdb.extract import file_sha256
     cf_dir = tmp_path / 'cf'
