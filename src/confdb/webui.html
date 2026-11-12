@@ -73,6 +73,10 @@
   .b-current{background:#e4f6ee;color:var(--ok)} .b-outdated{background:#fdf0e2;color:var(--warn)}
   .b-new{background:#e7eefe;color:var(--new)} .b-active{background:#e7eefe;color:var(--brand)}
   .b-off{background:#eef1f6;color:var(--muted)}
+  /* тип файла 1С: cf — конфигурация, cfe — расширение, epf — обработка, erf — отчёт */
+  .t-cf{background:#e7eefe;color:#2f6df6} .t-cfe{background:#efe7fb;color:#7c4dcc}
+  .t-epf{background:#fdf0e2;color:#d98324} .t-erf{background:#e4f6ee;color:#1a9e6c}
+  .t-x{background:#eef1f6;color:var(--muted)}
   table{width:100%;border-collapse:collapse;font-size:14px}
   th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:top}
   th{color:var(--muted);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.03em}
@@ -362,6 +366,9 @@ function viewExtract(){
 }
 
 // ---------- вкладка: Каталог cf ----------
+const TYPE_KIND = {cf:"конфигурация", cfe:"расширение конфигурации",
+                   epf:"внешняя обработка", erf:"внешний отчёт"};
+const typeBadge = ext => `<span class="badge t-${esc(ext||'x')}" title="${esc(TYPE_KIND[ext]||'файл 1С')}">${esc((ext||"?").toUpperCase())}</span>`;
 function viewCatalog(){
   const rows = scanRows.map((r,i)=>{
     const badge = r.status==="current"?'<span class="badge b-current">актуальна</span>'
@@ -369,10 +376,14 @@ function viewCatalog(){
       : '<span class="badge b-new">новая</span>';
     const check = r.status==="current"?"":`<input type="checkbox" class="scan-check" data-i="${i}">`;
     const target = r.status==="current"?"":`<div class="path">→ ${esc(r.db)}${r.status==="outdated"?" (замена)":""}</div>`;
-    return `<tr><td>${check}</td><td>${badge}</td>
-      <td><b>${esc(base(r.src))}</b>${target}${r.note?`<div class="hint">${esc(r.note)}</div>`:""}</td></tr>`;
+    // имя корневого объекта метаданных (из собранной базы); для новой базы — имя файла
+    const title = r.name ? esc(r.name) : esc(base(r.src));
+    const fname = r.name ? `<div class="path">${esc(base(r.src))}</div>` : "";
+    const kind = r.root_type ? `<span class="muted small"> · ${esc(TYPE_KIND[r.ext]||r.root_type)}</span>` : "";
+    return `<tr><td>${check}</td><td>${typeBadge(r.ext)}</td><td>${badge}</td>
+      <td><b>${title}</b>${kind}${fname}${target}${r.note?`<div class="hint">${esc(r.note)}</div>`:""}</td></tr>`;
   }).join("");
-  const table = scanRows.length?`<table><thead><tr><th></th><th>Статус</th><th>Конфигурация</th></tr></thead><tbody>${rows}</tbody></table>`
+  const table = scanRows.length?`<table><thead><tr><th></th><th>Тип</th><th>Статус</th><th>Конфигурация</th></tr></thead><tbody>${rows}</tbody></table>`
     :`<div class="empty">Нажмите «Сканировать», чтобы сверить файлы каталога с базами по SHA-256.</div>`;
   const actionable = scanRows.filter(r=>r.status!=="current").length;
   return `<div class="card"><h2>Каталог cf — новые и устаревшие конфигурации</h2>

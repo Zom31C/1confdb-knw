@@ -60,7 +60,8 @@ def source_info(db_path):
         cols = {row[1] for row in conn.execute('PRAGMA table_info(source)')}
         if 'file' not in cols:
             return None
-        names = [c for c in ('file', 'created', 'file_sha256', 'file_size')
+        names = [c for c in ('file', 'created', 'file_sha256', 'file_size',
+                             'root_name', 'root_type')
                  if c in cols]
         row = conn.execute(
             f'SELECT {", ".join(names)} FROM source ORDER BY id LIMIT 1'
@@ -74,6 +75,8 @@ def source_info(db_path):
     info = dict(zip(names, row))
     info.setdefault('file_sha256', None)
     info.setdefault('file_size', None)
+    info.setdefault('root_name', None)
+    info.setdefault('root_type', None)
     return info
 
 

@@ -303,7 +303,11 @@ class Tui:
             _cls()
             print(f'--- Каталог cf: {self.cf_dir} ---')
             for i, r in enumerate(records, 1):
-                print(f' {i}. [{labels[r["status"]]}] {os.path.basename(r["src"])}')
+                ext = (r.get('ext') or '?').upper()
+                name = r.get('name') or os.path.basename(r['src'])
+                print(f' {i}. [{labels[r["status"]]}] [{ext}] {name}')
+                if r.get('name'):
+                    print(f'      файл: {os.path.basename(r["src"])}')
                 if r['status'] != 'current':
                     tail = ' (замена)' if r['status'] == 'outdated' else ''
                     print(f'      → {r["db"]}{tail}')

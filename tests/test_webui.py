@@ -13,12 +13,14 @@ from confdb import webui
 from confdb.ui_core import UiCore, ServerRunner
 
 
-def _source_db(path, src_name, sha):
+def _source_db(path, src_name, sha, root_name=None, root_type='Configuration'):
     conn = sqlite3.connect(str(path))
     conn.execute('CREATE TABLE source(id INTEGER PRIMARY KEY, file TEXT,'
-                 ' created TEXT, file_sha256 TEXT, file_size INTEGER)')
-    conn.execute('INSERT INTO source(file, created, file_sha256, file_size)'
-                 ' VALUES (?,?,?,?)', (src_name, '2026-01-01', sha, 1))
+                 ' created TEXT, file_sha256 TEXT, file_size INTEGER,'
+                 ' root_name TEXT, root_type TEXT)')
+    conn.execute('INSERT INTO source(file, created, file_sha256, file_size,'
+                 ' root_name, root_type) VALUES (?,?,?,?,?,?)',
+                 (src_name, '2026-01-01', sha, 1, root_name, root_type))
     conn.commit()
     conn.close()
     return str(path)
@@ -79,13 +81,17 @@ def test_core_scan_statuses(core, tmp_path, monkeypatch):
     new.write_bytes(b'new')
     db_dir = tmp_path / 'dbs'
     db_dir.mkdir()
-    db_act = _source_db(db_dir / 'act.sqlite', 'Актуальная.cf', file_sha256(str(act)))
+    db_act = _source_db(db_dir / 'act.sqlite', 'Актуальная.cf', file_sha256(str(act)),
+                        root_name='ТестоваяКонфигурация')
     core.cf_dir = str(cf_dir)
     core.db_dirs = [str(db_dir)]
     recs = {os.path.basename(r['src']): r for r in core.scan_cf(log=lambda *a: None)}
     assert recs['Актуальная.cf']['status'] == 'current'
     assert recs['Актуальная.cf']['db'] == db_act
+    assert recs['Актуальная.cf']['ext'] == 'cf'
+    assert recs['Актуальная.cf']['name'] == 'ТестоваяКонфигурация'
     assert recs['Новая.cf']['status'] == 'new'
+    assert recs['Новая.cf']['name'] is None
 
 
 def test_core_extract_calls_pipeline(core, tmp_path, monkeypatch):

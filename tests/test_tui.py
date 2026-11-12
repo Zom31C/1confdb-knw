@@ -413,14 +413,16 @@ def test_serve_interactive_closes_dbs_on_stop(monkeypatch, tmp_path_factory):
 
 # ---------- сканирование каталога cf: новые/устаревшие конфигурации ----------
 
-def _source_db(path, src_name, sha):
+def _source_db(path, src_name, sha, root_name=None, root_type='Configuration'):
     """Минимальная база confdb: только таблица source (для source_info)."""
     import sqlite3
     conn = sqlite3.connect(str(path))
     conn.execute('CREATE TABLE source(id INTEGER PRIMARY KEY, file TEXT,'
-                 ' created TEXT, file_sha256 TEXT, file_size INTEGER)')
-    conn.execute('INSERT INTO source(file, created, file_sha256, file_size)'
-                 ' VALUES (?,?,?,?)', (src_name, '2026-01-01', sha, 1))
+                 ' created TEXT, file_sha256 TEXT, file_size INTEGER,'
+                 ' root_name TEXT, root_type TEXT)')
+    conn.execute('INSERT INTO source(file, created, file_sha256, file_size,'
+                 ' root_name, root_type) VALUES (?,?,?,?,?,?)',
+                 (src_name, '2026-01-01', sha, 1, root_name, root_type))
     conn.commit()
     conn.close()
     return str(path)
@@ -449,17 +451,24 @@ def test_scan_cf_sources_statuses(tmp_path, monkeypatch):
     new = cf_dir / 'Новая.cf'
     for f in (act, old, new):
         f.write_bytes(f.name.encode('utf-8'))
-    db_act = _source_db(tmp_path / 'act.sqlite', 'Актуальная.cf', file_sha256(str(act)))
+    db_act = _source_db(tmp_path / 'act.sqlite', 'Актуальная.cf', file_sha256(str(act)),
+                        root_name='ТестоваяКонфигурация')
     db_old = _source_db(tmp_path / 'old.sqlite', 'Устаревшая.cf', 'deadbeef')
     records = scan_cf_sources(str(cf_dir), [db_act, db_old], log=lambda *a: None)
     by_name = {os.path.basename(r['src']): r for r in records}
     assert by_name['Актуальная.cf']['status'] == 'current'
     assert by_name['Актуальная.cf']['db'] == db_act
+    # тип файла и имя корневого объекта метаданных — из собранной базы
+    assert by_name['Актуальная.cf']['ext'] == 'cf'
+    assert by_name['Актуальная.cf']['name'] == 'ТестоваяКонфигурация'
+    assert by_name['Актуальная.cf']['root_type'] == 'Configuration'
     assert by_name['Устаревшая.cf']['status'] == 'outdated'
     assert by_name['Устаревшая.cf']['db'] == db_old
     assert by_name['Новая.cf']['status'] == 'new'
     assert by_name['Новая.cf']['db'] == str(out_dir / 'Новая.sqlite')
     assert by_name['Новая.cf']['found'] is None
+    assert by_name['Новая.cf']['ext'] == 'cf'
+    assert by_name['Новая.cf']['name'] is None      # базы ещё нет — имени нет
 
 
 def test_scan_cf_sources_matches_by_sha_and_notes_conflict(tmp_path, monkeypatch):

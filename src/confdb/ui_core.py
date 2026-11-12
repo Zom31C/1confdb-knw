@@ -139,10 +139,13 @@ def scan_cf_sources(cf_dir, db_pool, log=print):
     (source.file). Отпечаток считается потоково (file_sha256), поэтому каталог
     с крупными .cf сканируется без чтения файлов в память целиком.
 
-    :return: список записей {'src','sha','status','db','found','note'}:
+    :return: список записей {'src','sha','status','db','found','note',
+        'ext','name','root_type'}:
         'current'  — база уже собрана из этого же файла (извлечение не нужно);
         'outdated' — база из одноимённого файла, но отпечаток другой (замена);
         'new'      — базы нет (извлечение в путь по умолчанию out_defaults).
+        ext — тип файла (cf/cfe/epf/erf); name/root_type — имя и тип корневого
+        объекта метаданных из собранной базы (для 'new' — None).
     """
     from .extract import file_sha256, source_info
     files = cf_files(cf_dir)
@@ -180,8 +183,15 @@ def scan_cf_sources(cf_dir, db_pool, log=print):
             status, db, found = 'new', default_db, None
             if os.path.isfile(default_db):
                 note = 'путь по умолчанию занят другой базой — будет заменён'
+        # тип файла (cf/cfe/epf/erf) и имя/тип корневого объекта метаданных —
+        # из собранной базы (source.root_name/root_type); для новой базы имени
+        # ещё нет (оно появится после извлечения)
+        ext = os.path.splitext(src)[1].lstrip('.').lower()
+        meta = pool.get(found) or {}
         records.append({'src': src, 'sha': sha, 'status': status,
-                        'db': db, 'found': found, 'note': note})
+                        'db': db, 'found': found, 'note': note,
+                        'ext': ext, 'name': meta.get('root_name'),
+                        'root_type': meta.get('root_type')})
     return records
 
 
