@@ -7,9 +7,10 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from confdb.tui import (Tui, _unquote, first_db,  # noqa: E402
+from confdb.tui import (Tui, _unquote, cf_files, first_db,  # noqa: E402
                         group_cli_args, load_groups, replace_server_dbs,
-                        resolve_launch_groups, schema_tail, shown_dbs)
+                        resolve_launch_groups, scan_cf_sources, schema_tail,
+                        shown_dbs)
 
 
 def test_unquote_stips_surrounding_quotes():
@@ -408,3 +409,129 @@ def test_serve_interactive_closes_dbs_on_stop(monkeypatch, tmp_path_factory):
     # соединении), pidfile убран
     os.remove(db)
     assert not os.path.exists(db + '.server.json')
+
+
+# ---------- сканирование каталога cf: новые/устаревшие конфигурации ----------
+
+def _source_db(path, src_name, sha):
+    """Минимальная база confdb: только таблица source (для source_info)."""
+    import sqlite3
+    conn = sqlite3.connect(str(path))
+    conn.execute('CREATE TABLE source(id INTEGER PRIMARY KEY, file TEXT,'
+                 ' created TEXT, file_sha256 TEXT, file_size INTEGER)')
+    conn.execute('INSERT INTO source(file, created, file_sha256, file_size)'
+                 ' VALUES (?,?,?,?)', (src_name, '2026-01-01', sha, 1))
+    conn.commit()
+    conn.close()
+    return str(path)
+
+
+def test_cf_files_lists_only_1c_files_sorted(tmp_path):
+    for name in ('б.cf', 'а.cfe', 'в.epf', 'г.erf', 'з.txt', 'д.CF'):
+        (tmp_path / name).write_bytes(b'x')
+    (tmp_path / 'подкаталог').mkdir()
+    found = cf_files(str(tmp_path))
+    assert [os.path.basename(p) for p in found] == ['а.cfe', 'б.cf', 'в.epf', 'г.erf', 'д.CF']
+    assert cf_files(str(tmp_path / 'нет-такого')) == []
+
+
+def test_scan_cf_sources_statuses(tmp_path, monkeypatch):
+    from confdb.extract import file_sha256
+
+    cf_dir = tmp_path / 'cf'
+    cf_dir.mkdir()
+    out_dir = tmp_path / 'out'
+    monkeypatch.setattr('confdb.tui._out_defaults',
+                        lambda src: (str(out_dir / (os.path.splitext(
+                            os.path.basename(src))[0] + '.sqlite')), str(out_dir)))
+    act = cf_dir / 'Актуальная.cf'
+    old = cf_dir / 'Устаревшая.cf'
+    new = cf_dir / 'Новая.cf'
+    for f in (act, old, new):
+        f.write_bytes(f.name.encode('utf-8'))
+    db_act = _source_db(tmp_path / 'act.sqlite', 'Актуальная.cf', file_sha256(str(act)))
+    db_old = _source_db(tmp_path / 'old.sqlite', 'Устаревшая.cf', 'deadbeef')
+    records = scan_cf_sources(str(cf_dir), [db_act, db_old], log=lambda *a: None)
+    by_name = {os.path.basename(r['src']): r for r in records}
+    assert by_name['Актуальная.cf']['status'] == 'current'
+    assert by_name['Актуальная.cf']['db'] == db_act
+    assert by_name['Устаревшая.cf']['status'] == 'outdated'
+    assert by_name['Устаревшая.cf']['db'] == db_old
+    assert by_name['Новая.cf']['status'] == 'new'
+    assert by_name['Новая.cf']['db'] == str(out_dir / 'Новая.sqlite')
+    assert by_name['Новая.cf']['found'] is None
+
+
+def test_scan_cf_sources_matches_by_sha_and_notes_conflict(tmp_path, monkeypatch):
+    from confdb.extract import file_sha256
+
+    cf_dir = tmp_path / 'cf'
+    cf_dir.mkdir()
+    out_dir = tmp_path / 'out'
+    out_dir.mkdir()
+    monkeypatch.setattr('confdb.tui._out_defaults',
+                        lambda src: (str(out_dir / (os.path.splitext(
+                            os.path.basename(src))[0] + '.sqlite')), str(out_dir)))
+    src = cf_dir / 'Конфигурация.cf'
+    src.write_bytes(b'data')
+    # база из того же файла, но имя исходника в source другое — совпадение по sha
+    renamed = _source_db(tmp_path / 'renamed.sqlite', 'ДругоеИмя.cf', file_sha256(str(src)))
+    rec = scan_cf_sources(str(cf_dir), [renamed], log=lambda *a: None)[0]
+    assert rec['status'] == 'current' and rec['db'] == renamed
+    # путь по умолчанию занят чужой базой — новая конфигурация получит пометку
+    other = cf_dir / 'Другая.cf'
+    other.write_bytes(b'other')
+    _source_db(out_dir / 'Другая.sqlite', 'Чужая.cf', 'cafe')
+    rec2 = next(r for r in scan_cf_sources(str(cf_dir), [], log=lambda *a: None)
+                if os.path.basename(r['src']) == 'Другая.cf')
+    assert rec2['status'] == 'new' and 'занят другой базой' in rec2['note']
+
+
+def test_scan_cf_dir_extracts_new_and_replaces_outdated(tmp_path, monkeypatch):
+    """Пункт 5 меню извлечения: «a» извлекает новые и заменяет устаревшие."""
+    from confdb.extract import file_sha256
+
+    cf_dir = tmp_path / 'cf'
+    cf_dir.mkdir()
+    out_dir = tmp_path / 'out'
+    out_dir.mkdir()
+    monkeypatch.setattr('confdb.tui._out_defaults',
+                        lambda src: (str(out_dir / (os.path.splitext(
+                            os.path.basename(src))[0] + '.sqlite')), str(out_dir)))
+    monkeypatch.setattr('confdb.tui._cls', lambda: None)
+    new = cf_dir / 'Новая.cf'
+    old = cf_dir / 'Устаревшая.cf'
+    cur = cf_dir / 'Актуальная.cf'
+    for f in (new, old, cur):
+        f.write_bytes(f.name.encode('utf-8'))
+    db_old = _source_db(out_dir / 'Устаревшая.sqlite', 'Устаревшая.cf', 'deadbeef')
+    db_cur = _source_db(out_dir / 'Актуальная.sqlite', 'Актуальная.cf',
+                        file_sha256(str(cur)))
+    calls = []
+
+    def fake_extract(src, **kw):
+        calls.append((src, kw['db_path'], kw['source_sha256']))
+        return {'db': kw['db_path'], 'elapsed': '0:00:01'}
+
+    monkeypatch.setattr('confdb.tui.extract', fake_extract)
+    tui = _Tui(db_entries=[db_old, db_cur])
+    tui.cf_dir = str(cf_dir)
+    tui.groups = {}
+    tui.temp = ''
+    tui.keep_temp = False
+    tui.store_blobs = False
+    tui.prefix = ''
+    tui.skip_errors = False
+    tui.workers = 1
+    tui.build_fts = False
+    tui.recent_src = []
+    tui._save = lambda: None  # не трогаем реальный ~/.confdb/config.json
+    # «a» — все новые/устаревшие; Enter — подтвердить; Enter — после извлечения
+    _feed(monkeypatch, ['a', '', '', ''])
+    tui._scan_cf_dir()
+    extracted = {os.path.basename(src) for src, _db, _sha in calls}
+    assert extracted == {'Новая.cf', 'Устаревшая.cf'}  # актуальная пропущена
+    # устаревшая извлечена в тот же файл (замена), с готовым отпечатком
+    old_call = next(c for c in calls if os.path.basename(c[0]) == 'Устаревшая.cf')
+    assert old_call[1] == db_old and old_call[2] == file_sha256(str(old))
+    assert tui.last_db and tui.recent_db

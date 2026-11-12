@@ -61,14 +61,95 @@ def _remember(items, value, limit=6):
     return [value] + [x for x in items if x != value][:limit - 1]
 
 
-def _cf_candidates():
+def _cf_candidates(extra_dirs=()):
     roots = [os.getcwd(),
              os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))]
+    roots += [d for d in extra_dirs if d]
     found = []
     for root in dict.fromkeys(roots):
-        for pattern in ('*.cf', '*.cfe', '*.epf', os.path.join('cf', '*.cf'), os.path.join('cf', '*.cfe')):
+        for pattern in ('*.cf', '*.cfe', '*.epf', '*.erf',
+                        os.path.join('cf', '*.cf'), os.path.join('cf', '*.cfe')):
             found += glob.glob(os.path.join(root, pattern))
     return sorted({os.path.abspath(p) for p in found})
+
+
+# файлы 1С, которые умеет извлекать конвейер (внешние отчёты .erf тоже)
+CF_EXTS = ('.cf', '.cfe', '.epf', '.erf')
+
+
+def cf_files(directory):
+    """Файлы 1С каталога (.cf/.cfe/.epf/.erf), отсортированные по имени."""
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return []
+    found = []
+    for name in names:
+        full = os.path.join(directory, name)
+        if name.lower().endswith(CF_EXTS) and os.path.isfile(full):
+            found.append(os.path.abspath(full))
+    return sorted(found)
+
+
+def scan_cf_sources(cf_dir, db_pool, log=print):
+    """Сверяет файлы 1С каталога с базами знаний по SHA-256 исходника.
+
+    Для каждого файла каталога ищется база, собранная из него: сначала по
+    совпадению отпечатка (source.file_sha256), затем по имени исходного файла
+    (source.file). Отпечаток считается потоково (file_sha256), поэтому каталог
+    с крупными .cf сканируется без чтения файлов в память целиком.
+
+    :param cf_dir: каталог с файлами 1С;
+    :param db_pool: пути баз-кандидатов (каталоги баз, группы, недавние);
+        несуществующие и не-базы confdb молча пропускаются;
+    :param log: куда печатать прогресс хэширования;
+    :return: список записей по каждому файлу каталога:
+        {'src', 'sha', 'status', 'db', 'found', 'note'}, где status:
+        'current'  — база уже собрана из этого же файла (извлечение не нужно);
+        'outdated' — база из одноимённого файла, но отпечаток другой (замена);
+        'new'      — базы нет (извлечение в путь по умолчанию _out_defaults).
+        db — путь базы для извлечения/замены, found — найденная база или None.
+    """
+    from .extract import file_sha256, source_info
+    files = cf_files(cf_dir)
+    pool = {}
+    for path in db_pool:
+        if not path:
+            continue
+        key = os.path.abspath(path)
+        if key in pool or not os.path.isfile(key):
+            continue
+        info = source_info(key)
+        if info:
+            pool[key] = info
+    records = []
+    for i, src in enumerate(files, 1):
+        log(f'Хэш {i}/{len(files)}: {os.path.basename(src)}')
+        sha = file_sha256(src)
+        base = os.path.basename(src).lower()
+        same_sha = sorted(p for p, inf in pool.items()
+                          if inf.get('file_sha256') == sha)
+        same_name = sorted(p for p, inf in pool.items()
+                           if os.path.basename(inf.get('file') or '').lower() == base)
+        default_db = _out_defaults(src)[0]
+        note = ''
+        if same_sha:
+            # та же конфигурация уже собрана; предпочитаем одноимённую базу
+            found = next((p for p in same_sha if p in same_name), same_sha[0])
+            status, db = 'current', found
+        elif same_name:
+            found = (default_db if default_db in same_name
+                     else max(same_name, key=lambda p: pool[p].get('created') or ''))
+            status, db = 'outdated', found
+            if not pool[found].get('file_sha256'):
+                note = 'в базе нет отпечатка исходника — сравнение по имени'
+        else:
+            status, db, found = 'new', default_db, None
+            if os.path.isfile(default_db):
+                note = 'путь по умолчанию занят другой базой — будет заменён'
+        records.append({'src': src, 'sha': sha, 'status': status,
+                        'db': db, 'found': found, 'note': note})
+    return records
 
 
 def load_groups(config):
@@ -194,6 +275,7 @@ class Tui:
         opts = config.get('options', {})
         self.src = opts.get('src', '')
         self.db = opts.get('db', '')
+        self.cf_dir = opts.get('cf_dir', '')
         self.dump = opts.get('dump', '')
         self.temp = opts.get('temp', '')
         self.prefix = opts.get('prefix', '')
@@ -215,7 +297,8 @@ class Tui:
             'last_db': self.last_db,
             'groups': self.groups,
             'options': {
-                'src': self.src, 'db': self.db, 'dump': self.dump, 'temp': self.temp,
+                'src': self.src, 'db': self.db, 'cf_dir': self.cf_dir,
+                'dump': self.dump, 'temp': self.temp,
                 'prefix': self.prefix, 'keep_temp': self.keep_temp,
                 'store_blobs': self.store_blobs, 'skip_errors': self.skip_errors,
                 'build_fts': self.build_fts,
@@ -351,6 +434,8 @@ class Tui:
             print(f' 2. База SQLite:  {self.db or "<не писать>"}')
             print(f' 3. Дамп дерева:  {self.dump or "<не сохранять>"}')
             print(' 4. Запустить извлечение')
+            print(f' 5. Сканировать каталог cf: {self.cf_dir or "<не задан>"}')
+            print('    (новые и устаревшие конфигурации — по SHA-256)')
             print(' 0. Назад')
             choice = input('Выбор: ').strip()
             if choice == '0':
@@ -359,7 +444,7 @@ class Tui:
             if choice == '1':
                 picked = self._pick_path(
                     'Файл конфигурации 1С (.cf/.cfe/.epf) или каталог выгрузки',
-                    _cf_candidates(), self.recent_src)
+                    _cf_candidates([self.cf_dir]), self.recent_src)
                 if picked:
                     self.src = picked
                     # База по умолчанию — рядом с исходником, имя из его имени.
@@ -380,9 +465,131 @@ class Tui:
                     self.dump = picked
             elif choice == '4':
                 self._run_extract()
+            elif choice == '5':
+                self._scan_cf_dir()
             else:
                 print('Неизвестный пункт меню.')
                 input('Нажмите Enter…')
+
+    def _extract_options(self):
+        """Опции декодера из настроек TUI (общие для одиночного и пакетного)."""
+        options = {'store_blobs': self.store_blobs}
+        if self.prefix:
+            options['prefix'] = self.prefix
+        if self.skip_errors:
+            options['skip_errors'] = True
+        return options
+
+    def _scan_cf_dir(self):
+        """Пакетное извлечение: сканирует каталог cf и предлагает новые/устаревшие.
+
+        Сверка по SHA-256 (scan_cf_sources): конфигурации, которых нет среди
+        баз, извлекаются заново; одноимённые, но с другим отпечатком —
+        пересобираются с заменой sqlite; актуальные пропускаются.
+        """
+        if not self.cf_dir or not os.path.isdir(self.cf_dir):
+            picked = _ask_path('Каталог с файлами 1С (.cf/.cfe/.epf/.erf)',
+                               self.cf_dir)
+            if not picked or not os.path.isdir(picked):
+                print('Каталог не задан или не существует.')
+                input('Нажмите Enter…')
+                return
+            self.cf_dir = os.path.abspath(picked)
+            self._save()
+        files = cf_files(self.cf_dir)
+        if not files:
+            print(f'В каталоге нет файлов .cf/.cfe/.epf/.erf: {self.cf_dir}')
+            input('Нажмите Enter…')
+            return
+        # пул баз-кандидатов: известные каталоги + группы + недавние + пути
+        # по умолчанию для каждого файла каталога
+        pool = list(self._db_candidates())
+        for paths in self.groups.values():
+            pool += paths
+        pool += [p for p in ([self.last_db] + self.recent_db) if p]
+        pool += [_out_defaults(src)[0] for src in files]
+        _cls()
+        print(f'Сканирую {self.cf_dir} (файлов: {len(files)})…')
+        records = scan_cf_sources(self.cf_dir, pool)
+        labels = {'new': 'новая   ', 'outdated': 'устарела', 'current': 'актуальна'}
+        actionable = [i for i, r in enumerate(records, 1)
+                      if r['status'] != 'current']
+        while True:
+            _cls()
+            print(f'--- Каталог cf: {self.cf_dir} ---')
+            for i, r in enumerate(records, 1):
+                print(f' {i}. [{labels[r["status"]]}] {os.path.basename(r["src"])}')
+                if r['status'] != 'current':
+                    tail = ' (замена)' if r['status'] == 'outdated' else ''
+                    print(f'      → {r["db"]}{tail}')
+                if r['note']:
+                    print(f'      {r["note"]}')
+            print()
+            if actionable:
+                print('Номера через пробел/запятую — извлечь выбранные; '
+                      'a — все новые и устаревшие.')
+            else:
+                print('Все конфигурации каталога уже собраны и актуальны.')
+            print('0. Назад')
+            choice = input('Выбор: ').strip().lower()
+            if choice in ('0', ''):
+                return
+            if not actionable:
+                continue
+            if choice in ('a', 'а', 'all'):
+                picked = list(actionable)
+            else:
+                nums = choice.replace(',', ' ').split()
+                if not nums or not all(t.isdigit() for t in nums):
+                    print('Непонятная команда.')
+                    input('Нажмите Enter…')
+                    continue
+                picked = [int(t) for t in nums
+                          if 1 <= int(t) <= len(records)
+                          and records[int(t) - 1]['status'] != 'current']
+            if not picked:
+                continue
+            break
+        chosen = [records[i - 1] for i in picked]
+        replace = sum(1 for r in chosen if os.path.isfile(r['db']))
+        print(f'Будет извлечено: {len(chosen)}'
+              + (f', из них с заменой существующих баз: {replace}' if replace else ''))
+        if not _yes_no('Продолжить?', True):
+            return
+        ok, failed = 0, []
+        for r in chosen:
+            _cls()
+            print(f'=== {os.path.basename(r["src"])} → {r["db"]} ===')
+            try:
+                os.makedirs(os.path.dirname(os.path.abspath(r['db'])),
+                            exist_ok=True)
+                stats = extract(
+                    r['src'], db_path=r['db'], temp_dir=self.temp or None,
+                    keep_temp=self.keep_temp, options=self._extract_options(),
+                    workers=self.workers, build_fts=self.build_fts,
+                    source_sha256=r['sha'])
+            except PermissionError as err:
+                print(f'Файл базы занят другим процессом (запущен MCP-сервер?): {err}')
+                failed.append(os.path.basename(r['src']))
+                input('Нажмите Enter…')
+                continue
+            except Exception as err:  # noqa: BLE001 — одна ошибка не роняет пакет
+                print(f'Ошибка извлечения: {err}')
+                failed.append(os.path.basename(r['src']))
+                input('Нажмите Enter…')
+                continue
+            ok += 1
+            self.last_db = stats['db']
+            self.recent_src = _remember(self.recent_src, r['src'])
+            self.recent_db = _remember(self.recent_db, r['db'])
+            self._save()
+            print(f'Готово за {stats["elapsed"]}.')
+            input('Нажмите Enter…')
+        _cls()
+        print(f'Извлечено {ok} из {len(chosen)}.')
+        if failed:
+            print('С ошибками: ' + ', '.join(failed))
+        input('Нажмите Enter…')
 
     def _run_extract(self):
         # каталог выгрузки конфигурации в файлы — свой конвейер (XML вместо
@@ -411,11 +618,7 @@ class Tui:
             if out:
                 os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
 
-        options = {'store_blobs': self.store_blobs}
-        if self.prefix:
-            options['prefix'] = self.prefix
-        if self.skip_errors:
-            options['skip_errors'] = True
+        options = self._extract_options()
         # отпечаток исходника считается один раз: он же отвечает, не собрана ли
         # целевая база из этого же файла (SHA-256 885 МБ — 1,7 с против ~70 с
         # извлечения), и уходит в source новой базы
@@ -527,7 +730,9 @@ class Tui:
                   f'{"да" if self.skip_errors else "нет"}')
             print(f' 7. Строить FTS-индекс по телам методов: '
                   f'{"да" if self.build_fts else "нет (можно достроить позже)"}')
-            print(' 8. Бенчмарк: подобрать число процессов под железо')
+            print(f' 8. Каталог с файлами 1С (.cf/.cfe/.epf/.erf): '
+                  f'{self.cf_dir or "<не задан>"}')
+            print(' 9. Бенчмарк: подобрать число процессов под железо')
             print(' 0. Назад')
             choice = input('Выбор: ').strip()
             if choice == '0':
@@ -561,6 +766,14 @@ class Tui:
                     'телам идёт полным проходом, индекс достраивается после извлечения)',
                     self.build_fts)
             elif choice == '8':
+                picked = _ask_path('Каталог с файлами 1С (пусто — сбросить)',
+                                   self.cf_dir)
+                if picked and not os.path.isdir(picked):
+                    print('Нет такого каталога.')
+                    input('Нажмите Enter…')
+                else:
+                    self.cf_dir = os.path.abspath(picked) if picked else ''
+            elif choice == '9':
                 self._run_bench()
             else:
                 print('Неизвестный пункт меню.')
@@ -1119,7 +1332,7 @@ class Tui:
     def _run_bench(self):
         if not self.src or not os.path.isfile(self.src):
             picked = self._pick_path('Файл конфигурации 1С для бенчмарка',
-                                     _cf_candidates(), self.recent_src)
+                                     _cf_candidates([self.cf_dir]), self.recent_src)
             if not picked:
                 return
             self.src = picked
