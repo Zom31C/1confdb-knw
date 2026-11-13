@@ -1181,16 +1181,46 @@ def test_extract_object_properties_links():
 
 
 def test_extract_http_methods():
+    """Глагол — код m[2] (не имя метода m[3][2]); все методы шаблона.
+
+    Коды сверены с XML-выгрузкой (HTTPMethod): 3=GET, 11=POST, 14=PUT,
+    2=DELETE. Ревизия схемы 13 (отзыв LLM 2026-11-13).
+    """
     from confdb.db.writer import _extract_http_methods
-    method = ['0', '"ПолучитьВерсию_GET"', '3',
-              ['3', ['1', '0', 'u'], '"get"'], '0']
+    # m[3][2] — реалистичное ИМЯ метода, глагол берётся из m[2]='3' (GET)
+    method = ['0', '"ПолучитьВерсию"', '3',
+              ['3', ['1', '0', 'u'], '"ПолучитьВерсию"',
+               ['1', '"ru"', '"Получить версию"'], '""', '0', '0',
+               '00000000-0000-0000-0000-000000000000', '0'], '0']
     mb = ['muuid', '1', [method]]
     group = [['0', '"/version"', ['core']], '1', mb]
     utb = ['uuid', '1', group]
     header = {'header': [['1', ['2', '"api"', ['core']], '1', utb]]}
     assert _extract_http_methods(header) == \
-        [('/version', 'GET', 'ПолучитьВерсию_GET')]
+        [('/version', 'GET', 'ПолучитьВерсию')]
     assert _extract_http_methods({}) == []
+    # плоский формат блока: пары [запись, флаг]; шаблон с НЕСКОЛЬКИМИ методами
+    # (старый парсер терял второй и далее) — POST, PUT, DELETE
+    m_post = ['0', '"СчетДобавить"', '11',
+              ['3', ['1', '0', 'u'], '"Добавить"'], '0']
+    m_put = ['0', '"СчетИзменить"', '14',
+             ['3', ['1', '0', 'u'], '"Изменить"'], '0']
+    m_del = ['0', '"СчетУдалить"', '2',
+             ['3', ['1', '0', 'u'], '"Удалить"'], '0']
+    mb_flat = ['muuid', '3', [m_post, '0'], [m_put, '0'], [m_del, '0']]
+    group2 = [['0', '"/bill/*"', ['core']], '1', mb_flat]
+    utb2 = ['uuid', '1', group2]
+    header2 = {'header': [['1', ['2', '"api"', ['core']], '1', utb2]]}
+    assert _extract_http_methods(header2) == [
+        ('/bill/*', 'POST', 'СчетДобавить'),
+        ('/bill/*', 'PUT', 'СчетИзменить'),
+        ('/bill/*', 'DELETE', 'СчетУдалить')]
+    # неизвестный код глагола — None, без мусора
+    m_unknown = ['0', '"Х"', '99', ['3', ['1', '0', 'u'], '"Х"'], '0']
+    group3 = [['0', '"/x"', ['core']], '1', ['uuid', '1', [m_unknown]]]
+    header3 = {'header': [['1', ['2', '"api"', ['core']], '1',
+                           ['uuid', '1', group3]]]}
+    assert _extract_http_methods(header3) == [('/x', None, 'Х')]
 
 
 def test_extract_webservice_operations():

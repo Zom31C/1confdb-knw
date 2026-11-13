@@ -41,7 +41,14 @@ ROOT_TYPES = ('Configuration', 'ConfigurationExtension', 'ExternalDataProcessor'
 # выгрузки для инкрементального обновления), attribute_ref.target_path
 # (цель ссылки по пути — позволяет переразрешить ссылку, когда объект
 # добавлен позже ссылки) (2026-11-07).
-SCHEMA_VERSION = 12
+# 10 — enum-маркеры/синонимы, алиасы uuid, составной Pattern (2026-11-10);
+# 11 — form_attribute/form_command/form_event/form_parameter, object_property
+# (2026-11-11); 12 — проводки Document.RegisterRecords (object_property),
+# http_method/webservice_operation, свойства-ссылки (2026-11-12).
+# 13 — http_method.http_method: НАСТОЯЩИЙ глагол по коду m[2] вместо имени
+# обработчика .upper(); исправлена потеря 2-го+ методов URL-шаблона
+# (2026-11-13, отзывы LLM). Данные меняются — нужна пересборка.
+SCHEMA_VERSION = 13
 
 RE_UUID = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.I)
 
@@ -862,11 +869,51 @@ def _block_items(block):
     return block[2:]
 
 
+# Код HTTP-глагола в cf (поле m[2] записи метода URL-шаблона) — 0-based
+# индекс английского имени в алфавитном порядке перечисления HTTPМетод.
+# Сверено с XML-выгрузкой (атрибут HTTPMethod): 33 метода ЗУП_РФ и
+# templateRole, коды 2=DELETE, 3=GET, 11=POST, 14=PUT подтверждены напрямую;
+# остальные — по алфавитному порядку перечисления (18 значений).
+_HTTP_VERB_BY_CODE = {
+    '0': 'CONNECT', '1': 'COPY', '2': 'DELETE', '3': 'GET', '4': 'HEAD',
+    '5': 'LOCK', '6': 'MERGE', '7': 'MKCOL', '8': 'MOVE', '9': 'OPTIONS',
+    '10': 'PATCH', '11': 'POST', '12': 'PROPFIND', '13': 'PROPPATCH',
+    '14': 'PUT', '15': 'TRACE', '16': 'UNLOCK', '17': 'ANY',
+}
+
+
+def _http_method_records(block):
+    """Записи методов из блока [uuid, count, …].
+
+    В cf встречаются два формата: плоский — элементы block[2:] как пары
+    [запись, флаг]; обёрнутый — block[2] список записей. Старый _block_items
+    терял 2-й и далее методы шаблона с несколькими методами (отзыв LLM
+    2026-11-13: PUT/DELETE маршрутов не было в карточке).
+    """
+    if not isinstance(block, list) or len(block) < 3:
+        return []
+    if len(block) == 3 and isinstance(block[2], list) and block[2] \
+            and all(isinstance(x, list) for x in block[2]):
+        entries = block[2]
+    else:
+        entries = block[2:]
+    recs = []
+    for e in entries:
+        if isinstance(e, list) and len(e) == 2 and isinstance(e[0], list) \
+                and isinstance(e[1], str):
+            recs.append(e[0])          # элемент = [запись, флаг]
+        elif isinstance(e, list):
+            recs.append(e)             # элемент = сама запись
+    return recs
+
+
 def _extract_http_methods(header):
     """Методы HTTP-сервиса из cf: (url_template, http_method, handler).
 
     header[0][3] — блок URL-шаблонов; группа = [ut-запись, '1', блок методов];
-    шаблон = group[0][1], обработчик = method[1], глагол = имя метода (get→GET).
+    шаблон = group[0][1]; запись метода m: обработчик = m[1], глагол = КОД
+    m[2] (m[3][2] — имя метода, не глагол: до ревизии 13 он ошибочно
+    выдавался за глагол в upper case).
     """
     try:
         utb = header['header'][0][3]
@@ -878,13 +925,12 @@ def _extract_http_methods(header):
                 or not isinstance(group[0], list) or len(group[0]) < 2:
             continue
         template = _unquote(group[0][1])
-        for m in _block_items(group[2]):
-            if not isinstance(m, list) or len(m) < 4 \
-                    or not isinstance(m[3], list) or len(m[3]) < 3:
+        for m in _http_method_records(group[2]):
+            if not isinstance(m, list) or len(m) < 3:
                 continue
-            handler = _unquote(m[1])
-            verb = _unquote(m[3][2])
-            out.append((template, verb.upper() if verb else None, handler))
+            handler = _unquote(m[1]) if isinstance(m[1], str) else None
+            verb = _HTTP_VERB_BY_CODE.get(str(m[2]))
+            out.append((template, verb, handler))
     return out
 
 

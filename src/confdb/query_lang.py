@@ -901,13 +901,66 @@ def check_query(text, ctx):
     return errors
 
 
-def check_query_full(text, ctx):
+def check_query_full(text, ctx, extra_tables=None):
     """Проверяет запрос; возвращает (errors, unverified).
 
     unverified — список строк вида 'Параметр.Поле', обращения к которым
     не удалось проверить (параметр-таблица не имеет известной схемы).
+
+    extra_tables — схемы внешних таблиц (отзыв LLM 2026-11-13): словарь
+    {имя: {колонка: тип}} либо {имя: [колонки]}. Покрывает параметры-таблицы
+    (&Сотрудники, &Периоды) и временные таблицы, созданные в другом методе:
+    их поля проверяются строго, цепочки — по указанному типу колонки.
     """
+    if extra_tables:
+        ctx = _ExtraCtx(ctx, _normalize_extra_tables(extra_tables))
     return _check_query_full(text, ctx)
+
+
+def _normalize_extra_tables(extra_tables):
+    """Имена и колонки в нижний регистр; список колонок → словарь без типов."""
+    out = {}
+    for name, cols in (extra_tables or {}).items():
+        if isinstance(cols, dict):
+            out[str(name).lower()] = {str(c).lower(): (t or None)
+                                      for c, t in cols.items()}
+        elif isinstance(cols, (list, tuple)):
+            out[str(name).lower()] = {str(c).lower(): None for c in cols}
+    return out
+
+
+class _ExtraCtx:
+    """MetaContext + внешние таблицы: прокси, не меняющий кэш контекста базы."""
+
+    def __init__(self, ctx, extra):
+        self._ctx = ctx
+        self.extra = extra
+
+    def __getattr__(self, name):
+        return getattr(self._ctx, name)
+
+
+def _resolve_type_path(tstr, ctx):
+    """Тип колонки ('СправочникСсылка.Х', 'CatalogRef.Х', 'Документ.Х') → путь.
+
+    None — тип не ссылочный/неизвестен: цепочку дальше не проверяем.
+    """
+    parts = str(tstr).strip().split('.')
+    if len(parts) < 2:
+        return None
+    head = parts[0]
+    for suffix in ('Ссылка', 'Ref'):
+        if head.endswith(suffix) and len(head) > len(suffix):
+            head = head[:-len(suffix)]
+            break
+    path = ctx.resolve_table([head, parts[1]])
+    if path is None:
+        # английские имена типов (CatalogRef.Х) — через обратную карту префиксов
+        stem_ru = {v: k for k, v in QUERY_PREFIXES.items()}
+        ru = stem_ru.get(head)
+        if ru:
+            path = ctx.resolve_table([ru, parts[1]])
+    return path
 
 
 def _check_query_full(text, ctx):
@@ -977,11 +1030,15 @@ def _check_select(node, ctx, temp, errors, unverified=None):
 def _register_source(source, ctx, temp, scope, errors):
     kind = source[0]
     alias = source[-1]
+    extra = getattr(ctx, 'extra', None)
     if kind == 'table':
         segments = source[1]
         name0 = segments[0]
         if name0 in temp:
             info = ('derived', temp[name0])
+        elif extra and name0.lower() in extra:
+            # внешняя таблица с заданной схемой (ВТ из другого метода)
+            info = ('extra', name0.lower(), extra[name0.lower()])
         elif len(segments) == 1:
             # односегментная таблица вне temp — временная таблица из другого
             # набора данных той же СКД: не ошибка, поля не проверяем
@@ -997,7 +1054,11 @@ def _register_source(source, ctx, temp, scope, errors):
             info = ('obj', ctx.resolve_table(segments))
         name = alias or name0
     elif kind == 'param':
-        info = ('param', None)
+        if extra and source[1].lower() in extra:
+            # параметр-таблица с заданной схемой (&Сотрудники, &Периоды)
+            info = ('extra', source[1].lower(), extra[source[1].lower()])
+        else:
+            info = ('param', None)
         name = alias or source[1]
     else:
         info = ('derived', _select_columns(source[1]))
@@ -1114,6 +1175,23 @@ def _check_field(parts, ctx, scope, errors, unverified=None):
             if ref not in unverified:
                 unverified.append(ref)
         return
+    if info[0] == 'extra':
+        # внешняя таблица с заданной схемой: первое поле строго, цепочка —
+        # по типу колонки, если он разрешается в объект конфигурации
+        cols = info[2]
+        if not rest:
+            return
+        first = rest[0]
+        if first.lower() not in cols:
+            errors.append(
+                f'неизвестное поле внешней таблицы {info[1]}: {first}')
+            return
+        tstr = cols.get(first.lower())
+        path = _resolve_type_path(tstr, ctx) if tstr else None
+        if path is None or len(rest) == 1:
+            return
+        info = ('obj', path)
+        rest = rest[1:]
     if info[0] != 'obj' or info[1] is None:
         return
     path = info[1]

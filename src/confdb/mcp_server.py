@@ -27,9 +27,11 @@
 активная база переключается инструментом db_use.
 """
 import argparse
+import bisect
 import collections
 import functools
 import glob
+import hashlib
 import json
 import os
 import queue
@@ -338,21 +340,140 @@ def ru_type_str(text):
     return ' | '.join(annotated)
 
 
-def body_hits(body, needle, line_start=1, limit=3, width=150):
+def _bsl_regions(body):
+    """Области комментариев и строковых литералов BSL: [(start, end, kind)].
+
+    Быстрый один проход для фильтра поиска по телам (scope): // комментарии,
+    строки в двойных кавычках ("" — экранирование, перенос через | в начале
+    следующей строки), даты в одинарных. kind: 'comment' | 'string'; всё
+    остальное — исполняемый код. Не полный лексер: для фильтрации совпадений
+    достаточно областей, а не токенов.
+    """
+    regions = []
+    i, n = 0, len(body)
+    while i < n:
+        c = body[i]
+        if c == '/' and body.startswith('//', i):
+            j = body.find('\n', i + 2)
+            j = n if j < 0 else j
+            regions.append((i, j, 'comment'))
+            i = j
+        elif c == '"' or c == "'":
+            quote = c
+            j = i + 1
+            while j < n:
+                ch = body[j]
+                if quote == '"' and ch == '"':
+                    if body.startswith('""', j):
+                        j += 2
+                        continue
+                    j += 1
+                    break
+                if ch == '\n':
+                    if quote == '"':
+                        k = j + 1
+                        while k < n and body[k] in ' \t\r':
+                            k += 1
+                        if k < n and body[k] == '|':
+                            j = k + 1
+                            continue
+                    break
+                j += 1
+            regions.append((i, min(j, n), 'string'))
+            i = min(j, n)
+        else:
+            i += 1
+    return regions
+
+
+def _scope_kind_at(regions, starts, pos):
+    """Область позиции: 'comment' | 'string' | 'code'."""
+    k = bisect.bisect_right(starts, pos) - 1
+    if k >= 0 and pos < regions[k][1]:
+        return regions[k][2]
+    return 'code'
+
+
+def _scope_accepts(kind, scope):
+    if scope == 'code':
+        return kind == 'code'
+    if scope == 'strings':
+        return kind == 'string'
+    if scope == 'no_comments':
+        return kind != 'comment'
+    return True  # all
+
+
+def body_has_scope(body, needle, scope):
+    """body_has с областью поиска: all / code / strings / no_comments.
+
+    SQL-функция для find_methods(scope=…): совпадение засчитывается, только
+    если игла встречается в исполняемом коде (code), в строковых литералах
+    (strings) или вне комментариев (no_comments). Комментарии // и строки
+    размечаются одним проходом (_bsl_regions), позиции вхождений ищутся
+    быстрым find — полный лексер на каждое тело был бы слишком дорог.
+    """
+    if not isinstance(body, str) or not isinstance(needle, str):
+        return False
+    low_needle = needle.lower()
+    if not low_needle:
+        return False
+    low_body = body.lower()
+    if scope == 'all':
+        return low_needle in low_body
+    positions = []
+    start = 0
+    while len(positions) < 64:
+        p = low_body.find(low_needle, start)
+        if p < 0:
+            break
+        positions.append(p)
+        start = p + 1
+    if not positions:
+        return False
+    regions = _bsl_regions(body)
+    starts = [r[0] for r in regions]
+    for p in positions:
+        if _scope_accepts(_scope_kind_at(regions, starts, p), scope):
+            return True
+    return False
+
+
+def body_hits(body, needle, line_start=1, limit=3, width=150, scope='all'):
     """Строки тела метода, содержащие подстроку: ['строка N: <текст>', …].
 
     Номер строки — в модуле, а не в теле (line_start метода уже учтён), поэтому
     по нему работают get_method и find_method_context. Сравнение без учёта
     регистра: LIKE в SQLite сворачивает регистр только для ASCII, а имена 1С
-    кириллические, поэтому здесь сворачиваем сами.
+    кириллические, поэтому здесь сворачиваем сами. scope ограничивает область
+    совпадений (code/strings/no_comments) — как в body_has_scope.
     """
     low = needle.lower()
+    regions = _bsl_regions(body) if scope != 'all' else None
+    starts = [r[0] for r in regions] if regions is not None else None
     hits = []
+    offset = 0
     for i, line in enumerate(body.split('\n')):
-        if low in line.lower():
-            hits.append(f'строка {line_start + i}: {line.strip()[:width]}')
-            if len(hits) >= limit:
-                break
+        ll = line.lower()
+        if low in ll:
+            ok = True
+            if scope != 'all':
+                ok = False
+                s = 0
+                while True:
+                    p = ll.find(low, s)
+                    if p < 0:
+                        break
+                    kind = _scope_kind_at(regions, starts, offset + p)
+                    if _scope_accepts(kind, scope):
+                        ok = True
+                        break
+                    s = p + 1
+            if ok:
+                hits.append(f'строка {line_start + i}: {line.strip()[:width]}')
+                if len(hits) >= limit:
+                    break
+        offset += len(line) + 1
     return hits
 
 
@@ -652,6 +773,11 @@ LLM_LOG_LINES = 400      # строк журнала держим в памят�
 LLM_RESP_CHARS = 2000    # символов ответа на запись
 LLM_RESP_LINES = 60      # строк ответа на запись
 
+# разделы object_card (параметр sections): паспорт печатается всегда
+CARD_SECTIONS = ('attrs', 'tabulars', 'enum', 'forms', 'props', 'api',
+                 'predefined', 'subscriptions', 'modules', 'children',
+                 'skd', 'xdto', 'refs')
+
 
 class McpServer:
     """Обработчик JSON-RPC сообщений MCP поверх баз SQLite (read-only).
@@ -816,6 +942,8 @@ class McpServer:
             'body_has', 2,
             lambda body, needle: isinstance(body, str)
             and isinstance(needle, str) and needle.lower() in body.lower())
+        # поиск по телам с областью совпадения (код/строки/без комментариев)
+        conn.create_function('body_has_scope', 3, body_has_scope)
         try:
             conn.execute('SELECT COUNT(*) FROM meta_object').fetchone()
         except sqlite3.Error:
@@ -1358,13 +1486,29 @@ class McpServer:
                       (entry['handler'], entry['handler_method'])).fetchone()[0]
         return _subscription_lines(entry, bool(found))
 
-    def object_card(self, path, db=None):
+    def object_card(self, path, db=None, sections=None, limit=0, offset=0):
         path = self.resolve_path(path, db)
         q = self.conn(db).execute
         row = q('SELECT type, type_ru, name, comment, header_json '
                 'FROM meta_object WHERE path=?', (path,)).fetchone()
         if not row:
             return f'объект не найден: {path}'
+        # выбор разделов карточки (отзыв LLM 2026-11-13): большие карточки
+        # документов с десятками табличных частей обрезались клиентом целиком
+        if sections:
+            chosen = {s.strip().lower()
+                      for s in re.split(r'[,\s]+', str(sections)) if s.strip()}
+            unknown = chosen - set(CARD_SECTIONS)
+            if unknown:
+                raise UserError(
+                    'неизвестные разделы карточки: ' + ', '.join(sorted(unknown))
+                    + '; доступны: ' + ', '.join(CARD_SECTIONS))
+        else:
+            chosen = set(CARD_SECTIONS)
+
+        def want(sec):
+            return sec in chosen
+
         oid = q('SELECT id FROM meta_object WHERE path=?', (path,)).fetchone()[0]
         # тип — русским именем, как в конфигураторе: английский stem остаётся
         # в колонке type и в списках find_objects, но не в паспорте. TYPE_RU
@@ -1389,79 +1533,95 @@ class McpServer:
                     out.extend(_exchange_plan_lines_named(items, q))
         attrs = q('SELECT name, type_str FROM meta_attribute '
                   'WHERE object_id=? AND tabular IS NULL ORDER BY ord',
-                  (oid,)).fetchall()
+                  (oid,)).fetchall() if want('attrs') else []
         kinds = (header_props.register_field_kinds(row[4])
                  if row[0] in _REGISTER_TYPES else {})
-        if kinds:
-            # у регистра измерения/ресурсы/реквизиты показываются раздельно:
-            # по плоскому списку не понять, что входит в ключ записи
-            groups = {}
-            for name, tstr in attrs:
-                groups.setdefault(kinds.get(name, 'Прочие поля'), []).append(
-                    f'{name}: {ru_type_str(tstr) or "тип не извлечён"}')
-            for kind in header_props.REGISTER_KINDS + ('Прочие поля',):
-                if kind in groups:
-                    out.append(f'{kind}: ' + '; '.join(groups[kind]))
-            if not attrs:
-                out.append('Реквизиты: нет')
-        else:
-            out.append('Реквизиты: ' + ('; '.join(
-                f'{n}: {ru_type_str(t) or "тип не извлечён"}' for n, t in attrs)
-                if attrs else 'нет'))
+        if want('attrs'):
+            if kinds:
+                # у регистра измерения/ресурсы/реквизиты показываются раздельно:
+                # по плоскому списку не понять, что входит в ключ записи
+                groups = {}
+                for name, tstr in attrs:
+                    groups.setdefault(kinds.get(name, 'Прочие поля'), []).append(
+                        f'{name}: {ru_type_str(tstr) or "тип не извлечён"}')
+                for kind in header_props.REGISTER_KINDS + ('Прочие поля',):
+                    if kind in groups:
+                        out.append(f'{kind}: ' + '; '.join(groups[kind]))
+                if not attrs:
+                    out.append('Реквизиты: нет')
+            else:
+                out.append('Реквизиты: ' + ('; '.join(
+                    f'{n}: {ru_type_str(t) or "тип не извлечён"}' for n, t in attrs)
+                    if attrs else 'нет'))
         tabs = q('SELECT t.name, a.name, a.type_str FROM meta_tabular t '
                  'LEFT JOIN meta_attribute a ON a.object_id=t.object_id '
                  'AND a.tabular=t.name WHERE t.object_id=? '
-                 'ORDER BY t.ord, a.ord', (oid,)).fetchall()
-        sections = {}
+                 'ORDER BY t.ord, a.ord', (oid,)).fetchall() \
+            if want('tabulars') else []
+        tab_sections = {}
         for sec, fname, ftype in tabs:
             # у секции без извлечённых полей LEFT JOIN даёт одну строку с NULL:
             # это не поле с именем None, а отсутствующий состав
-            sections.setdefault(sec, [])
+            tab_sections.setdefault(sec, [])
             if fname is not None:
-                sections[sec].append(
+                tab_sections[sec].append(
                     f'{fname}: {ru_type_str(ftype) or "тип не извлечён"}')
         # сколько полей объявляет сама конфигурация — без этого пустую секцию
         # не отличить от пробела извлечения
-        declared = tabular_field_counts(row[4])
-        for sec, fields in sections.items():
+        declared = tabular_field_counts(row[4]) if want('tabulars') else {}
+        for sec, fields in tab_sections.items():
             if fields:
-                out.append(f'Табличная часть {sec}: ' + '; '.join(fields))
+                # пагинация полей секции (limit/offset) — для очень длинных
+                # табличных частей; без limit печатаются все поля
+                if limit and limit > 0:
+                    shown = fields[offset:offset + limit]
+                    tail = (f' (показано {offset + 1}–{offset + len(shown)} '
+                            f'из {len(fields)}; limit/offset)')
+                    out.append(f'Табличная часть {sec}: '
+                               + ('; '.join(shown) if shown
+                                  else 'поля вне диапазона offset') + tail)
+                else:
+                    out.append(f'Табличная часть {sec}: ' + '; '.join(fields))
             elif declared.get(sec) == 0:
                 # в конфигурации у секции не объявлено ни одного поля: это факт,
                 # а не пробел извлечения
                 out.append(f'Табличная часть {sec}: полей не объявлено')
             else:
                 out.append(f'Табличная часть {sec}: полей не извлечено')
-        if row[0] == 'Enum':
+        if row[0] == 'Enum' and want('enum'):
             out.extend(self._enum_card_lines(q, oid, row[4]))
-        if (row[0] or '').endswith('Form'):
+        if (row[0] or '').endswith('Form') and want('forms'):
             out.extend(self._form_card_lines(q, oid))
         oprops = q('SELECT name, value FROM object_property '
-                   'WHERE object_id=? ORDER BY ord', (oid,)).fetchall()
+                   'WHERE object_id=? ORDER BY ord', (oid,)).fetchall() \
+            if want('props') else []
         if oprops:
             out.extend(self._object_property_lines(oprops))
-        if row[0] in ('HTTPService', 'WebService'):
+        if row[0] in ('HTTPService', 'WebService') and want('api'):
             out.extend(self._service_card_lines(q, oid, row[0]))
         predef = q('SELECT ord, parent_ord, name, code, display FROM predefined '
-                   'WHERE object_id=? ORDER BY ord', (oid,)).fetchall()
+                   'WHERE object_id=? ORDER BY ord', (oid,)).fetchall() \
+            if want('predefined') else []
         if predef:
             out.extend(_predefined_lines(q, oid, predef, row[0]))
-        subs = self.event_index(db)['by_source'].get(path)
+        subs = self.event_index(db)['by_source'].get(path) \
+            if want('subscriptions') else None
         if subs:
             # платформа вызывает эти обработчики сама: в коде объекта
             # таких вызовов нет, и без этой строки их не найти
             out.append(_source_subscriptions_line(subs))
         mods = q('SELECT code_name, context FROM module WHERE object_id=?',
-                 (oid,)).fetchall()
+                 (oid,)).fetchall() if want('modules') else []
         if mods:
             out.append('Модули: ' + ', '.join(
                 c + (f' [{x}]' if x else '') for c, x in mods))
-        out.extend(self._children_lines(q, oid))
+        if want('children'):
+            out.extend(self._children_lines(q, oid))
         nskd = q('SELECT COUNT(*) FROM skd_query WHERE object_id=?',
-                 (oid,)).fetchone()[0]
+                 (oid,)).fetchone()[0] if want('skd') else 0
         if nskd:
             out.append(f'Запросов СКД: {nskd} (см. skd_of)')
-        if row[0] == 'XDTOPackage':
+        if row[0] == 'XDTOPackage' and want('xdto'):
             # состав пакета в паспорт не печатается: типов бывает сотни
             ntypes, nprops = q(
                 'SELECT (SELECT COUNT(*) FROM xdto_type WHERE object_id=?),'
@@ -1475,7 +1635,8 @@ class McpServer:
             'JOIN meta_attribute a ON a.id=r.attribute_id '
             'JOIN meta_object v ON v.id=a.object_id '
             'JOIN meta_object t ON t.id=r.object_id '
-            'WHERE v.path=? AND t.path IS NOT NULL LIMIT 12', (path,))]
+            'WHERE v.path=? AND t.path IS NOT NULL LIMIT 12', (path,))] \
+            if want('refs') else []
         if fwd:
             out.append('Ссылается на: ' + ', '.join(ru_path(p) for p in fwd))
         rev = [r[0] for r in q(
@@ -1483,9 +1644,12 @@ class McpServer:
             'JOIN meta_attribute a ON a.id=r.attribute_id '
             'JOIN meta_object v ON v.id=a.object_id '
             'JOIN meta_object t ON t.id=r.object_id '
-            'WHERE t.path=? LIMIT 12', (path,))]
+            'WHERE t.path=? LIMIT 12', (path,))] if want('refs') else []
         if rev:
             out.append('На него ссылаются: ' + ', '.join(ru_path(p) for p in rev))
+        if sections:
+            out.append('Разделы: ' + ', '.join(sorted(chosen))
+                       + ' (полная карточка — без sections)')
         return '\n'.join(out)
 
     @staticmethod
@@ -1574,15 +1738,39 @@ class McpServer:
 
     @staticmethod
     def _service_card_lines(q, oid, otype):
-        """Карта API сервиса: HTTP-методы (URL-шаблон + глагол + обработчик)
-        либо операции веб-сервиса (имя → обработчик, тип возврата)."""
+        """Карта API сервиса: HTTP-методы (глагол, URL-шаблон, обработчик)
+        либо операции веб-сервиса (имя → обработчик, тип возврата).
+
+        Каждый маршрут — отдельной строкой; методы модуля, не привязанные ни
+        к одному маршруту, показываются отдельно (отзыв LLM 2026-11-13: нельзя
+        было отличить отсутствие привязки от ограничения извлечения).
+        """
         out = []
         if otype == 'HTTPService':
             rows = q('SELECT url_template, http_method, handler FROM http_method '
                      'WHERE object_id=? ORDER BY ord', (oid,)).fetchall()
             if rows:
-                parts = [f'{m or "?"} {t or ""} → {h}' for t, m, h in rows]
-                out.append(f'Методы HTTP ({len(rows)}): ' + '; '.join(parts))
+                out.append(f'Методы HTTP ({len(rows)}):')
+                for t, m, h in rows:
+                    if h:
+                        out.append(f'  {m or "?"} {t or ""} → обработчик {h}')
+                    else:
+                        out.append(f'  {m or "?"} {t or ""} '
+                                   '(обработчик не назначен)')
+            else:
+                out.append('Методы HTTP: маршруты не извлечены')
+            handlers = {(h or '').lower() for _, _, h in rows}
+            methods = [r[0] for r in q(
+                'SELECT mt.name FROM method mt JOIN module m '
+                'ON m.id=mt.module_id WHERE m.object_id=? ORDER BY mt.id',
+                (oid,))]
+            unbound = [n for n in methods if n.lower() not in handlers]
+            if unbound:
+                out.append(f'Обработчики без маршрута ({len(unbound)}): '
+                           + ', '.join(unbound))
+                out.append('  (маршруты извлечены из URL-шаблонов; метод без '
+                           'маршрута может вызываться из кода, либо его '
+                           'привязка не извлечена)')
         else:
             rows = q('SELECT name, procedure_name, return_type, transactioned '
                      'FROM webservice_operation WHERE object_id=? ORDER BY ord',
@@ -3153,13 +3341,15 @@ class McpServer:
             return json.dumps(env, ensure_ascii=False, indent=2)
         return '\n'.join(out)
 
-    def module_outline(self, path, code_name='obj', db=None):
+    def module_outline(self, path, code_name='obj', exclude=None, db=None):
         path = self.resolve_path(path, db)
         row = self.conn(db).execute(
             'SELECT m.body FROM module m JOIN meta_object o ON o.id=m.object_id '
             'WHERE o.path=? AND m.code_name=?', (path, code_name)).fetchone()
         if not row or not row[0]:
             return f'модуль не найден: {path} ({code_name})'
+        if exclude:
+            return _outline_exclude(row[0], str(exclude))
         return row[0]
 
     def _method_row(self, path, code_name, name, db=None):
@@ -3922,7 +4112,7 @@ class McpServer:
         return ' AND mt.id IN (SELECT id FROM temp._fts_hits)', []
 
     def find_methods(self, mask='', text='', path=None, limit=20, offset=0,
-                     db=None):
+                     scope='all', db=None):
         """Поиск методов: mask — имя/сигнатура/описание, text — подстрока в теле.
 
         text отвечает на вопрос «где в коде это упоминается» — все обращения к
@@ -3931,7 +4121,16 @@ class McpServer:
         дальше инструментом sql не нужно. Совпадений обычно больше страницы —
         выдача листается параметром offset; порядок строгий (по id метода,
         а он растёт вдоль объектов и модулей), поэтому страницы не пересекаются.
+
+        scope ограничивает область совпадений в теле (отзыв LLM 2026-11-13:
+        поиск засорялся ссылками на задачи в комментариях): 'all' — везде,
+        'code' — только исполняемый код, 'strings' — только строковые литералы,
+        'no_comments' — код и строки, без комментариев.
         """
+        scope = (scope or 'all').lower()
+        if scope not in ('all', 'code', 'strings', 'no_comments'):
+            raise UserError('scope должен быть all, code, strings или '
+                            'no_comments')
         path = self.resolve_path(path, db) if path else None
         limit, offset = page_limit(limit), page_offset(offset)
         like = f'%{mask}%'
@@ -3952,23 +4151,31 @@ class McpServer:
             if fts_filter:
                 cond += fts_filter[0]
                 params.extend(fts_filter[1])
+                if scope != 'all':
+                    # FTS даёт кандидатов, точную область решает функция
+                    cond += ' AND body_has_scope(mt.body, ?, ?)'
+                    params.extend([text, scope])
             else:
                 # body_has — своя SQL-функция, регистронезависимая в обе стороны:
                 # LIKE сворачивает регистр только для ASCII, а пара LIKE через OR
                 # ловила бы лишь тот регистр, в котором игла передана
-                cond += ' AND body_has(mt.body, ?)'
-                params.append(text.lower())
+                if scope != 'all':
+                    cond += ' AND body_has_scope(mt.body, ?, ?)'
+                    params.extend([text, scope])
+                else:
+                    cond += ' AND body_has(mt.body, ?)'
+                    params.append(text.lower())
         if path:
             cond += ' AND o.path=?'
             params.append(path)
         tables = (' FROM method mt '
                   'JOIN module m ON m.id=mt.module_id '
                   'JOIN meta_object o ON o.id=m.object_id WHERE ')
-        # extra=(text,): при поиске по FTS-индексу игла попадает не в params,
-        # а во временную таблицу совпадений, и без неё ключ кэша совпал бы
-        # у двух разных поисков
+        # extra=(text, scope): при поиске по FTS-индексу игла попадает не в
+        # params, а во временную таблицу совпадений, и без неё ключ кэша совпал
+        # бы у двух разных поисков; scope меняет условие — тоже часть ключа
         total = self.count_of(f'SELECT COUNT(*){tables}{cond}', params, db,
-                              extra=(text,))
+                              extra=(text, scope))
         if not total:
             return f'в телах методов ничего не найдено: {text}' if text \
                 else 'ничего не найдено'
@@ -3991,7 +4198,7 @@ class McpServer:
             if dirs:
                 line += f' [{dirs}]'
             if text:
-                hits = body_hits(row[7] or '', text, row[8] or 1)
+                hits = body_hits(row[7] or '', text, row[8] or 1, scope=scope)
                 if hits:
                     line += '\n    ' + '\n    '.join(hits)
             elif desc:
@@ -4161,29 +4368,48 @@ class McpServer:
                                     f'свойств {props_total})'))
         return '\n'.join(out)
 
-    def check_query(self, text, db=None):
+    def check_query(self, text, tables=None, db=None):
         from .query_lang import check_query_full
-        errs, unverified = check_query_full(text, self.ctx(db))
+        extra = tables
+        if isinstance(extra, str):
+            try:
+                extra = json.loads(extra)
+            except ValueError:
+                raise UserError(
+                    'tables должен быть JSON-объектом: {имя: {колонка: тип}}')
+        if extra is not None and not isinstance(extra, dict):
+            raise UserError(
+                'tables должен быть объектом: {имя: {колонка: тип}} либо '
+                '{имя: [колонки]}')
+        errs, unverified = check_query_full(text, self.ctx(db),
+                                            extra_tables=extra)
         parts = []
         if errs:
             parts.append('Ошибки:\n' + '\n'.join(ru_text(e) for e in errs))
+        elif unverified:
+            # неполная проверка — отдельный статус, чтобы OK не воспринимался
+            # как «проверено всё» (отзыв LLM 2026-11-13)
+            parts.append(
+                'PARTIAL: синтаксис корректен, таблицы/поля/цепочки существуют,'
+                ' но часть полей НЕ проверена (схема неизвестна)\n\n'
+                'Непроверенные поля параметров-таблиц:\n' +
+                '\n'.join(f'  {ref}' for ref in unverified) +
+                '\n\nПередайте таблицы параметром tables '
+                '({имя: {колонка: тип}}), чтобы проверить и их')
         else:
-            msg = 'OK: синтаксис корректен, таблицы/поля/цепочки существуют'
-            if unverified:
-                msg += ('\n\nНепроверенные поля параметров-таблиц '
-                        '(схема неизвестна):\n' +
-                        '\n'.join(f'  {ref}' for ref in unverified))
-            parts.append(msg)
+            parts.append('OK: синтаксис корректен, таблицы/поля/цепочки существуют')
         return '\n'.join(parts)
 
-    def check_syntax(self, path=None, code_name='obj', text=None, db=None,
-                     semantic=False):
+    def check_syntax(self, path=None, code_name='obj', text=None,
+                     file_path=None, db=None, semantic=False):
         """Проверка модуля/кода BSL нативным парсером (без платформы и без
         Java/BSL Language Server — язык разбирает confdb.bsl_syntax).
 
-        Два режима:
+        Три режима:
         - ``text`` — проверить произвольный фрагмент кода или целый модуль
           (то, что агент собирается отдать пользователю);
+        - ``file_path`` — проверить локальный файл .bsl/.txt; чтение только
+          из каталогов, разрешённых в syntax_check_dirs (~/.confdb/config.json);
         - ``path`` (+``code_name``) — проверить модуль конфигурации из базы:
           полный текст реконструируется из module.body и тел его методов.
 
@@ -4206,10 +4432,12 @@ class McpServer:
         sem_kwargs = {}
         if text is not None:
             source_text = text
-            label = 'фрагмент кода'
+            label = 'переданный текст'
+        elif file_path:
+            source_text, label = _read_bsl_file(file_path)
         else:
             if not path:
-                raise UserError('укажите path (и code_name) либо text')
+                raise UserError('укажите path (и code_name), text либо file_path')
             path = self.resolve_path(path, db)
             conn = self.conn(db)
             row = conn.execute(
@@ -4249,7 +4477,11 @@ class McpServer:
             }
         result = analyze(source_text)
         syn = result.diags
-        out = []
+        # идентификация проверенного исходника (отзыв LLM 2026-11-13):
+        # имя источника, число строк и SHA-256 однозначно фиксируют редакцию
+        src_lines = source_text.count('\n') + 1 if source_text else 0
+        src_sha = hashlib.sha256(source_text.encode('utf-8')).hexdigest()
+        out = [f'Источник: {label} · строк: {src_lines} · SHA-256: {src_sha}']
         if syn:
             out.append(f'Синтаксические ошибки ({len(syn)}) — {label}:')
             for d in syn:
@@ -4266,8 +4498,9 @@ class McpServer:
         if semantic:
             from .bsl_semantic import analyze_module
             extra = [self.bsl_ctx(a) for a in self.other_aliases(db)]
+            stats = {}
             sem = analyze_module(source_text, self.bsl_ctx(db),
-                                 extra_ctxs=extra, **sem_kwargs)
+                                 extra_ctxs=extra, stats=stats, **sem_kwargs)
             if sem:
                 rank = {'ERROR': 0, 'WARNING': 1, 'INFO': 2}
                 sem.sort(key=lambda d: (rank.get(d.severity, 3), d.line, d.col))
@@ -4281,7 +4514,22 @@ class McpServer:
                     out.append(f'  … и ещё {len(sem) - limit} (показаны первые '
                                f'{limit}, порядок ERROR→WARNING→INFO)')
             else:
-                out.append('Семантических замечаний нет.')
+                out.append('Семантических замечаний нет (в пределах границ ниже).')
+            # честные границы анализа (отзыв LLM 2026-11-13): «замечаний нет»
+            # не должно читаться как «проверено всё, включая динамику»
+            out.append('')
+            out.append('Границы семантической проверки:')
+            out.append(f"  методов: {stats.get('methods', 0)}; запросов встроенных: "
+                       f"{stats.get('queries_checked', 0)} проверено, "
+                       f"{stats.get('queries_skipped', 0)} пропущено "
+                       '(шаблоны/обрывки); непроверенных полей параметров: '
+                       f"{stats.get('query_unverified', 0)}")
+            out.append(f"  динамических Вычислить/Выполнить: "
+                       f"{stats.get('dynamic_eval', 0)} — их содержимое "
+                       'статически не разрешается')
+            out.append('  не проверяется: платформенный API (типы/методы/свойства'
+                       ' — syntax_search/syntax_card), атрибуты форм вне модуля'
+                       ' формы, динамически собираемые имена и запросы')
         return '\n'.join(out)
 
     def sql(self, query, db=None):
@@ -4744,15 +4992,91 @@ class FanoutError(Exception):
     """Групповой вызов, в котором отказали ВСЕ базы: текст секций + isError."""
 
 
-def _fanout_call(server, fn, alias, call_args, groups, state):
+# чтение локальных BSL-файлов для check_syntax(file_path=…): только каталоги
+# из syntax_check_dirs (~/.confdb/config.json) — сервер read-only, чтение
+# произвольных файлов было бы расширением поверхности (отзыв LLM 2026-11-13)
+_BSL_FILE_EXTS = ('.bsl', '.txt')
+_BSL_FILE_MAX = 10 * 1024 * 1024
+
+
+def _read_bsl_file(file_path):
+    """(текст, метка) локального BSL-файла из разрешённого каталога.
+
+    Кодировка: UTF-8 (с BOM или без), при неудаче — cp1251 (выгрузки
+    конфигуратора встречаются в обеих). Путь нормализуется ДО проверки
+    вхождения в разрешённый каталог, чтобы «..» не выводил наружу.
+    """
+    dirs = load_config().get('syntax_check_dirs') or []
+    if not isinstance(dirs, list) or not dirs:
+        raise UserError(
+            'чтение локальных файлов не настроено: добавьте разрешённые '
+            'каталоги в syntax_check_dirs файла ~/.confdb/config.json '
+            '(список путей) либо передайте text')
+    path = os.path.abspath(os.path.normpath(str(file_path)))
+    allowed = [os.path.abspath(os.path.normpath(str(d)))
+               for d in dirs if d]
+    if not any(path == d or path.startswith(d + os.sep) for d in allowed):
+        raise UserError(
+            f'каталог файла не разрешён для проверки: {path} — добавьте его '
+            'в syntax_check_dirs (~/.confdb/config.json)')
+    if not os.path.isfile(path):
+        raise UserError(f'файл не найден: {path}')
+    if os.path.splitext(path)[1].lower() not in _BSL_FILE_EXTS:
+        raise UserError('для проверки разрешены файлы .bsl и .txt')
+    if os.path.getsize(path) > _BSL_FILE_MAX:
+        raise UserError('файл слишком большой для проверки (лимит 10 МБ)')
+    with open(path, 'rb') as fh:
+        raw = fh.read()
+    try:
+        content = raw.decode('utf-8-sig')
+    except UnicodeDecodeError:
+        content = raw.decode('cp1251')
+    return content, path
+
+
+def _outline_exclude(body, mask):
+    """Убирает из outline методы, чьё имя содержит маску (например «_old»).
+
+    Outline хранит сигнатуры без тел; сигнатура может занимать несколько
+    строк (баланс скобок), перед ней — директивы &НаКлиенте/… — их тоже
+    убираем. В конце — пометка, сколько методов скрыто (отзыв LLM 2026-11-13).
+    """
+    from .bsl_parser import RE_METHOD
+    needle = mask.lower()
+    lines = body.splitlines()
+    out = []
+    i, n, hidden = 0, len(lines), 0
+    while i < n:
+        m = RE_METHOD.match(lines[i])
+        if m and needle in m.group('name').lower():
+            depth = lines[i].count('(') - lines[i].count(')')
+            t = i
+            while depth > 0 and t + 1 < n:
+                t += 1
+                depth += lines[t].count('(') - lines[t].count(')')
+            while out and out[-1].lstrip().startswith('&'):
+                out.pop()
+            hidden += 1
+            i = t + 1
+            continue
+        out.append(lines[i])
+        i += 1
+    if hidden:
+        out.append(f'// скрыто методов по фильтру «{mask}»: {hidden}')
+    return '\n'.join(out)
+
+
+def _fanout_call(server, fn, alias, call_args, groups, state, use_db=True):
     """Секция одной базы группового вызова; отказ базы не прерывает обход.
 
     `state` — alias -> «база отказала»: по нему итог считает отказавшие базы.
     База может входить в несколько групп и тогда вызывается не один раз —
     состояние записывается одно, и отказ перевешивает удачный ответ.
+    `use_db=False` — вызов не читает базу знаний (чистый синтаксис текста),
+    ревизия схемы его не блокирует.
     """
     try:
-        part = server.outdated(alias)
+        part = server.outdated(alias) if use_db else None
         if part is None:
             part = call_with_retry(fn, server, **call_args)
         failed = False
@@ -4792,6 +5116,20 @@ class Tool:
         return {'name': self.name, 'description': self.description,
                 'inputSchema': self.schema}
 
+    def uses_db(self, args):
+        """Нужна ли вызову база знаний (и проверка ревизии её схемы).
+
+        check_syntax с переданным text или локальным file_path и без semantic
+        проверяет грамматику языка нативным парсером — база и её ревизия ни
+        при чём (отзыв LLM 2026-11-13: схема 9 блокировала даже чистый
+        синтаксис). С semantic или path база нужна — гейт остаётся.
+        """
+        if self.name == 'check_syntax':
+            has_source = (args.get('text') is not None
+                          or args.get('file_path') is not None)
+            return not has_source or bool(args.get('semantic'))
+        return True
+
     def run(self, server, **args):
         # приведение аргументов по схеме: неверный ввод ловится на границе
         # как BAD_ARGS, а не голым ValueError внутри инструмента (тот теперь
@@ -4829,7 +5167,8 @@ class Tool:
                         call_args = {k: v for k, v in args.items() if k != 'group'}
                         call_args['db'] = alias
                         group_parts.append(_fanout_call(
-                            server, self.fn, alias, call_args, [], state))
+                            server, self.fn, alias, call_args, [], state,
+                            use_db=self.uses_db(call_args)))
                 if group_parts:
                     parts.append(f'=== группа {group_name} ===\n' + '\n\n'.join(group_parts))
             if not parts:
@@ -4849,7 +5188,8 @@ class Tool:
                     call_args = {k: v for k, v in args.items() if k != 'group'}
                     call_args['db'] = alias
                     parts.append(_fanout_call(server, self.fn, alias, call_args,
-                                              [group], state))
+                                              [group], state,
+                                              use_db=self.uses_db(call_args)))
             if not parts:
                 raise UserError(f'группа {group} не содержит открытых баз')
             return _fanout_answer(parts, state)
@@ -4860,7 +5200,8 @@ class Tool:
             state = {}
             for alias in server.dbs:
                 parts.append(_fanout_call(server, self.fn, alias,
-                                          dict(args, db=alias), None, state))
+                                          dict(args, db=alias), None, state,
+                                          use_db=self.uses_db(args)))
             if not parts:
                 raise UserError('нет открытых баз — укажите путь в db_open')
             return _fanout_answer(parts, state)
@@ -4868,7 +5209,7 @@ class Tool:
         # Обычный запрос к одной базе
         props = self.schema.get('properties', {})
         has_db = 'db' in props
-        if not is_management:
+        if not is_management and self.uses_db(args):
             # ревизия схемы проверяется ДО запроса: база чужой ревизии не
             # читается вовсе, и ответ велит пересобрать её вместо того чтобы
             # упасть ошибкой схемы на отсутствующей таблице или колонке
@@ -4947,8 +5288,15 @@ TOOLS = [
          'SKD query count, forward/reverse references. For an '
          'EventSubscription: its event, handler module.method and source '
          'objects; for an ExchangePlan: the objects it synchronizes. '
-         'Use right after find_objects.',
-         _schema({'path': _STR, 'db': _DB, 'group': _GROUP}, ('path',)),
+         'Use right after find_objects. LARGE cards: sections=<comma list> '
+         'returns only the chosen parts (attrs, tabulars, enum, forms, props, '
+         'api, predefined, subscriptions, modules, children, skd, xdto, refs; '
+         'the header passport always prints); limit/offset paginate the fields '
+         'of each tabular section. For HTTP services the api section lists each '
+         'route (verb, URL template, handler) and the module methods NOT bound '
+         'to any route.',
+         _schema({'path': _STR, 'sections': _STR, 'limit': _INT, 'offset': _INT,
+                  'db': _DB, 'group': _GROUP}, ('path',)),
          McpServer.object_card),
     Tool('object_tree',
          "Browse the metadata tree 'as in the configurator' (subsystems, "
@@ -5041,8 +5389,12 @@ TOOLS = [
     Tool('module_outline',
          'Table of contents of a 1C module: signatures, comments, #Если '
          "regions, WITHOUT method bodies. code_name: 'obj' (object module), "
-         "'mgr' (manager module) etc. Cheap way to inspect a module.",
-         _schema({'path': _STR, 'code_name': _STR, 'db': _DB, 'group': _GROUP}, ('path',)),
+         "'mgr' (manager module) etc. Cheap way to inspect a module. "
+         "exclude=<substring> hides methods whose NAME contains it "
+         "(e.g. exclude='_old' to skip legacy methods); the answer reports "
+         'how many were hidden.',
+         _schema({'path': _STR, 'code_name': _STR, 'exclude': _STR,
+                  'db': _DB, 'group': _GROUP}, ('path',)),
          McpServer.module_outline),
     Tool('get_method',
          'Full source of one procedure/function: signature, directives '
@@ -5120,12 +5472,19 @@ TOOLS = [
          'common module, all uses of a field) without falling back to sql — '
          'each hit comes with its module line number and the line itself. '
          'mask and text may be combined; path narrows the search to one object '
-         '(it is a real filter now). Body search is case-insensitive and scans '
+         '(it is a real filter now). scope narrows WHERE in the body a text hit '
+         "counts: 'all' (default), 'code' = executable code only (ignores "
+         "comments AND string literals — e.g. skip task-tracker links in "
+         "comments), 'strings' = string literals only, 'no_comments' = code + "
+         'strings. Body search is case-insensitive and scans '
          'every method, so it takes seconds on a large base. Hits are paged: '
          'the answer ends with the total count and the offset of the next '
          'page, so page through a broad search instead of raising limit.',
          _schema({'mask': _STR, 'text': _STR, 'path': _STR, 'limit': _LIMIT,
-                  'offset': _OFFSET, 'db': _DB, 'group': _GROUP}),
+                  'offset': _OFFSET,
+                  'scope': {'type': 'string',
+                            'enum': ['all', 'code', 'strings', 'no_comments']},
+                  'db': _DB, 'group': _GROUP}),
          McpServer.find_methods),
     Tool('skd_of',
          'All SKD (report) queries of an object — the best examples of how '
@@ -5158,16 +5517,36 @@ TOOLS = [
     Tool('check_query',
          'Validate a 1C query: syntax (Russian keywords) + existence of '
          'tables/fields/reference chains against this configuration. ALWAYS '
-         'run it on a query you wrote before using it.',
-         _schema({'text': _STR, 'db': _DB, 'group': _GROUP}, ('text',)),
+         'run it on a query you wrote before using it. Status OK = fully '
+         'verified; PARTIAL = syntax and known tables/fields are correct but '
+         'some parameter-table fields could NOT be verified (their schema is '
+         'unknown — the answer lists them); errors are listed explicitly. '
+         'tables = schemas of external tables to verify TOO: '
+         '{"ИмяТаблицы": {"Колонка": "Тип", ...}} (or a list of columns) — '
+         'covers parameter tables (&Сотрудники, &Периоды) and temp tables '
+         'created in another method; column types like СправочникСсылка.Х '
+         'enable reference-chain checks.',
+         _schema({'text': _STR,
+                  'tables': {'type': 'object',
+                             'description': 'External table schemas: '
+                                            '{name: {column: type}} or '
+                                            '{name: [columns]}'},
+                  'db': _DB, 'group': _GROUP}, ('text',)),
          McpServer.check_query),
     Tool('check_syntax',
          'Check a 1C/BSL module with the built-in parser (no platform, no '
          'Java). Pass text=<code> to validate a snippet or a whole module you '
          'are about to give the user — ALWAYS do this before delivering BSL '
-         'code; or pass path (+code_name, default "obj") to check an existing '
+         'code; or file_path=<local .bsl/.txt file> to check a file on disk '
+         '(only directories listed in syntax_check_dirs of '
+         '~/.confdb/config.json are readable — the error tells how to add '
+         'them); or pass path (+code_name, default "obj") to check an existing '
          'module of the configuration (its full text is rebuilt from the '
-         'knowledge base). By default checks SYNTAX only (grammar): '
+         'knowledge base). The answer starts with source identification: '
+         'label, line count and SHA-256 of the exact text checked. Syntax-only '
+         'checking of passed text or a local file needs NO knowledge base and '
+         'works regardless of its schema revision. By default checks SYNTAX '
+         'only (grammar): '
          'diagnostics as line:col [Code] message (ParseError, '
          'InvalidCharacterInFile, preprocessor #Если/#Область balance, '
          'unclosed strings/brackets); empty = correct. Add semantic=True for '
@@ -5178,11 +5557,14 @@ TOOLS = [
          'client-code calls to server common modules, unused local variables, '
          'break/continue outside a loop, deprecated/insecure global calls '
          '(Вычислить/Выполнить, modal windows, file system, internet). '
-         'Semantic notes come as a separate ERROR/WARNING/INFO section; names '
-         'that resolve to nothing known (platform API, form attributes) are '
-         'never flagged — that boundary is stated, not guessed.',
+         'Semantic notes come as a separate ERROR/WARNING/INFO section plus '
+         'an explicit boundary report (what was checked, what stayed '
+         'dynamic); names that resolve to nothing known (platform API, form '
+         'attributes) are never flagged — that boundary is stated, not '
+         'guessed.',
          _schema({'path': _STR, 'code_name': _STR, 'text': _STR,
-                  'semantic': _BOOL, 'db': _DB, 'group': _GROUP}),
+                  'file_path': _STR, 'semantic': _BOOL,
+                  'db': _DB, 'group': _GROUP}),
          McpServer.check_syntax),
     Tool('syntax_search',
          'Fuzzy search in the PLATFORM SYNTAX HELPER — the built-in 1C '
@@ -5190,7 +5572,9 @@ TOOLS = [
          'attached with --syntax-db — db_list reports whether it is): '
          'global-context methods, types and their '
          'members, system-table fields. RU and EN names, word parts and '
-         'typos all work (FTS5 + substring + Levenshtein). Each hit: id, '
+         'typos all work (FTS5 + substring + Levenshtein). EXACT name matches '
+         "rank first; a 'Type Method' query (e.g. 'ТабличныйДокумент "
+         "Прочитать') resolves to that method of that type. Each hit: id, "
          'kind, name, and its parent (same member names in different types '
          'are told apart by it). Take the id to syntax_card.',
          _schema({'query': _STR, 'limit': _LIMIT}, ('query',)),

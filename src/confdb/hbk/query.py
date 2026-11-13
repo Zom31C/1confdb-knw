@@ -143,14 +143,87 @@ def fuzzy_ids(tokens, name_cache, max_dist=2):
     return scored
 
 
+def exact_ids(tokens, name_cache):
+    """Точное совпадение имени темы с запросом (RU/EN, без регистра).
+
+    Запрос «ДвоичныеДанные» обязан выдавать одноимённый тип первым, а не
+    темы, где он упомянут в описании (отзыв LLM 2026-11-13).
+    """
+    if not tokens:
+        return []
+    whole = ' '.join(tokens).lower()
+    joined = ''.join(tokens).lower()
+    out = []
+    for tid, nru, nen in name_cache:
+        for nm in (nru, nen):
+            if nm and nm.lower() in (whole, joined):
+                out.append(tid)
+                break
+    return out
+
+
+def type_method_ids(conn, tokens, name_cache):
+    """«Тип Метод» (ТабличныйДокумент Прочитать): имя темы == последний
+    токен, кто-то из предков (до 4 уровней) == первый токен/склейка остальных.
+
+    Имена методов в справке повторяются у разных типов, поэтому запрос из
+    двух слов разрешается в конкретный метод конкретного типа. Регистр
+    сворачивается питоним lower: sqlite lower() кириллицу не знает.
+    """
+    if len(tokens) < 2:
+        return []
+    method = tokens[-1].lower()
+    type_variants = {tokens[0].lower(), ''.join(tokens[:-1]).lower()}
+    cand = [tid for tid, nru, nen in name_cache
+            if (nru and nru.lower() == method)
+            or (nen and nen.lower() == method)]
+    if not cand:
+        return []
+    cache = {}
+
+    def topic(tid):
+        if tid not in cache:
+            cache[tid] = conn.execute(
+                'SELECT name_ru, name_en, parent_id FROM topics WHERE id=?',
+                (tid,)).fetchone()
+        return cache[tid]
+
+    out = []
+    for tid in cand:
+        row = topic(tid)
+        cur = row[2] if row else None
+        depth, matched = 0, False
+        while cur is not None and depth < 4 and not matched:
+            r = topic(cur)
+            if r is None:
+                break
+            if any(nm and nm.lower() in type_variants
+                   for nm in (r[0], r[1])):
+                matched = True
+            cur = r[2]
+            depth += 1
+        if matched:
+            out.append(tid)
+    return out
+
+
 def search(conn, query, limit, name_cache):
-    """Слить результаты трёх методов, вернуть [(id, оценка, источник)]."""
+    """Слить результаты методов, вернуть [(id, оценка, источник)].
+
+    Тиры: точное имя (200) > «тип+метод» (190) > FTS (100-pos) >
+    подстрока (70-pos) > нечёткий (40-d*10). Точные совпадения всегда сверху.
+    """
     tokens = _tokens(query)
     if not tokens:
         return []
     scored = {}  # id -> (score, source)
     cap = limit * 5
 
+    for tid in exact_ids(tokens, name_cache):
+        scored[tid] = (200, 'точное имя')
+    for tid in type_method_ids(conn, tokens, name_cache):
+        if tid not in scored or scored[tid][0] < 190:
+            scored[tid] = (190, 'тип+метод')
     for pos, tid in enumerate(fts_ids(conn, tokens, cap)):
         s = 100 - min(pos, 60)
         if tid not in scored or s > scored[tid][0]:

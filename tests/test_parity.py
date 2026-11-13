@@ -316,16 +316,19 @@ def make_cf_tree(base):
     _json(os.path.join(role_dir, 'Role.id.json'), {'uuid': ROLE_UUID})
     _write(os.path.join(role_dir, 'Role.0.c1brace'), ROLE_RIGHTS_CFBRACE)
 
-    # HTTP-сервис: RootURL + URL-шаблон + метод (ревизия 12)
+    # HTTP-сервис: RootURL + URL-шаблон + ДВА метода (ревизия 13: глагол —
+    # код m[2], не имя метода; шаблон с несколькими методами не теряет их)
     http_dir = os.path.join(base, 'HTTPService', 'Сервис1')
     _json(os.path.join(http_dir, 'HTTPService.json'), {
         'name': 'Сервис1', 'obj_version': '803',
         'header': [['1', ['2', '"api"', ['core'], '0', '20'], '1',
                     ['h0000000-0000-0000-0000-000000000001', '1',
                      [['0', '"/version"', ['core']], '1',
-                      ['h0000000-0000-0000-0000-000000000002', '1',
-                       [['0', '"ПолучитьВерсию_GET"', '3',
-                         ['3', ['1', '0', 'u'], '"get"'], '0']]]]]]],
+                      ['h0000000-0000-0000-0000-000000000002', '2',
+                       [['0', '"ПолучитьВерсию"', '3',
+                         ['3', ['1', '0', 'u'], '"ПолучитьВерсию"'], '0'],
+                        ['0', '"ДобавитьВерсию"', '11',
+                         ['3', ['1', '0', 'u'], '"ДобавитьВерсию"'], '0']]]]]]],
     })
     _json(os.path.join(http_dir, 'HTTPService.id.json'),
           {'uuid': 'h0000000-0000-0000-0000-000000000000'})
@@ -579,7 +582,8 @@ def make_xml_dump(base):
        '\t</Role>\n'
        '</MetaDataObject>' % (NS, ROLE_UUID))
     _w(base, 'Roles/Роль1/Ext/Rights.xml', RIGHTS_XML)
-    # HTTP-сервис и веб-сервис (ревизия 12) — паритет с cf-фикстурой
+    # HTTP-сервис и веб-сервис (ревизия 13) — паритет с cf-фикстурой:
+    # два метода шаблона (GET и POST), глагол из атрибута HTTPMethod
     _w(base, 'HTTPServices/Сервис1.xml',
        '<?xml version="1.0" encoding="UTF-8"?>\n'
        '<MetaDataObject %s version="2.20">\n'
@@ -590,8 +594,12 @@ def make_xml_dump(base):
        '\t\t\t\t<Properties><Name>Версия</Name><Template>/version</Template></Properties>\n'
        '\t\t\t\t<ChildObjects>\n'
        '\t\t\t\t\t<Method uuid="h0000000-0000-0000-0000-000000000002">\n'
-       '\t\t\t\t\t\t<Properties><Name>get</Name><HTTPMethod>GET</HTTPMethod>'
-       '<Handler>ПолучитьВерсию_GET</Handler></Properties>\n'
+       '\t\t\t\t\t\t<Properties><Name>ПолучитьВерсию</Name><HTTPMethod>GET</HTTPMethod>'
+       '<Handler>ПолучитьВерсию</Handler></Properties>\n'
+       '\t\t\t\t\t</Method>\n'
+       '\t\t\t\t\t<Method uuid="h0000000-0000-0000-0000-000000000003">\n'
+       '\t\t\t\t\t\t<Properties><Name>ДобавитьВерсию</Name><HTTPMethod>POST</HTTPMethod>'
+       '<Handler>ДобавитьВерсию</Handler></Properties>\n'
        '\t\t\t\t\t</Method>\n'
        '\t\t\t\t</ChildObjects>\n'
        '\t\t\t</URLTemplate>\n'
@@ -773,7 +781,7 @@ def test_fixtures_produce_expected_content(bases):
         assert conn.execute(
             'SELECT COUNT(*) FROM predefined').fetchone()[0] == 2
         assert conn.execute(
-            'SELECT COUNT(*) FROM http_method').fetchone()[0] == 1
+            'SELECT COUNT(*) FROM http_method').fetchone()[0] == 2
         assert conn.execute(
             'SELECT COUNT(*) FROM webservice_operation').fetchone()[0] == 1
         assert conn.execute(

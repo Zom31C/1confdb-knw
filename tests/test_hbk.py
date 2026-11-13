@@ -392,6 +392,41 @@ def test_query_search_and_card(mini_db):
     conn.close()
 
 
+def test_query_exact_name_ranks_first(mini_db):
+    """Точное имя темы — первым результатом (отзыв LLM 2026-11-13)."""
+    conn = hbk_query.open_syntax_db(mini_db)
+    cache = hbk_query.load_name_cache(conn)
+    begin = conn.execute(
+        "SELECT id FROM topics WHERE name_ru='НачатьТранзакцию'").fetchone()['id']
+    res = hbk_query.search(conn, 'НачатьТранзакцию', 10, cache)
+    assert res[0][0] == begin and res[0][2] == 'точное имя'
+    # EN-имя тоже точно
+    res = hbk_query.search(conn, 'BeginTransaction', 10, cache)
+    assert res[0][0] == begin
+    ref = conn.execute(
+        "SELECT id FROM topics WHERE name_ru='Ссылка'").fetchone()['id']
+    res = hbk_query.search(conn, 'Ссылка', 10, cache)
+    assert res[0][0] == ref
+    conn.close()
+
+
+def test_query_type_plus_method(mini_db):
+    """«Тип Метод» разрешается в метод конкретного типа (отзыв LLM)."""
+    conn = hbk_query.open_syntax_db(mini_db)
+    cache = hbk_query.load_name_cache(conn)
+    ref = conn.execute(
+        "SELECT id FROM topics WHERE name_ru='Ссылка'").fetchone()['id']
+    res = hbk_query.search(conn, 'Документы Ссылка', 10, cache)
+    assert res[0][0] == ref and res[0][2] == 'тип+метод'
+    # через точку — тоже работает
+    res = hbk_query.search(conn, 'Документы.Ссылка', 10, cache)
+    assert res[0][0] == ref
+    # метод ДРУГОГО типа не получает тир «тип+метод»
+    res = hbk_query.search(conn, 'Документы НачатьТранзакцию', 10, cache)
+    assert res[0][2] != 'тип+метод'
+    conn.close()
+
+
 def test_query_rejects_foreign_db(tmp_path):
     other = tmp_path / 'other.db'
     conn = sqlite3.connect(str(other))

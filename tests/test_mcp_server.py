@@ -274,6 +274,284 @@ def test_check_and_sql(tmp_path_factory):
     assert 'неизвестная таблица' in bad
     res = _call(server, 'sql', query='SELECT COUNT(*) AS n FROM meta_object')
     assert 'n' in res['content'][0]['text']
+
+
+def test_check_query_partial_status(tmp_path_factory):
+    """Непроверенные поля параметров-таблиц → PARTIAL, а не OK (отзыв LLM)."""
+    server = _server(tmp_path_factory)
+    text = ('ВЫБРАТЬ Т.Ссылка ИЗ Справочник.Справочник1 КАК Т, '
+            '&Таблица КАК П ГДЕ Т.Ссылка = П.Ссылка')
+    resp = _call(server, 'check_query', text=text)['content'][0]['text']
+    assert 'PARTIAL' in resp and 'П.Ссылка' in resp
+    assert 'OK:' not in resp
+    # полностью проверенный запрос — по-прежнему OK
+    ok = _call(server, 'check_query',
+               text='ВЫБРАТЬ Т.Ссылка ИЗ Справочник.Справочник1 КАК Т')
+    assert 'OK:' in ok['content'][0]['text']
+
+
+def test_check_syntax_text_ignores_schema_revision(tmp_path_factory, tmp_path):
+    """Чистый синтаксис текста не зависит от ревизии базы (отзыв LLM 2026-11-13)."""
+    dump = str(tmp_path_factory.mktemp('dump_old'))
+    make_dump(dump)
+    db = str(tmp_path / 'old.sqlite')
+    write_db(dump, db, source_file='t.cf')
+    _stamp(db, SCHEMA_VERSION - 3)
+    server = McpServer(db)
+    code = 'Процедура Тест()\nКонецПроцедуры'
+    # инструмент данных по-прежнему отказывает
+    resp = _call(server, 'find_objects', mask='Справочник')['content'][0]['text']
+    assert 'устарела' in resp
+    # чистый синтаксис переданного текста — работает
+    resp = _call(server, 'check_syntax', text=code)['content'][0]['text']
+    assert 'OK' in resp and 'устарела' not in resp
+    # fan-out по всем базам — тоже без гейта
+    resp = _call(server, 'check_syntax', text=code, db='*')['content'][0]['text']
+    assert 'OK' in resp and 'устарела' not in resp
+    # семантика базу читает — гейт остаётся
+    resp = _call(server, 'check_syntax', text=code,
+                 semantic=True)['content'][0]['text']
+    assert 'устарела' in resp
+
+
+def test_check_syntax_identifies_source(tmp_path_factory):
+    """Шапка ответа: источник, число строк, SHA-256 проверенного текста."""
+    import hashlib
+    server = _server(tmp_path_factory)
+    code = 'Процедура Тест()\nКонецПроцедуры\n'
+    resp = _call(server, 'check_syntax', text=code)['content'][0]['text']
+    assert 'Источник: переданный текст' in resp
+    assert 'строк: 3' in resp
+    assert hashlib.sha256(code.encode('utf-8')).hexdigest() in resp
+    # модуль из базы — источник называется путём
+    resp = _call(server, 'check_syntax',
+                 path='Catalog/Справочник1')['content'][0]['text']
+    assert 'Источник: Catalog/Справочник1 (obj)' in resp
+    assert 'SHA-256:' in resp
+
+
+def test_module_outline_exclude(tmp_path_factory):
+    """exclude скрывает методы по маске имени (отзыв LLM: _old)."""
+    server = _server(tmp_path_factory)
+    full = _call(server, 'module_outline',
+                 path='Catalog/Справочник1')['content'][0]['text']
+    assert 'Процедура Тест()' in full
+    filtered = _call(server, 'module_outline', path='Catalog/Справочник1',
+                     exclude='Тест')['content'][0]['text']
+    assert 'Процедура Тест()' not in filtered
+    assert 'скрыто методов по фильтру' in filtered
+
+
+def test_body_has_scope_regions():
+    """Области поиска: комментарии //, строки "", даты '', перенос через |."""
+    from confdb.mcp_server import body_has_scope, body_hits
+    body = ('Процедура Тест()\n'
+            '    // jira-123: ссылка на задачу\n'
+            '    Сообщить("jira-456");\n'
+            '    Х = jira789;\n'
+            'КонецПроцедуры')
+    assert body_has_scope(body, 'jira', 'all')
+    assert body_has_scope(body, 'jira', 'code')        # jira789 в коде
+    assert body_has_scope(body, 'jira', 'strings')     # jira-456 в строке
+    assert body_has_scope(body, 'jira', 'no_comments')
+    only_comment = 'Процедура Т()\n// jira-123\nКонецПроцедуры'
+    assert body_has_scope(only_comment, 'jira', 'all')
+    assert not body_has_scope(only_comment, 'jira', 'code')
+    assert not body_has_scope(only_comment, 'jira', 'no_comments')
+    assert not body_has_scope(only_comment, 'jira', 'strings')
+    only_string = 'Процедура Т()\nСообщить("jira-123");\nКонецПроцедуры'
+    assert body_has_scope(only_string, 'jira', 'strings')
+    assert not body_has_scope(only_string, 'jira', 'code')
+    # многострочная строка через | и дата в одинарных кавычках — литералы
+    assert body_has_scope('Х = "начало jira\n|продолжение";', 'jira', 'strings')
+    assert not body_has_scope('Х = "начало jira\n|продолжение";', 'jira', 'code')
+    assert body_has_scope("Х = 'jira';", 'jira', 'strings')
+    # экранированные кавычки "" не закрывают строку
+    assert body_has_scope('Х = "а "" jira";', 'jira', 'strings')
+    # body_hits с scope показывает только строки нужной области
+    hits = body_hits(body, 'jira', scope='code')
+    assert len(hits) == 1 and 'jira789' in hits[0]
+    hits = body_hits(body, 'jira', scope='strings')
+    assert len(hits) == 1 and 'jira-456' in hits[0]
+    hits = body_hits(body, 'jira', scope='no_comments')
+    assert len(hits) == 2
+
+
+def test_find_methods_scope_filters_comments(tmp_path_factory, tmp_path):
+    """scope=code/no_comments не находит иглу, живущую только в комментарии."""
+    dump = str(tmp_path_factory.mktemp('dump_scope'))
+    make_dump(dump)
+    db = str(tmp_path / 'scope.sqlite')
+    write_db(dump, db, source_file='t.cf', build_fts=False)
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE method SET body='Процедура Тест()\n"
+                 "// jira-123 ссылка\nКонецПроцедуры' WHERE name='Тест'")
+    conn.commit()
+    conn.close()
+    server = McpServer(db)
+    all_hits = _call(server, 'find_methods', text='jira')['content'][0]['text']
+    assert 'Тест' in all_hits
+    for scope in ('code', 'no_comments', 'strings'):
+        resp = _call(server, 'find_methods', text='jira',
+                     scope=scope)['content'][0]['text']
+        assert 'ничего не найдено' in resp, scope
+    # неверный scope — ошибка аргумента
+    bad = _call(server, 'find_methods', text='jira', scope='wrong')
+    assert bad.get('isError')
+
+
+def test_object_card_sections_and_pagination(tmp_path_factory):
+    """sections выбирает разделы; limit/offset листают поля табличных частей."""
+    server = _server(tmp_path_factory)
+    doc = 'Document/ЗаказПокупателя'
+    full = _call(server, 'object_card', path=doc)['content'][0]['text']
+    assert 'Реквизиты' in full and 'Табличная часть Товары' in full
+    attrs = _call(server, 'object_card', path=doc,
+                  sections='attrs')['content'][0]['text']
+    assert 'Реквизиты' in attrs
+    assert 'Табличная часть' not in attrs
+    assert 'Разделы: attrs' in attrs
+    tabs = _call(server, 'object_card', path=doc,
+                 sections='tabulars')['content'][0]['text']
+    assert 'Табличная часть Товары' in tabs
+    assert 'Реквизиты:' not in tabs
+    # пагинация полей секции Оплата (3 поля): limit=2, offset=1
+    page = _call(server, 'object_card', path=doc, sections='tabulars',
+                 limit=2, offset=1)['content'][0]['text']
+    assert 'показано 2–3 из 3' in page
+    # неизвестный раздел — ошибка со списком доступных
+    bad = _call(server, 'object_card', path=doc, sections='nope')
+    assert bad.get('isError')
+    assert 'неизвестные разделы' in bad['content'][0]['text']
+
+
+def test_service_card_unbound_handlers():
+    """Маршруты построчно; методы модуля без маршрута — отдельно."""
+    conn = sqlite3.connect(':memory:')
+    conn.execute('CREATE TABLE http_method(object_id, ord, url_template,'
+                 ' http_method, handler)')
+    conn.execute('CREATE TABLE method(id INTEGER PRIMARY KEY, name, module_id)')
+    conn.execute('CREATE TABLE module(id INTEGER PRIMARY KEY, object_id)')
+    conn.execute("INSERT INTO http_method VALUES (1, 0, '/x', 'GET', 'Получить')")
+    conn.execute('INSERT INTO module VALUES (10, 1)')
+    conn.execute("INSERT INTO method VALUES (1, 'Получить', 10),"
+                 " (2, 'Служебный', 10)")
+    text = '\n'.join(McpServer._service_card_lines(conn.execute, 1, 'HTTPService'))
+    assert 'GET /x → обработчик Получить' in text
+    assert 'Обработчики без маршрута (1): Служебный' in text
+    conn.close()
+
+
+def test_check_syntax_semantic_boundaries(tmp_path_factory):
+    """Семантика печатает границы: что проверено, что осталось динамическим."""
+    server = _server(tmp_path_factory)
+    resp = _call(server, 'check_syntax', path='Catalog/Справочник1',
+                 semantic=True)['content'][0]['text']
+    assert 'Границы семантической проверки' in resp
+    assert 'методов:' in resp
+    assert 'динамических Вычислить/Выполнить' in resp
+    assert 'платформенный API' in resp
+
+
+def test_check_syntax_file_path_allowlist(tmp_path_factory, tmp_path,
+                                          monkeypatch):
+    """file_path читает локальный .bsl только из разрешённых каталогов."""
+    import hashlib
+    server = _server(tmp_path_factory)
+    allowed_dir = tmp_path / 'allowed'
+    allowed_dir.mkdir()
+    bsl = allowed_dir / 'module.bsl'
+    code = 'Процедура Тест()\nКонецПроцедуры\n'
+    bsl.write_text(code, encoding='utf-8')
+    # не настроено — ошибка с подсказкой
+    monkeypatch.setattr(mcp_server, 'load_config', lambda: {})
+    bad = _call(server, 'check_syntax', file_path=str(bsl))
+    assert bad.get('isError')
+    assert 'syntax_check_dirs' in bad['content'][0]['text']
+    # настроено — проверка работает, исходник идентифицирован
+    monkeypatch.setattr(mcp_server, 'load_config',
+                        lambda: {'syntax_check_dirs': [str(allowed_dir)]})
+    resp = _call(server, 'check_syntax',
+                 file_path=str(bsl))['content'][0]['text']
+    assert 'OK' in resp and str(bsl) in resp
+    # хэш — от фактического текста файла (write_text мог заменить \n на \r\n)
+    assert hashlib.sha256(bsl.read_bytes()).hexdigest() in resp
+    # файл вне разрешённого каталога — отказ
+    other = tmp_path / 'other.bsl'
+    other.write_text(code, encoding='utf-8')
+    bad = _call(server, 'check_syntax', file_path=str(other))
+    assert bad.get('isError') and 'не разрешён' in bad['content'][0]['text']
+    # обход через .. не выводит за пределы разрешённого каталога
+    escape = str(allowed_dir / '..' / 'other.bsl')
+    bad = _call(server, 'check_syntax', file_path=escape)
+    assert bad.get('isError') and 'не разрешён' in bad['content'][0]['text']
+    # неразрешённое расширение — отказ
+    exe = allowed_dir / 'module.exe'
+    exe.write_text(code, encoding='utf-8')
+    bad = _call(server, 'check_syntax', file_path=str(exe))
+    assert bad.get('isError') and '.bsl' in bad['content'][0]['text']
+    # cp1251 читается (выгрузки конфигуратора бывают в обеих кодировках)
+    ansi = allowed_dir / 'ansi.bsl'
+    ansi.write_bytes(code.encode('cp1251'))
+    resp = _call(server, 'check_syntax',
+                 file_path=str(ansi))['content'][0]['text']
+    assert 'OK' in resp
+
+
+def test_check_syntax_file_path_ignores_schema_revision(tmp_path_factory,
+                                                        tmp_path, monkeypatch):
+    """Чистый синтаксис локального файла не зависит от ревизии базы."""
+    dump = str(tmp_path_factory.mktemp('dump_file_old'))
+    make_dump(dump)
+    db = str(tmp_path / 'old_file.sqlite')
+    write_db(dump, db, source_file='t.cf')
+    _stamp(db, SCHEMA_VERSION - 3)
+    server = McpServer(db)
+    bsl = tmp_path / 'm.bsl'
+    bsl.write_text('Процедура Тест()\nКонецПроцедуры', encoding='utf-8')
+    monkeypatch.setattr(mcp_server, 'load_config',
+                        lambda: {'syntax_check_dirs': [str(tmp_path)]})
+    resp = _call(server, 'check_syntax',
+                 file_path=str(bsl))['content'][0]['text']
+    assert 'OK' in resp and 'устарела' not in resp
+
+
+def test_check_query_external_tables(tmp_path_factory):
+    """tables задаёт схемы параметров-таблиц и ВТ: PARTIAL → OK, ошибки полей."""
+    server = _server(tmp_path_factory)
+    q = ('ВЫБРАТЬ Т.Ссылка ИЗ Справочник.Справочник1 КАК Т, &Таблица КАК П '
+         'ГДЕ Т.Ссылка = П.Ссылка')
+    # без схемы — PARTIAL с подсказкой про tables
+    resp = _call(server, 'check_query', text=q)['content'][0]['text']
+    assert 'PARTIAL' in resp and 'tables' in resp
+    # со схемой — полная проверка
+    resp = _call(server, 'check_query', text=q,
+                 tables={'Таблица': {'Ссылка': 'СправочникСсылка.Справочник1'}})
+    assert 'OK:' in resp['content'][0]['text']
+    # неизвестная колонка внешней таблицы — ошибка
+    resp = _call(server, 'check_query', text=q,
+                 tables={'Таблица': {'Другое': None}})['content'][0]['text']
+    assert 'неизвестное поле внешней таблицы' in resp
+    # цепочка по типу колонки проверяется как у объекта
+    q2 = 'ВЫБРАТЬ П.Ссылка.СсылкаАтрибут ИЗ &Таблица КАК П'
+    resp = _call(server, 'check_query', text=q2,
+                 tables={'Таблица': {'Ссылка': 'СправочникСсылка.Справочник1'}})
+    assert 'OK:' in resp['content'][0]['text']
+    # список колонок без типов и JSON-строка тоже принимаются
+    resp = _call(server, 'check_query', text=q,
+                 tables={'Таблица': ['Ссылка']})['content'][0]['text']
+    assert 'OK:' in resp
+    resp = _call(server, 'check_query', text=q,
+                 tables='{"Таблица": ["Ссылка"]}')['content'][0]['text']
+    assert 'OK:' in resp
+    # временная таблица, созданная в другом методе (односегментная)
+    q3 = 'ВЫБРАТЬ В.Колонка ИЗ ВТ КАК В'
+    resp = _call(server, 'check_query', text=q3,
+                 tables={'ВТ': {'Колонка': None}})['content'][0]['text']
+    assert 'OK:' in resp
+    resp = _call(server, 'check_query', text=q3,
+                 tables={'ВТ': {'Другая': None}})['content'][0]['text']
+    assert 'неизвестное поле внешней таблицы' in resp
     # русский точечный путь в литерале sql конвертируется во внутренний формат
     res = _call(server, 'sql',
                 query="SELECT path FROM meta_object WHERE path = 'Справочник.Справочник1'")

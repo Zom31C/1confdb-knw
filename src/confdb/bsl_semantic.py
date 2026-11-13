@@ -126,10 +126,13 @@ _RE_METHOD_IN_BODY = re.compile(
     r'(?:^|\n)[ \t]*(?:(?:Асинх|Async)[ \t]+)?(?:Процедура|Функция)[ \t]+',
     re.IGNORECASE)
 
+# динамическое исполнение кода: содержимое статически не разрешается
+_RE_DYNAMIC_EVAL = re.compile(r'\b(вычислить|выполнить)\s*\(', re.IGNORECASE)
+
 
 def analyze_module(text, ctx=None, extra_ctxs=(), self_module=None,
                    is_form_module=False, module_context=None,
-                   extra_scope=frozenset()):
+                   extra_scope=frozenset(), stats=None):
     """Список семантических Diagnostic по тексту модуля (синтаксис не входит).
 
     :param text: полный текст модуля (как после bsl_parser.rebuild_module);
@@ -149,6 +152,10 @@ def analyze_module(text, ctx=None, extra_ctxs=(), self_module=None,
     :param extra_scope: имена, объявленные вне кода модуля — реквизиты и
         табличные части объекта (в модулях объектов они доступны напрямую,
         без префикса); добавляются в область видимости каждого метода.
+    :param stats: необязательный словарь — заполняется статистикой границ
+        проверки (методы, запросы проверено/пропущено, непроверенные поля
+        параметров, динамические Вычислить/Выполнить) для честного отчёта
+        «что проверено, что осталось динамическим» (отзыв LLM 2026-11-13).
     """
     result = syntax_analyze(text)
     diags = []
@@ -156,10 +163,16 @@ def analyze_module(text, ctx=None, extra_ctxs=(), self_module=None,
     diags += _break_continue_outside_loop(result)
     diags += _goto_usage(result)
     diags += _name_based_checks(result)
+    qstats = {}
     if ctx is not None:
         diags += _db_checks(result, text, ctx, tuple(extra_ctxs), self_module,
                             is_form_module, frozenset(extra_scope))
-        diags += _query_checks(text, ctx)
+        diags += _query_checks(text, ctx, qstats)
+    if stats is not None:
+        stats['methods'] = len(result.methods)
+        stats['db'] = ctx is not None
+        stats['dynamic_eval'] = len(_RE_DYNAMIC_EVAL.findall(text))
+        stats.update(qstats)
     diags.sort(key=lambda d: (d.line, d.col))
     return diags
 
@@ -437,20 +450,32 @@ def _db_checks(result, text, ctx, extra_ctxs, self_module, is_form_module,
     return diags
 
 
-def _query_checks(text, ctx):
-    """Запросы внутри модуля: синтаксис + таблицы/поля по метаданным базы."""
+def _query_checks(text, ctx, stats=None):
+    """Запросы внутри модуля: синтаксис + таблицы/поля по метаданным базы.
+
+    stats (необязательный словарь) собирает границы проверки: сколько запросов
+    найдено/проверено/пропущено и сколько полей параметров осталось
+    непроверенными (схема неизвестна).
+    """
     from .bsl_analyzer import extract_queries
     from .query_lang import check_query_full
     diags = []
+    total = checked = skipped = unverified_n = 0
     for line, query, complete in extract_queries(text):
+        total += 1
         if not complete:
+            skipped += 1
             continue
         if '%' in query or '[' in query or '#' in query:
+            skipped += 1
             continue    # шаблон с подстановками (%1, #Имя) / экзотика ([])
         try:
-            errors, _unverified = check_query_full(query, ctx.meta)
+            errors, unverified = check_query_full(query, ctx.meta)
         except Exception:  # noqa: BLE001
+            skipped += 1
             continue
+        checked += 1
+        unverified_n += len(unverified or ())
         for err in errors:
             if "найдено ''" in err or "Неожиданный токен ''" in err:
                 continue    # текст обрывается — запрос собирали по частям
@@ -463,4 +488,7 @@ def _query_checks(text, ctx):
             diags.append(Diagnostic(
                 code, 'запрос в модуле (строка %d): %s' % (line, err),
                 line, 1, severity='ERROR'))
+    if stats is not None:
+        stats.update(queries_total=total, queries_checked=checked,
+                     queries_skipped=skipped, query_unverified=unverified_n)
     return diags
