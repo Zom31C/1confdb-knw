@@ -140,12 +140,17 @@ def scan_cf_sources(cf_dir, db_pool, log=print):
     с крупными .cf сканируется без чтения файлов в память целиком.
 
     :return: список записей {'src','sha','status','db','found','note',
-        'ext','name','root_type'}:
-        'current'  — база уже собрана из этого же файла (извлечение не нужно);
+        'ext','name','root_type','db_version','cur_version'}:
+        'current'  — база уже собрана из этого же файла текущим распаковщиком
+                     (извлечение не нужно);
         'outdated' — база из одноимённого файла, но отпечаток другой (замена);
+        'version'  — файл тот же, но база собрана другой версией распаковщика
+                     (пересборка: новые данные/исправления декодера);
         'new'      — базы нет (извлечение в путь по умолчанию out_defaults).
         ext — тип файла (cf/cfe/epf/erf); name/root_type — имя и тип корневого
-        объекта метаданных из собранной базы (для 'new' — None).
+        объекта метаданных из собранной базы (для 'new' — None); db_version —
+        версия распаковщика, которым собрана найденная база (source.extractor_version),
+        cur_version — текущая версия.
     """
     from .extract import file_sha256, source_info
     files = cf_files(cf_dir)
@@ -188,10 +193,19 @@ def scan_cf_sources(cf_dir, db_pool, log=print):
         # ещё нет (оно появится после извлечения)
         ext = os.path.splitext(src)[1].lstrip('.').lower()
         meta = pool.get(found) or {}
+        db_version = meta.get('extractor_version')
+        # проверка версии распаковщика: файл тот же, но база собрана другой
+        # версией — пересобрать (новые таблицы/исправления декодера). Версия
+        # берётся из source.extractor_version; у старых баз её нет (None).
+        if status == 'current' and db_version != __version__:
+            status = 'version'
+            note = (f'собрана распаковщиком {db_version or "неизвестной версии"}, '
+                    f'актуальный {__version__} — пересобрать')
         records.append({'src': src, 'sha': sha, 'status': status,
                         'db': db, 'found': found, 'note': note,
                         'ext': ext, 'name': meta.get('root_name'),
-                        'root_type': meta.get('root_type')})
+                        'root_type': meta.get('root_type'),
+                        'db_version': db_version, 'cur_version': __version__})
     return records
 
 

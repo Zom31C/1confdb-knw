@@ -413,16 +413,25 @@ def test_serve_interactive_closes_dbs_on_stop(monkeypatch, tmp_path_factory):
 
 # ---------- сканирование каталога cf: новые/устаревшие конфигурации ----------
 
-def _source_db(path, src_name, sha, root_name=None, root_type='Configuration'):
-    """Минимальная база confdb: только таблица source (для source_info)."""
+def _source_db(path, src_name, sha, root_name=None, root_type='Configuration',
+               extractor_version=None):
+    """Минимальная база confdb: только таблица source (для source_info).
+
+    extractor_version по умолчанию — текущая версия (база «актуальна»);
+    передача старой версии моделирует базу, собранную прежним распаковщиком.
+    """
     import sqlite3
+    from confdb import __version__
+    if extractor_version is None:
+        extractor_version = __version__
     conn = sqlite3.connect(str(path))
     conn.execute('CREATE TABLE source(id INTEGER PRIMARY KEY, file TEXT,'
                  ' created TEXT, file_sha256 TEXT, file_size INTEGER,'
-                 ' root_name TEXT, root_type TEXT)')
+                 ' root_name TEXT, root_type TEXT, extractor_version TEXT)')
     conn.execute('INSERT INTO source(file, created, file_sha256, file_size,'
-                 ' root_name, root_type) VALUES (?,?,?,?,?,?)',
-                 (src_name, '2026-01-01', sha, 1, root_name, root_type))
+                 ' root_name, root_type, extractor_version) VALUES (?,?,?,?,?,?,?)',
+                 (src_name, '2026-01-01', sha, 1, root_name, root_type,
+                  extractor_version))
     conn.commit()
     conn.close()
     return str(path)
@@ -494,6 +503,62 @@ def test_scan_cf_sources_matches_by_sha_and_notes_conflict(tmp_path, monkeypatch
     rec2 = next(r for r in scan_cf_sources(str(cf_dir), [], log=lambda *a: None)
                 if os.path.basename(r['src']) == 'Другая.cf')
     assert rec2['status'] == 'new' and 'занят другой базой' in rec2['note']
+
+
+def test_scan_cf_sources_flags_old_unpacker_version(tmp_path, monkeypatch):
+    """Проверка версий распаковщика: тот же файл, но база собрана старой
+    версией — статус 'version' (пересборка); текущая версия — 'current'."""
+    from confdb.extract import file_sha256
+    from confdb import __version__
+
+    cf_dir = tmp_path / 'cf'
+    cf_dir.mkdir()
+    out_dir = tmp_path / 'out'
+    monkeypatch.setattr('confdb.ui_core.out_defaults',
+                        lambda src: (str(out_dir / (os.path.splitext(
+                            os.path.basename(src))[0] + '.sqlite')), str(out_dir)))
+    src = cf_dir / 'Конфигурация.cf'
+    src.write_bytes(b'data')
+    sha = file_sha256(str(src))
+    # база из того же файла, но собрана прежним распаковщиком
+    db_old = _source_db(tmp_path / 'old_ver.sqlite', 'Конфигурация.cf', sha,
+                        extractor_version='1.0.0')
+    rec = scan_cf_sources(str(cf_dir), [db_old], log=lambda *a: None)[0]
+    assert rec['status'] == 'version'
+    assert rec['db_version'] == '1.0.0'
+    assert rec['cur_version'] == __version__
+    assert '1.0.0' in rec['note'] and __version__ in rec['note']
+    # база текущей версии — актуальна, пересборка не нужна
+    db_cur = _source_db(tmp_path / 'cur_ver.sqlite', 'Конфигурация.cf', sha)
+    rec2 = scan_cf_sources(str(cf_dir), [db_cur], log=lambda *a: None)[0]
+    assert rec2['status'] == 'current'
+    assert rec2['db_version'] == __version__
+
+
+def test_scan_cf_sources_flags_missing_version(tmp_path, monkeypatch):
+    """Старая база без колонки extractor_version (версия неизвестна) — пересборка."""
+    import sqlite3
+    from confdb.extract import file_sha256
+
+    cf_dir = tmp_path / 'cf'
+    cf_dir.mkdir()
+    out_dir = tmp_path / 'out'
+    monkeypatch.setattr('confdb.ui_core.out_defaults',
+                        lambda src: (str(out_dir / (os.path.splitext(
+                            os.path.basename(src))[0] + '.sqlite')), str(out_dir)))
+    src = cf_dir / 'Конфигурация.cf'
+    src.write_bytes(b'data')
+    db = str(tmp_path / 'ancient.sqlite')
+    conn = sqlite3.connect(db)
+    conn.execute('CREATE TABLE source(id INTEGER PRIMARY KEY, file TEXT,'
+                 ' created TEXT, file_sha256 TEXT)')
+    conn.execute('INSERT INTO source(file, created, file_sha256) VALUES (?,?,?)',
+                 ('Конфигурация.cf', '2020-01-01', file_sha256(str(src))))
+    conn.commit()
+    conn.close()
+    rec = scan_cf_sources(str(cf_dir), [db], log=lambda *a: None)[0]
+    assert rec['status'] == 'version'
+    assert rec['db_version'] is None
 
 
 def test_scan_cf_dir_extracts_new_and_replaces_outdated(tmp_path, monkeypatch):

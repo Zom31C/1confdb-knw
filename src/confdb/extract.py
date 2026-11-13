@@ -61,7 +61,7 @@ def source_info(db_path):
         if 'file' not in cols:
             return None
         names = [c for c in ('file', 'created', 'file_sha256', 'file_size',
-                             'root_name', 'root_type')
+                             'root_name', 'root_type', 'extractor_version')
                  if c in cols]
         row = conn.execute(
             f'SELECT {", ".join(names)} FROM source ORDER BY id LIMIT 1'
@@ -77,6 +77,7 @@ def source_info(db_path):
     info.setdefault('file_size', None)
     info.setdefault('root_name', None)
     info.setdefault('root_type', None)
+    info.setdefault('extractor_version', None)
     return info
 
 

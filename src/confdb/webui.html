@@ -431,9 +431,10 @@ function viewCatalog(){
   const rows = scanRows.map((r,i)=>{
     const badge = r.status==="current"?'<span class="badge b-current">актуальна</span>'
       : r.status==="outdated"?'<span class="badge b-outdated">устарела</span>'
+      : r.status==="version"?'<span class="badge b-outdated">пересборка</span>'
       : '<span class="badge b-new">новая</span>';
     const check = r.status==="current"?"":`<input type="checkbox" class="scan-check" data-i="${i}">`;
-    const target = r.status==="current"?"":`<div class="path">→ ${esc(r.db)}${r.status==="outdated"?" (замена)":""}</div>`;
+    const target = r.status==="current"?"":`<div class="path">→ ${esc(r.db)}${r.status==="outdated"?" (замена)":r.status==="version"?" (пересборка)":""}</div>`;
     // имя корневого объекта метаданных (из собранной базы); для новой базы — имя файла
     const title = r.name ? esc(r.name) : esc(base(r.src));
     const fname = r.name ? `<div class="path">${esc(base(r.src))}</div>` : "";
@@ -449,7 +450,7 @@ function viewCatalog(){
       <input type="text" id="cat-dir" value="${esc(S.options.cf_dir)}" placeholder="D:\\cf"></div>
       <button class="btn ghost" id="cat-save" style="align-self:flex-end">Сохранить</button>
       <button class="btn" id="cat-scan" style="align-self:flex-end">Сканировать</button></div>
-    <p class="hint">Сканирование считает SHA-256 каждого файла и сверяет с базами: <span class="badge b-current">актуальна</span> — уже собрана; <span class="badge b-outdated">устарела</span> — другой хэш, будет заменена; <span class="badge b-new">новая</span> — базы нет.</p>
+    <p class="hint">Сканирование считает SHA-256 каждого файла и сверяет с базами: <span class="badge b-current">актуальна</span> — уже собрана; <span class="badge b-outdated">устарела</span> — другой хэш, будет заменена; <span class="badge b-outdated">пересборка</span> — файл тот же, но распаковщик устарел; <span class="badge b-new">новая</span> — базы нет.</p>
     ${table}
     ${actionable?`<div class="row" style="margin-top:14px">
       <button class="btn" id="cat-selected">Извлечь выбранные</button>

@@ -296,7 +296,8 @@ class Tui:
         _cls()
         print(f'Сканирую {self.cf_dir} (файлов: {len(files)})…')
         records = scan_cf_sources(self.cf_dir, pool)
-        labels = {'new': 'новая   ', 'outdated': 'устарела', 'current': 'актуальна'}
+        labels = {'new': 'новая   ', 'outdated': 'устарела', 'current': 'актуальна',
+                  'version': 'версия  '}
         actionable = [i for i, r in enumerate(records, 1)
                       if r['status'] != 'current']
         while True:
@@ -309,7 +310,8 @@ class Tui:
                 if r.get('name'):
                     print(f'      файл: {os.path.basename(r["src"])}')
                 if r['status'] != 'current':
-                    tail = ' (замена)' if r['status'] == 'outdated' else ''
+                    tail = (' (замена)' if r['status'] == 'outdated'
+                            else ' (пересборка)' if r['status'] == 'version' else '')
                     print(f'      → {r["db"]}{tail}')
                 if r['note']:
                     print(f'      {r["note"]}')

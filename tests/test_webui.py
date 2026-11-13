@@ -13,14 +13,19 @@ from confdb import webui
 from confdb.ui_core import UiCore, ServerRunner
 
 
-def _source_db(path, src_name, sha, root_name=None, root_type='Configuration'):
+def _source_db(path, src_name, sha, root_name=None, root_type='Configuration',
+               extractor_version=None):
+    from confdb import __version__
+    if extractor_version is None:
+        extractor_version = __version__
     conn = sqlite3.connect(str(path))
     conn.execute('CREATE TABLE source(id INTEGER PRIMARY KEY, file TEXT,'
                  ' created TEXT, file_sha256 TEXT, file_size INTEGER,'
-                 ' root_name TEXT, root_type TEXT)')
+                 ' root_name TEXT, root_type TEXT, extractor_version TEXT)')
     conn.execute('INSERT INTO source(file, created, file_sha256, file_size,'
-                 ' root_name, root_type) VALUES (?,?,?,?,?,?)',
-                 (src_name, '2026-01-01', sha, 1, root_name, root_type))
+                 ' root_name, root_type, extractor_version) VALUES (?,?,?,?,?,?,?)',
+                 (src_name, '2026-01-01', sha, 1, root_name, root_type,
+                  extractor_version))
     conn.commit()
     conn.close()
     return str(path)

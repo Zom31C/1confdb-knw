@@ -117,6 +117,9 @@ def test_write_db_stores_the_fingerprint(tmp_path):
     assert info['file'] == 't.cf'
     assert info['file_sha256'] == 'ab' * 32
     assert info['file_size'] == 885012556
+    # версия распаковщика, которым собрана база (для проверки в каталоге cf)
+    from confdb import __version__
+    assert info['extractor_version'] == __version__
 
 
 def test_source_info_of_an_old_base_has_no_fingerprint(tmp_path):
