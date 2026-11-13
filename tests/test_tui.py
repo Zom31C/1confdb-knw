@@ -609,3 +609,50 @@ def test_scan_cf_dir_extracts_new_and_replaces_outdated(tmp_path, monkeypatch):
     old_call = next(c for c in calls if os.path.basename(c[0]) == 'Устаревшая.cf')
     assert old_call[1] == db_old and old_call[2] == file_sha256(str(old))
     assert tui.last_db and tui.recent_db
+
+
+# ---------- журнал LLM (отдельная база): меню ----------
+
+def test_llm_log_menu_toggle(tui, monkeypatch):
+    state = {'enabled': False}
+    monkeypatch.setattr('confdb.tui.llm_log_status',
+                        lambda: {'enabled': state['enabled'], 'path': 'llm.db',
+                                 'count': 0, 'errors': 0})
+
+    def flip(enabled, path=None):
+        state['enabled'] = enabled
+        return {'enabled': enabled, 'path': 'llm.db'}
+
+    monkeypatch.setattr('confdb.tui.set_llm_log_enabled', flip)
+    # «1» — переключить; Enter — подтвердить; «0» — назад
+    _feed(monkeypatch, ['1', '', '0'])
+    tui._llm_log_menu()
+    assert state['enabled'] is True
+
+
+def test_llm_log_browse_and_detail(tui, monkeypatch):
+    rows = [{'id': 7, 'ts': '2026-11-13 10:00:00.123', 'tool': 'db_list',
+             'args': '{}', 'is_error': False, 'duration_ms': 3,
+             'db': 'БП', 'grp': None}]
+    monkeypatch.setattr('confdb.tui.llm_log_list',
+                        lambda **kw: {'total': 1, 'rows': rows, 'tools': []})
+    full = {'id': 7, 'ts': '2026-11-13 10:00:00.123', 'session': 'abc',
+            'tool': 'db_list', 'args': '{}', 'response': 'ответ сервера',
+            'is_error': False, 'duration_ms': 3, 'db': 'БП', 'grp': None}
+    monkeypatch.setattr('confdb.tui.llm_log_item', lambda call_id: full)
+    # «1» — открыть вызов; Enter — закрыть детали; «0» — выход из списка
+    _feed(monkeypatch, ['1', '', '0'])
+    tui._llm_log_browse()
+
+
+def test_llm_log_menu_clear(tui, monkeypatch):
+    monkeypatch.setattr('confdb.tui.llm_log_status',
+                        lambda: {'enabled': True, 'path': 'llm.db',
+                                 'count': 2, 'errors': 0})
+    cleared = []
+    monkeypatch.setattr('confdb.tui.llm_log_clear',
+                        lambda: cleared.append(1) or 2)
+    # «4» — очистка; «да» — подтвердить; Enter; «0» — назад
+    _feed(monkeypatch, ['4', 'да', '', '0'])
+    tui._llm_log_menu()
+    assert cleared == [1]

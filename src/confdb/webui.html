@@ -153,6 +153,17 @@
   @media(max-width:720px){.grid2{grid-template-columns:1fr}}
   .hint{font-size:12.5px;color:var(--muted);margin-top:4px}
   code{background:#eef1f6;padding:1px 6px;border-radius:5px;font-size:13px}
+  /* вкладка «Журнал LLM» */
+  .llm-toggle{display:flex;gap:8px;align-items:center;font-size:14.5px;cursor:pointer}
+  .llm-toggle input{width:auto}
+  .llm-row{cursor:pointer}
+  .llm-row:hover{background:var(--brand-soft)}
+  .llm-args{max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+        font-size:12.5px;color:var(--muted)}
+  .llm-pre{background:#f6f8fb;border:1px solid var(--line);border-radius:8px;padding:10px 12px;
+        font-size:12.5px;overflow:auto;max-height:340px;white-space:pre-wrap;word-break:break-word;margin:6px 0}
+  .llm-resp{max-height:520px}
+  .badge.b-err{background:#fde8e8;color:#b42318}
 </style>
 </head>
 <body>
@@ -174,6 +185,7 @@
   <button data-tab="extract">Извлечение</button>
   <button data-tab="catalog">Каталог cf</button>
   <button data-tab="groups">Группы баз</button>
+  <button data-tab="llmlog">Журнал LLM</button>
   <button data-tab="settings">Настройки</button>
   <span class="nav-spacer"></span>
   <button id="log-toggle" class="log-toggle" title="Показать/скрыть журнал задач">
@@ -318,6 +330,13 @@ function render(full=false){
   if(TAB==="extract") m.innerHTML = viewExtract();
   else if(TAB==="catalog") m.innerHTML = viewCatalog();
   else if(TAB==="groups") m.innerHTML = viewGroups();
+  else if(TAB==="llmlog"){
+    if(S.llm_log){ llmStatus.enabled = S.llm_log.enabled; llmStatus.path = S.llm_log.path; }
+    m.innerHTML = viewLlmLog();
+    bind();
+    loadLlmLog();
+    return;
+  }
   else if(TAB==="settings") m.innerHTML = viewSettings();
   bind();
 }
@@ -509,6 +528,102 @@ function viewSettings(){
       <button class="btn ghost" id="bench-run">Запустить бенчмарк</button></div></div>`;
 }
 
+// ---------- вкладка: Журнал LLM ----------
+// Запись вызовов MCP-сервера в отдельную базу SQLite и их просмотр:
+// переключатель записи, фильтры, страница вызовов, полный ответ по клику.
+let LL = {rows:[], total:0, tools:[], offset:0, limit:50, tool:"", errors:false, search:"", selected:null};
+let llmStatus = {enabled:false, path:"", count:0, errors:0, size_bytes:0, tools:[]};
+let llmToolsSig = null;
+
+const fmtSize = n => n>=1048576 ? (n/1048576).toFixed(1)+" МБ" : n>=1024 ? Math.round(n/1024)+" КБ" : n+" Б";
+function llmStatusText(){
+  const st = llmStatus;
+  return `База журнала: <code>${esc(st.path)}</code> · записей: <b>${st.count}</b>` +
+    ` · ошибок: <b>${st.errors}</b> · размер: ${fmtSize(st.size_bytes||0)}` +
+    (st.enabled ? "" : " · <b>запись выключена</b>");
+}
+function viewLlmLog(){
+  const toolOpts = LL.tools.map(t=>`<option value="${esc(t)}" ${t===LL.tool?"selected":""}>${esc(t)}</option>`).join("");
+  return `<div class="card"><h2>Журнал запросов LLM — запись в отдельную базу</h2>
+    <p class="muted small">Каждый вызов инструмента MCP-сервера (аргументы и полный ответ) сохраняется в отдельную базу SQLite для анализа поведения LLM. Записи переживают остановку сервера и доступны для просмотра в любой момент.</p>
+    <label class="llm-toggle"><input type="checkbox" id="llm-enabled" ${llmStatus.enabled?"checked":""}> <b>Записывать вызовы и ответы</b></label>
+    <div class="hint" id="llm-status">${llmStatusText()}</div>
+    <div class="row" style="margin-top:10px"><span class="grow"></span>
+      <button class="btn danger sm" id="llm-clear">Очистить журнал</button></div></div>
+  <div class="card"><h2>Вызовы</h2>
+    <div class="row">
+      <div style="min-width:190px"><select id="llm-tool"><option value="">все инструменты</option>${toolOpts}</select></div>
+      <label style="display:flex;gap:6px;align-items:center;white-space:nowrap"><input type="checkbox" id="llm-errors" ${LL.errors?"checked":""} style="width:auto"> только ошибки</label>
+      <div class="grow"><input type="text" id="llm-search" placeholder="поиск по аргументам и ответам (Enter)" value="${esc(LL.search)}"></div>
+      <button class="btn ghost" id="llm-refresh">Обновить</button>
+    </div>
+    <div id="llm-table" style="margin-top:10px"></div>
+    <div class="row" style="margin-top:10px">
+      <button class="btn ghost sm" id="llm-prev">← Назад</button>
+      <span class="muted small" id="llm-page"></span>
+      <span class="grow"></span>
+      <button class="btn ghost sm" id="llm-next">Ещё →</button>
+    </div></div>
+  <div class="card" id="llm-detail-card" style="display:none"><div id="llm-detail"></div></div>`;
+}
+async function loadLlmLog(){
+  if(TAB!=="llmlog") return;
+  const q = new URLSearchParams({limit:LL.limit, offset:LL.offset, tool:LL.tool,
+                                 errors:LL.errors?"1":"0", search:LL.search});
+  let r; try{ r = await api("/api/llmlog?"+q.toString()); }catch(e){ return; }
+  LL.rows = r.rows||[]; LL.total = r.total||0; LL.tools = r.tools||[];
+  llmStatus = r.status||llmStatus;
+  const st = $("#llm-status"); if(st) st.innerHTML = llmStatusText();
+  const en = $("#llm-enabled"); if(en && document.activeElement!==en) en.checked = !!llmStatus.enabled;
+  // список инструментов в фильтре обновляем только при изменении состава
+  const sel = $("#llm-tool"), sig = LL.tools.join("\u0000");
+  if(sel && sig!==llmToolsSig){
+    llmToolsSig = sig;
+    sel.innerHTML = '<option value="">все инструменты</option>' +
+      LL.tools.map(t=>`<option value="${esc(t)}" ${t===LL.tool?"selected":""}>${esc(t)}</option>`).join("");
+  }
+  renderLlmTable();
+}
+function renderLlmTable(){
+  const box = $("#llm-table"); if(!box) return;
+  if(!LL.rows.length){
+    box.innerHTML = '<div class="empty">' + (llmStatus.enabled
+      ? "Вызовов пока нет — они появятся, когда LLM обратится к серверу."
+      : "Запись выключена — включите её выше. Ранее записанные вызовы остаются доступны.") + '</div>';
+  } else {
+    box.innerHTML = `<table><thead><tr><th>Время</th><th>Инструмент</th><th>Аргументы</th><th>База</th><th>мс</th><th></th></tr></thead><tbody>` +
+      LL.rows.map(r=>`<tr class="llm-row" data-id="${r.id}" title="Открыть полный ответ">
+        <td class="muted small" style="white-space:nowrap">${esc(r.ts)}</td>
+        <td><b>${esc(r.tool)}</b>${r.is_error?' <span class="badge b-err">ошибка</span>':''}</td>
+        <td class="llm-args">${esc(r.args)}</td>
+        <td class="muted small">${esc(r.db||"")}${r.grp?` <span class="pill">${esc(r.grp)}</span>`:""}</td>
+        <td class="muted small">${r.duration_ms==null?"":r.duration_ms}</td>
+        <td><button class="btn ghost sm">ответ</button></td></tr>`).join("") + `</tbody></table>`;
+  }
+  const page = $("#llm-page");
+  if(page) page.textContent = LL.total ? `${LL.offset+1}–${Math.min(LL.offset+LL.limit, LL.total)} из ${LL.total}` : "нет записей";
+  const prev = $("#llm-prev"), next = $("#llm-next");
+  if(prev) prev.disabled = LL.offset<=0;
+  if(next) next.disabled = LL.offset+LL.limit>=LL.total;
+}
+async function openLlmItem(id){
+  let r; try{ r = await api("/api/llmlog/item?id="+id); }catch(e){ toast(e.message,"err"); return; }
+  LL.selected = id;
+  let argsPretty = r.args;
+  try{ argsPretty = JSON.stringify(JSON.parse(r.args), null, 2); }catch(e){}
+  $("#llm-detail-card").style.display = "block";
+  $("#llm-detail").innerHTML = `<div class="row"><h2 style="margin:0">Вызов #${r.id}: ${esc(r.tool)}</h2>
+      ${r.is_error?'<span class="badge b-err">ошибка</span>':''}<span class="grow"></span>
+      <button class="btn ghost sm" id="llm-copy-resp">Копировать ответ</button>
+      <button class="btn ghost sm" id="llm-close-detail">Закрыть</button></div>
+    <div class="hint">${esc(r.ts)} · сессия ${esc(r.session)} · база ${esc(r.db||"—")} · группа ${esc(r.grp||"—")}${r.duration_ms==null?"":" · "+r.duration_ms+" мс"} · ответ ${r.response.length} симв.</div>
+    <h3>Аргументы</h3><pre class="llm-pre">${esc(argsPretty)}</pre>
+    <h3>Ответ сервера</h3><pre class="llm-pre llm-resp">${esc(r.response)}</pre>`;
+  $("#llm-copy-resp").onclick = ()=>{ if(navigator.clipboard) navigator.clipboard.writeText(r.response); toast("Ответ скопирован","ok"); };
+  $("#llm-close-detail").onclick = ()=>{ $("#llm-detail-card").style.display="none"; LL.selected=null; };
+  $("#llm-detail-card").scrollIntoView({behavior:"smooth", block:"start"});
+}
+
 // ---------- привязка обработчиков ----------
 function bind(){
   const on = (id,ev,fn)=>{ const el=$("#"+id); if(el) el.addEventListener(ev,fn); };
@@ -543,6 +658,28 @@ function bind(){
   on("dbdir-add","click",async()=>{ try{ await api("/api/db_dir","POST",{path:val("dbdir-path")}); toast("Каталог добавлен","ok"); await refresh(); }catch(e){ toast(e.message,"err"); } });
   on("bench-run","click",async()=>{ const src=val("bench-src"); if(!src){toast("Выберите файл","err");return;}
     try{ await api("/api/bench","POST",{src}); toast("Бенчмарк запущен","ok"); pollTask(); }catch(e){ toast(e.message,"err"); } });
+
+  // журнал LLM
+  on("llm-enabled","change",async()=>{ try{
+      const r=await api("/api/llmlog/toggle","POST",{enabled:checked("llm-enabled")});
+      llmStatus=r.status; toast(llmStatus.enabled?"Запись журнала LLM включена":"Запись журнала LLM выключена","ok");
+      const st=$("#llm-status"); if(st) st.innerHTML=llmStatusText();
+      loadLlmLog();
+    }catch(e){ toast(e.message,"err"); const en=$("#llm-enabled"); if(en) en.checked=!!llmStatus.enabled; } });
+  on("llm-clear","click",async()=>{ if(!confirm("Удалить все записи журнала LLM?"))return;
+    try{ const r=await api("/api/llmlog/clear","POST",{}); llmStatus=r.status; LL.offset=0;
+      toast("Журнал очищен, удалено записей: "+r.deleted,"ok"); loadLlmLog();
+    }catch(e){ toast(e.message,"err"); } });
+  on("llm-tool","change",()=>{ LL.tool=val("llm-tool"); LL.offset=0; loadLlmLog(); });
+  on("llm-errors","change",()=>{ LL.errors=checked("llm-errors"); LL.offset=0; loadLlmLog(); });
+  on("llm-search","change",()=>{ LL.search=val("llm-search").trim(); LL.offset=0; loadLlmLog(); });
+  on("llm-refresh","click",()=>loadLlmLog());
+  on("llm-prev","click",()=>{ LL.offset=Math.max(0,LL.offset-LL.limit); loadLlmLog(); });
+  on("llm-next","click",()=>{ LL.offset+=LL.limit; loadLlmLog(); });
+  const llmTable=$("#llm-table");
+  if(llmTable) llmTable.addEventListener("click",e=>{
+    const tr=e.target.closest("tr[data-id]"); if(tr) openLlmItem(+tr.dataset.id);
+  });
 }
 async function applyCfg(replace){
   const name=val("cfg-group"); if(!name){toast("Нет групп в конфиге","err");return;}
@@ -653,6 +790,7 @@ async function pollTask(){
 }
 setInterval(pollTask, 1000);
 setInterval(()=>{ if(TAB==="server" && S && S.server.running) refresh(); }, 3000);
+setInterval(()=>{ if(TAB==="llmlog") loadLlmLog(); }, 2000);
 pollTask();
 refresh().catch(e=>toast("Не удалось загрузить состояние: "+e.message,"err"));
 </script>

@@ -116,6 +116,133 @@ def test_core_server_llm_log_returns_server_lines(core):
     assert core.server_llm_log() == ['LLM → db_list {}', 'ответ сервера']
 
 
+# ---------- журнал LLM в отдельной базе ----------
+
+@pytest.fixture
+def llm_cfg(monkeypatch, tmp_path):
+    """Конфиг журнала в памяти + путь базы журнала во временном каталоге."""
+    path = str(tmp_path / 'llm.sqlite')
+    store = {'options': {'llm_log_db': path}}
+    monkeypatch.setattr('confdb.llm_log.load_config', lambda: store)
+
+    def save(config):
+        snapshot = dict(config)   # config может быть тем же словарём store
+        store.clear()
+        store.update(snapshot)
+
+    monkeypatch.setattr('confdb.llm_log.save_config', save)
+    return path
+
+
+def test_core_llm_log_toggle_persists(core, llm_cfg):
+    from confdb.ui_core import set_llm_log_enabled
+    set_llm_log_enabled(True, llm_cfg)
+    status = core.set_llm_log_enabled(False)
+    assert status['enabled'] is False and status['path'] == llm_cfg
+    status = core.set_llm_log_enabled(True)
+    assert status['enabled'] is True and status['running'] is False
+
+
+def test_core_llm_log_list_item_clear(core, llm_cfg):
+    from confdb import llm_log
+    from confdb.ui_core import set_llm_log_enabled
+    set_llm_log_enabled(True, llm_cfg)
+    writer = llm_log.LlmLogWriter(llm_cfg)
+    writer.append('find_objects', {'mask': 'Товар'}, 'ответ сервера',
+                  duration_ms=5, db='БП')
+    writer.close()
+    result = core.llm_log_calls()
+    assert result['total'] == 1
+    item = core.llm_log_call(result['rows'][0]['id'])
+    assert item['response'] == 'ответ сервера'
+    assert item['args'] == '{"mask": "Товар"}'
+    status = core.llm_log_status()
+    assert status['count'] == 1 and status['enabled'] is True
+    assert core.llm_log_clear() == 1
+    assert core.llm_log_calls()['total'] == 0
+
+
+def test_core_llm_log_toggle_applies_to_running_server(core, llm_cfg):
+    from confdb.ui_core import set_llm_log_enabled
+    set_llm_log_enabled(False, llm_cfg)
+
+    class _FakeServer:
+        def __init__(self):
+            self.calls = []
+
+        def configure_llm_log(self, enabled, path=None):
+            self.calls.append((enabled, path))
+
+    class _FakeRunner:
+        running = True
+        server = _FakeServer()
+
+    core.runner = _FakeRunner()
+    core.set_llm_log_enabled(True)
+    assert core.runner.server.calls == [(True, llm_cfg)]
+
+
+def test_server_runner_applies_llm_log_config(tmp_path, monkeypatch, llm_cfg):
+    """Старт сервера из UI включает запись журнала, если она включена в конфиге."""
+    from confdb.ui_core import set_llm_log_enabled
+    monkeypatch.setattr('confdb.mcp_server.resolve_syntax_db', lambda *a: None)
+    set_llm_log_enabled(True, llm_cfg)
+    db = _real_db(tmp_path, 'журнал_старт.sqlite')
+    runner = ServerRunner()
+    runner.start([db], [], port=0)
+    try:
+        assert runner.server.llm_writer is not None
+        assert runner.server.llm_writer.path == llm_cfg
+    finally:
+        runner.stop()
+    os.remove(db)
+
+
+def test_http_llm_log_end_to_end(tmp_path, monkeypatch, llm_cfg):
+    """Сквозной: включили запись в веб-API → запустили сервер → вызов LLM
+    по HTTP → вызов и полный ответ видны в журнале через веб-API."""
+    db = _real_db(tmp_path, 'журнал_e2e.sqlite')
+    with _http(monkeypatch, tmp_path) as (web, port):
+        code, r = _req(port, 'POST', '/api/llmlog/toggle', {'enabled': True})
+        assert code == 200 and r['status']['enabled'] is True
+        code, r = _req(port, 'POST', '/api/server/start',
+                       {'dbs': [db], 'groups': [], 'port': 0})
+        assert code == 200
+        mcp_port = r['port']
+        # запрос LLM к MCP-серверу (как это делает MCP-клиент)
+        conn = http.client.HTTPConnection('127.0.0.1', mcp_port, timeout=10)
+        msg = {'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call',
+               'params': {'name': 'db_list', 'arguments': {}}}
+        conn.request('POST', '/mcp', json.dumps(msg),
+                     {'Content-Type': 'application/json'})
+        resp = json.loads(conn.getresponse().read().decode('utf-8'))
+        conn.close()
+        answer = resp['result']['content'][0]['text']
+        # журнал через веб-API
+        code, r = _req(port, 'GET', '/api/llmlog')
+        assert code == 200 and r['total'] == 1
+        row = r['rows'][0]
+        assert row['tool'] == 'db_list' and row['is_error'] is False
+        assert r['status']['enabled'] is True
+        code, item = _req(port, 'GET', '/api/llmlog/item?id=%d' % row['id'])
+        assert code == 200 and item['response'] == answer
+        # фильтры
+        code, r = _req(port, 'GET', '/api/llmlog?tool=db_list')
+        assert r['total'] == 1
+        code, r = _req(port, 'GET', '/api/llmlog?errors=1')
+        assert r['total'] == 0
+        from urllib.parse import quote
+        code, r = _req(port, 'GET',
+                       '/api/llmlog?search=' + quote('несуществующий'))
+        assert r['total'] == 0
+        # очистка
+        code, r = _req(port, 'POST', '/api/llmlog/clear', {})
+        assert code == 200 and r['deleted'] == 1
+        assert r['status']['count'] == 0
+        _req(port, 'POST', '/api/server/stop', {})
+    os.remove(db)
+
+
 def test_core_extract_calls_pipeline(core, tmp_path, monkeypatch):
     src = tmp_path / 'Конфигурация.cf'
     src.write_bytes(b'data')

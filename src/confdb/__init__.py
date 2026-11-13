@@ -10,4 +10,4 @@ PRAGMA user_version баз) и сбрасывает последнюю в 0, п�
 v8/__init__.py — сверяется тестом test_version_places_are_in_sync.
 """
 
-__version__ = '1.12.2'
+__version__ = '1.12.3'

@@ -138,6 +138,70 @@ def test_llm_log_truncates_large_response(tmp_path_factory):
     assert any('обрезано' in ln for ln in server.llm_log_lines())
 
 
+def test_llm_log_db_records_full_response(tmp_path_factory, tmp_path):
+    """Включённый журнал пишет вызов в отдельную базу: полный ответ,
+    длительность, база; кольцевой буфер консоли при этом остаётся."""
+    from confdb import llm_log
+    server = _server(tmp_path_factory)
+    logdb = str(tmp_path / 'llm.sqlite')
+    assert server.llm_writer is None          # по умолчанию запись выключена
+    server.configure_llm_log(True, logdb)
+    resp = _call(server, 'db_list')
+    text = resp['content'][0]['text']
+    result = llm_log.list_calls(logdb)
+    assert result['total'] == 1
+    row = result['rows'][0]
+    assert row['tool'] == 'db_list' and row['is_error'] is False
+    assert row['duration_ms'] is not None and row['duration_ms'] >= 0
+    assert row['db'] == server.active
+    full = llm_log.get_call(logdb, row['id'])
+    assert full['response'] == text           # без обрезки
+    assert server.llm_log_lines()             # консольный журнал тоже пишется
+
+
+def test_llm_log_db_records_errors(tmp_path_factory, tmp_path):
+    from confdb import llm_log
+    server = _server(tmp_path_factory)
+    logdb = str(tmp_path / 'llm.sqlite')
+    server.configure_llm_log(True, logdb)
+    server.handle({'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call',
+                   'params': {'name': 'no_such_tool', 'arguments': {}}})
+    _call(server, 'sql', query='SELECT * FROM нет_такой')
+    result = llm_log.list_calls(logdb, errors_only=True)
+    assert result['total'] == 2
+    assert {r['tool'] for r in result['rows']} == {'no_such_tool', 'sql'}
+
+
+def test_llm_log_db_large_response_not_truncated(tmp_path_factory, tmp_path):
+    from confdb import llm_log
+    from confdb.mcp_server import LLM_RESP_CHARS
+    server = _server(tmp_path_factory)
+    logdb = str(tmp_path / 'llm.sqlite')
+    server.configure_llm_log(True, logdb)
+    body = 'полная строка ответа\n' * 3000
+    assert len(body) > LLM_RESP_CHARS
+    server._log_llm_call('sql', {'query': 'SELECT'}, body)
+    row = llm_log.list_calls(logdb)['rows'][0]
+    assert llm_log.get_call(logdb, row['id'])['response'] == body
+
+
+def test_llm_log_db_toggle_off_and_close_all(tmp_path_factory, tmp_path):
+    from confdb import llm_log
+    server = _server(tmp_path_factory)
+    logdb = str(tmp_path / 'llm.sqlite')
+    server.configure_llm_log(True, logdb)
+    _call(server, 'db_list')
+    server.configure_llm_log(False)
+    assert server.llm_writer is None
+    _call(server, 'db_list')                  # выключено — новых записей нет
+    assert llm_log.list_calls(logdb)['total'] == 1
+    # повторное включение и close_all освобождают файл (Windows)
+    server.configure_llm_log(True, logdb)
+    server.close_all()
+    assert server.llm_writer is None
+    os.remove(logdb)
+
+
 def test_close_all_releases_db_files(tmp_path_factory, tmp_path):
     """close_all освобождает файлы: Windows держит их, пока соединение живо.
 

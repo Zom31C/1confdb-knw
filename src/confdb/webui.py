@@ -21,6 +21,7 @@ import time
 import uuid
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
 
 from . import __version__
 from .ui_core import UiCore, resolve_launch_groups
@@ -198,6 +199,24 @@ def make_handler(web):
                 elif path == '/api/server/log':
                     _json_response(self, {'log': web.core.server_llm_log(),
                                           'running': web.core.runner.running})
+                elif path == '/api/llmlog':
+                    query = parse_qs(urlparse(self.path).query)
+
+                    def q(name, default=''):
+                        return (query.get(name) or [default])[0]
+
+                    limit = min(max(int(q('limit', '50') or 50), 1), 200)
+                    offset = max(int(q('offset', '0') or 0), 0)
+                    result = web.core.llm_log_calls(
+                        limit=limit, offset=offset, tool=q('tool') or None,
+                        errors_only=q('errors') == '1',
+                        search=q('search') or None)
+                    result['status'] = web.core.llm_log_status()
+                    _json_response(self, result)
+                elif path == '/api/llmlog/item':
+                    query = parse_qs(urlparse(self.path).query)
+                    call_id = int((query.get('id') or ['0'])[0])
+                    _json_response(self, web.core.llm_log_call(call_id))
                 else:
                     _json_response(self, {'error': f'нет такого пути: {path}'}, 404)
             except Exception as err:  # noqa: BLE001
@@ -244,6 +263,12 @@ def make_handler(web):
                 return {'task': web.fts(data['db'])}
             if path == '/api/bench':
                 return {'task': web.bench(data['src'])}
+            if path == '/api/llmlog/toggle':
+                return {'status': core.set_llm_log_enabled(
+                    bool(data.get('enabled')))}
+            if path == '/api/llmlog/clear':
+                deleted = core.llm_log_clear()
+                return {'deleted': deleted, 'status': core.llm_log_status()}
             if path == '/api/server/start':
                 return web.start_server(data.get('dbs') or [],
                                         data.get('groups') or [],

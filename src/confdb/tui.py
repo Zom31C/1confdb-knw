@@ -27,6 +27,9 @@ from .ui_core import first_db, group_cli_args, load_groups
 from .ui_core import out_defaults as _out_defaults
 from .ui_core import (replace_server_dbs, resolve_launch_groups,
                       scan_cf_sources, schema_tail, shown_dbs)
+from .ui_core import (apply_llm_log_to_server, llm_log_clear, llm_log_item,
+                      llm_log_list, llm_log_settings, llm_log_status,
+                      set_llm_log_enabled)
 
 
 def _cls():
@@ -93,7 +96,9 @@ class Tui:
             'db_dirs': self.db_dirs,
             'last_db': self.last_db,
             'groups': self.groups,
-            'options': {
+            # options сливаются с текущими: ключи журнала LLM и другие,
+            # сохранённые веб-интерфейсом, не затираются
+            'options': {**(config.get('options') or {}),
                 'src': self.src, 'db': self.db, 'cf_dir': self.cf_dir,
                 'dump': self.dump, 'temp': self.temp,
                 'prefix': self.prefix, 'keep_temp': self.keep_temp,
@@ -118,6 +123,7 @@ class Tui:
             print(' 2. Извлечь конфигурацию (.cf/.cfe/.epf -> SQLite)')
             print(' 3. Опции извлечения')
             print(' 4. Группы баз: именованные наборы для MCP-сервера')
+            print(' 5. Журнал LLM: запись вызовов в базу и просмотр')
             print(' 0. Выход')
             if self.last_db:
                 print(f'Последняя БД: {self.last_db}')
@@ -130,6 +136,8 @@ class Tui:
                 self._options_menu()
             elif choice == '4':
                 self._groups_menu()
+            elif choice == '5':
+                self._llm_log_menu()
             elif choice in ('0', 'q', 'exit', 'выход'):
                 _cls()
                 print('До свидания.')
@@ -570,6 +578,114 @@ class Tui:
                 print('Неизвестный пункт меню.')
                 input('Нажмите Enter…')
 
+    # ---------- журнал LLM (отдельная база) ----------
+
+    def _llm_log_menu(self):
+        while True:
+            _cls()
+            status = llm_log_status()
+            print('--- Журнал LLM: запись вызовов в отдельную базу ---')
+            print(f' Запись: {"включена" if status["enabled"] else "выключена"}')
+            print(f' База журнала: {status["path"]}')
+            print(f' Записей: {status["count"]} (ошибок: {status["errors"]})')
+            print(' 1. Включить/выключить запись')
+            print(' 2. Последние вызовы')
+            print(' 3. Поиск по журналу (инструмент / ошибки / текст)')
+            print(' 4. Очистить журнал')
+            print(' 0. Назад')
+            choice = input('Выбор: ').strip()
+            if choice == '0':
+                return
+            if choice == '1':
+                status = set_llm_log_enabled(not status['enabled'])
+                print('Запись журнала включена.' if status['enabled']
+                      else 'Запись журнала выключена.')
+                print('Настройка действует и на сервер, запущенный из этого '
+                      'интерфейса, и на standalone-сервер 1confdb-knw.')
+                input('Нажмите Enter…')
+            elif choice == '2':
+                self._llm_log_browse()
+            elif choice == '3':
+                self._llm_log_browse(with_filter=True)
+            elif choice == '4':
+                if _yes_no('Удалить все записи журнала?', False):
+                    deleted = llm_log_clear()
+                    print(f'Удалено записей: {deleted}')
+                    input('Нажмите Enter…')
+            else:
+                print('Неизвестный пункт меню.')
+                input('Нажмите Enter…')
+
+    def _llm_log_browse(self, with_filter=False):
+        tool = search = None
+        errors_only = False
+        if with_filter:
+            _cls()
+            print('--- Фильтр журнала LLM (Enter — пропустить) ---')
+            tool = _ask('Инструмент (например, find_objects)', '') or None
+            search = _ask('Текст в аргументах/ответах', '') or None
+            errors_only = _yes_no('Только ошибки?', False)
+        offset, page = 0, 20
+        while True:
+            _cls()
+            result = llm_log_list(limit=page, offset=offset, tool=tool,
+                                  errors_only=errors_only, search=search)
+            rows = result['rows']
+            print(f'--- Журнал LLM: вызовы (всего под фильтром: '
+                  f'{result["total"]}) ---')
+            if not rows:
+                print('Записей нет.')
+            for i, row in enumerate(rows, 1):
+                mark = '✗' if row['is_error'] else '→'
+                dur = (f'{row["duration_ms"]} мс'
+                       if row['duration_ms'] is not None else '')
+                print(f' {i}. {mark} {row["ts"]}  {row["tool"]}  {dur}'
+                      f'  {row["db"] or ""}')
+                print(f'    {row["args"][:120]}')
+            print(' Номер — подробности вызова; n — ещё; p — назад; 0 — выход')
+            choice = input('Выбор: ').strip().lower()
+            if choice == '0':
+                return
+            if choice == 'n':
+                if offset + page < result['total']:
+                    offset += page
+                continue
+            if choice == 'p':
+                offset = max(0, offset - page)
+                continue
+            if choice.isdigit() and 1 <= int(choice) <= len(rows):
+                self._llm_log_detail(rows[int(choice) - 1]['id'])
+
+    def _llm_log_detail(self, call_id):
+        try:
+            row = llm_log_item(call_id)
+        except ValueError as err:
+            print(f'Ошибка: {err}')
+            input('Нажмите Enter…')
+            return
+        _cls()
+        print(f'--- Вызов #{row["id"]}: {row["tool"]} ---')
+        print(f' Время: {row["ts"]}   сессия: {row["session"]}')
+        dur = (f'{row["duration_ms"]} мс'
+               if row['duration_ms'] is not None else '—')
+        print(f' База: {row["db"] or "—"}   группа: {row["grp"] or "—"}'
+              f'   длительность: {dur}')
+        print(f' Ошибка: {"да" if row["is_error"] else "нет"}')
+        print()
+        print('Аргументы:')
+        print(row['args'])
+        print()
+        print('Ответ сервера:')
+        lines = row['response'].splitlines()
+        if len(lines) > 150:
+            print('\n'.join(lines[:150]))
+            print(f'… (показано 150 из {len(lines)} строк)')
+            if _yes_no('Показать ответ полностью?', False):
+                print('\n'.join(lines[150:]))
+        else:
+            print(row['response'])
+        input('Нажмите Enter…')
+
     # ---------- MCP-сервер ----------
 
     def _run_mcp(self):
@@ -870,6 +986,10 @@ class Tui:
             _cls()
             print('--- Управление базами и группами запущенного MCP-сервера ---')
             print(compact_db_list(server))
+            log_state = llm_log_settings()
+            print(f'Запись журнала LLM в базу: '
+                  f'{"вкл" if log_state["enabled"] else "выкл"}'
+                  f' ({log_state["path"]})')
             # Показываем группы конфигураций
             if server.groups:
                 print()
@@ -887,6 +1007,7 @@ class Tui:
             print(' 6. Добавить базу в группу конфигураций')
             print(' 7. Удалить группу конфигураций')
             print(' 8. Журнал запросов LLM (ответы сервера)')
+            print(' 9. Журнал LLM: включить/выключить запись в базу')
             print(' 0. Остановить сервер и выйти')
             choice = input('Выбор: ').strip()
             if choice == '0':
@@ -997,6 +1118,16 @@ class Tui:
                     print(f'--- Журнал запросов LLM ({len(lines)} строк) ---')
                     for ln in lines:
                         print(ln)
+                input('Нажмите Enter…')
+            elif choice == '9':
+                enabled = not llm_log_settings()['enabled']
+                set_llm_log_enabled(enabled)
+                try:
+                    apply_llm_log_to_server(server)
+                    print('Запись журнала LLM включена.' if enabled
+                          else 'Запись журнала LLM выключена.')
+                except ValueError as err:
+                    print(f'Ошибка: {err}')
                 input('Нажмите Enter…')
             else:
                 print('Неизвестный пункт.')

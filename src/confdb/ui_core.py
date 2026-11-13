@@ -15,6 +15,7 @@ import os
 import threading
 
 from . import __version__
+from . import llm_log
 from .config import bench_workers
 from .config import load_config as _load_config
 from .config import save_config as _save_config
@@ -273,6 +274,50 @@ def compact_db_list(server):
     return '\n'.join(lines)
 
 
+# ---------- журнал LLM в отдельной базе (общее для TUI и веб) ----------
+# Запись делает MCP-сервер (mcp_server.McpServer.llm_writer), здесь —
+# настройки, просмотр и очистка. Просмотр работает и при остановленном
+# сервере: журнал — отдельный файл, не часть баз знаний.
+
+def llm_log_settings():
+    """Настройки журнала: {'enabled': bool, 'path': str}."""
+    return llm_log.settings()
+
+
+def set_llm_log_enabled(enabled, path=None):
+    """Включает/выключает запись журнала (сохраняется в конфиге)."""
+    return llm_log.save_settings(enabled, path)
+
+
+def llm_log_status():
+    """Настройки + сводка журнала (записи, ошибки, размер, инструменты)."""
+    result = llm_log.settings()
+    result.update(llm_log.stats(result['path']))
+    return result
+
+
+def llm_log_list(limit=50, offset=0, tool=None, errors_only=False, search=None):
+    """Страница журнала вызовов (новые сверху), с фильтрами."""
+    return llm_log.list_calls(llm_log.settings()['path'], limit=limit,
+                              offset=offset, tool=tool,
+                              errors_only=errors_only, search=search)
+
+
+def llm_log_item(call_id):
+    """Полная запись вызова: аргументы и ответ без обрезки."""
+    return llm_log.get_call(llm_log.settings()['path'], call_id)
+
+
+def llm_log_clear():
+    """Удаляет все записи журнала; возвращает число удалённых."""
+    return llm_log.clear(llm_log.settings()['path'])
+
+
+def apply_llm_log_to_server(server):
+    """Применяет настройки журнала к запущенному серверу (живой переключатель)."""
+    llm_log.configure_server(server, strict=True)
+
+
 class ServerRunner:
     """Запуск/остановка MCP-сервера (HTTP) внутри живого процесса.
 
@@ -299,6 +344,8 @@ class ServerRunner:
             raise ValueError('сервер уже запущен')
         server = McpServer(dbs, groups=list(groups),
                            syntax_db=resolve_syntax_db())
+        # запись журнала LLM, если включена в конфиге (переключатель в UI)
+        llm_log.configure_server(server)
         httpd, real_port = start_http_server(server, host, int(port))
         self._thread = threading.Thread(target=httpd.serve_forever, daemon=True)
         self._thread.start()
@@ -364,7 +411,9 @@ class UiCore:
                 'db_dirs': self.db_dirs,
                 'last_db': self.last_db,
                 'groups': self.groups,
-                'options': {
+                # слияние с текущими options: чужие ключи (журнал LLM и др.)
+                # не затираются — их могли сохранить веб/другой интерфейс
+                'options': {**(config.get('options') or {}),
                     'src': self.src, 'db': self.db, 'cf_dir': self.cf_dir,
                     'dump': self.dump, 'temp': self.temp,
                     'prefix': self.prefix, 'keep_temp': self.keep_temp,
@@ -581,6 +630,32 @@ class UiCore:
             return []
         return self.runner.server.llm_log_lines()
 
+    # ---------- журнал LLM в отдельной базе ----------
+
+    def llm_log_status(self):
+        """Настройки + сводка журнала + признак запущенного сервера."""
+        result = llm_log_status()
+        result['running'] = self.runner.running
+        return result
+
+    def set_llm_log_enabled(self, enabled):
+        """Переключатель записи журнала: конфиг + живой сервер, если запущен."""
+        llm_log.save_settings(enabled)
+        if self.runner.running:
+            llm_log.configure_server(self.runner.server, strict=True)
+        return self.llm_log_status()
+
+    def llm_log_calls(self, limit=50, offset=0, tool=None, errors_only=False,
+                      search=None):
+        return llm_log_list(limit=limit, offset=offset, tool=tool,
+                            errors_only=errors_only, search=search)
+
+    def llm_log_call(self, call_id):
+        return llm_log_item(call_id)
+
+    def llm_log_clear(self):
+        return llm_log_clear()
+
     def server_use(self, alias):
         self._server().active = self._server()._alias(alias)
         return self.server_status()
@@ -649,4 +724,5 @@ class UiCore:
                 'cf_candidates': self.cf_candidates(),
                 'db_candidates': self.db_candidates(),
                 'db_meta': self.db_meta_map(),
+                'llm_log': llm_log.settings(),
                 'server': self.server_status()}

@@ -43,6 +43,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 from . import compare
+from . import llm_log
 from . import header_props
 from .config import load_config
 from .db.writer import FTS_TABLE, SCHEMA_VERSION, TYPE_RU, enum_value_count, \
@@ -672,6 +673,8 @@ class McpServer:
         # llm_log_sink — необязательное эхо строк в консоль (stdio/HTTP standalone)
         self.llm_log = collections.deque(maxlen=LLM_LOG_LINES)
         self.llm_log_sink = None
+        # запись журнала в отдельную базу SQLite (включается в UI/конфиге)
+        self.llm_writer = None
         if isinstance(db_paths, str):
             db_paths = [db_paths]
         # Группы открываются первыми: активными становятся первая группа и её
@@ -685,11 +688,33 @@ class McpServer:
             self.attach_syntax_db(syntax_db)
 
     # -- журнал запросов LLM (консоль лога) ----------------------------------
-    def _log_llm_call(self, name, args, text, is_error=False):
+    @_synchronized
+    def configure_llm_log(self, enabled, path=None):
+        """Включает/выключает запись журнала в отдельную базу SQLite.
+
+        Вызывается из интерфейсов (переключатель) и при старте сервера из
+        конфига. База журнала создаётся при включении; выключение закрывает
+        соединение. Уже записанные вызовы остаются доступны для просмотра.
+        """
+        if not enabled:
+            if self.llm_writer is not None:
+                self.llm_writer.close()
+                self.llm_writer = None
+            return
+        path = os.path.abspath(path or llm_log.DEFAULT_PATH)
+        if self.llm_writer is not None and self.llm_writer.path == path:
+            return
+        if self.llm_writer is not None:
+            self.llm_writer.close()
+        self.llm_writer = llm_log.LlmLogWriter(path)
+
+    def _log_llm_call(self, name, args, text, is_error=False, duration_ms=None):
         """Записывает запрос LLM и ответ сервера в журнал (консоль лога).
 
         Ответ обрезается до LLM_RESP_CHARS/LLM_RESP_LINES — целиком ответы
         бывают очень большими; полный текст всё равно уходит клиенту.
+        Если включена запись в базу журнала (llm_writer), туда ответ
+        сохраняется ПОЛНОСТЬЮ — для анализа поведения LLM.
         """
         try:
             argstr = json.dumps(args, ensure_ascii=False)
@@ -700,6 +725,17 @@ class McpServer:
         mark = '✗' if is_error else '→'
         lines = [f'LLM {mark} {name} {argstr}']
         body = text if isinstance(text, str) else str(text)
+        # запись в базу журнала — до обрезки, ошибка не должна ронять ответ
+        if self.llm_writer is not None:
+            try:
+                db = args.get('db') if isinstance(args, dict) else None
+                grp = args.get('group') if isinstance(args, dict) else None
+                self.llm_writer.append(
+                    name, args, body, is_error=is_error,
+                    duration_ms=duration_ms, db=db or self.active,
+                    grp=grp or self.active_group)
+            except Exception:  # noqa: BLE001 — журнал не важнее ответа клиенту
+                pass
         total = len(body)
         all_lines = body.splitlines() or ['']
         truncated = total > LLM_RESP_CHARS
@@ -883,6 +919,9 @@ class McpServer:
             except sqlite3.Error:
                 pass
             self.syntax = None
+        if self.llm_writer is not None:
+            self.llm_writer.close()
+            self.llm_writer = None
 
     def _alias(self, alias=None):
         """Разрешает алиас (None = активная база); ValueError, если не найден."""
@@ -1249,20 +1288,27 @@ class McpServer:
                                    is_error=True)
                 return {'jsonrpc': '2.0', 'id': msg_id, 'error': {
                     'code': -32602, 'message': f'unknown tool: {name}'}}
+            started = time.perf_counter()
             try:
                 text = tool.run(self, **args)
-                self._log_llm_call(name, args, text)
+                self._log_llm_call(
+                    name, args, text,
+                    duration_ms=int((time.perf_counter() - started) * 1000))
                 return {'jsonrpc': '2.0', 'id': msg_id, 'result': {
                     'content': [{'type': 'text', 'text': text}]}}
             except FanoutError as err:
                 # групповой вызов, в котором отказали все базы: секции видны,
                 # но это отказ вызова — частичного ответа здесь нет
-                self._log_llm_call(name, args, str(err), is_error=True)
+                self._log_llm_call(
+                    name, args, str(err), is_error=True,
+                    duration_ms=int((time.perf_counter() - started) * 1000))
                 return {'jsonrpc': '2.0', 'id': msg_id, 'result': {
                     'content': [{'type': 'text', 'text': str(err)}],
                     'isError': True}}
             except Exception as err:  # noqa: BLE001 — ошибка инструмента, не сервера
-                self._log_llm_call(name, args, error_text(err), is_error=True)
+                self._log_llm_call(
+                    name, args, error_text(err), is_error=True,
+                    duration_ms=int((time.perf_counter() - started) * 1000))
                 return {'jsonrpc': '2.0', 'id': msg_id, 'result': {
                     'content': [{'type': 'text', 'text': error_text(err)}],
                     'isError': True}}
@@ -5631,6 +5677,8 @@ def serve_http(db_paths, host='127.0.0.1', port=8765, groups=None,
     server = McpServer(db_paths, groups=group_items, syntax_db=syntax_db)
     # ответы на запросы LLM — в консоль (stderr), не в поток протокола
     server.llm_log_sink = lambda line: print(line, file=sys.stderr)
+    # запись журнала в отдельную базу, если включена в конфиге (UI)
+    llm_log.configure_server(server)
     _print_dbs(server)
     httpd, real_port = start_http_server(server, host, port)
     print(f'1confdb-knw: слушаю http://{host}:{real_port}/mcp '
@@ -5729,6 +5777,8 @@ def main(argv=None):
     server = McpServer(dbs, groups=groups, syntax_db=syntax_db)
     # ответы на запросы LLM — в консоль (stderr), не в поток протокола stdout
     server.llm_log_sink = lambda line: print(line, file=sys.stderr)
+    # запись журнала в отдельную базу, если включена в конфиге (UI)
+    llm_log.configure_server(server)
     _print_dbs(server)
     import atexit
     pidfiles = _write_pidfiles(server)
