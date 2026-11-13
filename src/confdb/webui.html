@@ -164,6 +164,21 @@
         font-size:12.5px;overflow:auto;max-height:340px;white-space:pre-wrap;word-break:break-word;margin:6px 0}
   .llm-resp{max-height:520px}
   .badge.b-err{background:#fde8e8;color:#b42318}
+  /* пагинация журнала LLM: нумерованные страницы в палитре интерфейса */
+  .llm-pagerrow{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:12px;
+        padding-top:12px;border-top:1px solid var(--line)}
+  .llm-pager{display:flex;gap:5px;align-items:center;flex-wrap:wrap}
+  .pg-btn{min-width:34px;height:32px;padding:0 9px;border:1px solid var(--line);background:#fff;
+        color:var(--ink);border-radius:8px;cursor:pointer;font-size:13.5px;font-weight:550;
+        transition:border-color .15s,background .15s,color .15s,box-shadow .15s;
+        display:inline-flex;align-items:center;justify-content:center;font-family:inherit}
+  .pg-btn:hover:not(:disabled):not(.on){border-color:var(--brand);background:var(--brand-soft);color:var(--brand-d)}
+  .pg-btn:active:not(:disabled):not(.on){transform:translateY(1px)}
+  .pg-btn.on{background:linear-gradient(135deg,var(--brand),var(--brand-d));border-color:var(--brand-d);
+        color:#fff;box-shadow:0 2px 8px rgba(47,109,246,.35);cursor:default}
+  .pg-btn:disabled{opacity:.4;cursor:default}
+  .pg-btn:focus-visible{outline:2px solid var(--brand);outline-offset:2px}
+  .pg-gap{color:var(--muted);padding:0 2px;user-select:none}
 </style>
 </head>
 <body>
@@ -333,6 +348,7 @@ function render(full=false){
   else if(TAB==="llmlog"){
     if(S.llm_log){ llmStatus.enabled = S.llm_log.enabled; llmStatus.path = S.llm_log.path; }
     m.innerHTML = viewLlmLog();
+    llmTableSig = null; llmPagerSig = null; llmToolsSig = null;  // DOM пересоздан
     bind();
     loadLlmLog();
     return;
@@ -530,10 +546,14 @@ function viewSettings(){
 
 // ---------- вкладка: Журнал LLM ----------
 // Запись вызовов MCP-сервера в отдельную базу SQLite и их просмотр:
-// переключатель записи, фильтры, страница вызовов, полный ответ по клику.
-let LL = {rows:[], total:0, tools:[], offset:0, limit:50, tool:"", errors:false, search:"", selected:null};
+// переключатель записи, фильтры, постраничный вывод (15 записей на страницу,
+// нумерованные страницы), полный ответ по клику.
+const LLM_PAGE_SIZE = 15;
+let LL = {rows:[], total:0, tools:[], offset:0, limit:LLM_PAGE_SIZE, tool:"", errors:false, search:"", selected:null};
 let llmStatus = {enabled:false, path:"", count:0, errors:0, size_bytes:0, tools:[]};
 let llmToolsSig = null;
+let llmTableSig = null;   // перерисовка таблицы/пагинации только при изменении данных
+let llmPagerSig = null;
 
 const fmtSize = n => n>=1048576 ? (n/1048576).toFixed(1)+" МБ" : n>=1024 ? Math.round(n/1024)+" КБ" : n+" Б";
 function llmStatusText(){
@@ -550,7 +570,7 @@ function viewLlmLog(){
     <div class="hint" id="llm-status">${llmStatusText()}</div>
     <div class="row" style="margin-top:10px"><span class="grow"></span>
       <button class="btn danger sm" id="llm-clear">Очистить журнал</button></div></div>
-  <div class="card"><h2>Вызовы</h2>
+  <div class="card" id="llm-list-card"><h2>Вызовы</h2>
     <div class="row">
       <div style="min-width:190px"><select id="llm-tool"><option value="">все инструменты</option>${toolOpts}</select></div>
       <label style="display:flex;gap:6px;align-items:center;white-space:nowrap"><input type="checkbox" id="llm-errors" ${LL.errors?"checked":""} style="width:auto"> только ошибки</label>
@@ -558,11 +578,10 @@ function viewLlmLog(){
       <button class="btn ghost" id="llm-refresh">Обновить</button>
     </div>
     <div id="llm-table" style="margin-top:10px"></div>
-    <div class="row" style="margin-top:10px">
-      <button class="btn ghost sm" id="llm-prev">← Назад</button>
-      <span class="muted small" id="llm-page"></span>
+    <div class="llm-pagerrow">
+      <span class="muted small" id="llm-page" aria-live="polite"></span>
       <span class="grow"></span>
-      <button class="btn ghost sm" id="llm-next">Ещё →</button>
+      <nav class="llm-pager" id="llm-pager" aria-label="Страницы журнала LLM"></nav>
     </div></div>
   <div class="card" id="llm-detail-card" style="display:none"><div id="llm-detail"></div></div>`;
 }
@@ -573,6 +592,11 @@ async function loadLlmLog(){
   let r; try{ r = await api("/api/llmlog?"+q.toString()); }catch(e){ return; }
   LL.rows = r.rows||[]; LL.total = r.total||0; LL.tools = r.tools||[];
   llmStatus = r.status||llmStatus;
+  // записей стало меньше (очистка/фильтр) — не остаёмся на пустой странице
+  if(LL.total>0 && LL.offset>=LL.total){
+    LL.offset = Math.floor((LL.total-1)/LL.limit)*LL.limit;
+    return loadLlmLog();
+  }
   const st = $("#llm-status"); if(st) st.innerHTML = llmStatusText();
   const en = $("#llm-enabled"); if(en && document.activeElement!==en) en.checked = !!llmStatus.enabled;
   // список инструментов в фильтре обновляем только при изменении состава
@@ -583,9 +607,14 @@ async function loadLlmLog(){
       LL.tools.map(t=>`<option value="${esc(t)}" ${t===LL.tool?"selected":""}>${esc(t)}</option>`).join("");
   }
   renderLlmTable();
+  renderLlmPager();
 }
 function renderLlmTable(){
   const box = $("#llm-table"); if(!box) return;
+  // живой опрос не перерисовывает таблицу без изменений — клики не срываются
+  const sig = LL.offset + "\u0000" + LL.rows.map(r=>r.id+(r.is_error?"!":"")).join(",");
+  if(sig===llmTableSig) return;
+  llmTableSig = sig;
   if(!LL.rows.length){
     box.innerHTML = '<div class="empty">' + (llmStatus.enabled
       ? "Вызовов пока нет — они появятся, когда LLM обратится к серверу."
@@ -601,10 +630,50 @@ function renderLlmTable(){
         <td><button class="btn ghost sm">ответ</button></td></tr>`).join("") + `</tbody></table>`;
   }
   const page = $("#llm-page");
-  if(page) page.textContent = LL.total ? `${LL.offset+1}–${Math.min(LL.offset+LL.limit, LL.total)} из ${LL.total}` : "нет записей";
-  const prev = $("#llm-prev"), next = $("#llm-next");
-  if(prev) prev.disabled = LL.offset<=0;
-  if(next) next.disabled = LL.offset+LL.limit>=LL.total;
+  if(page){
+    const pages = Math.max(1, Math.ceil(LL.total/LL.limit));
+    const cur = Math.floor(LL.offset/LL.limit)+1;
+    page.textContent = LL.total
+      ? `Записи ${LL.offset+1}–${Math.min(LL.offset+LL.limit, LL.total)} из ${LL.total} · страница ${cur} из ${pages} · по ${LL.limit} на странице`
+      : "нет записей";
+  }
+}
+// номера страниц с многоточиями: 1 … 4 5 6 … 20 (крайние и текущая ±1)
+function llmPages(cur, count){
+  if(count<=7){ const a=[]; for(let i=1;i<=count;i++) a.push(i); return a; }
+  const want=[1,2,cur-1,cur,cur+1,count-1,count];
+  const nums=[...new Set(want.filter(n=>n>=1&&n<=count))].sort((a,b)=>a-b);
+  const out=[]; let prev=0;
+  for(const n of nums){ if(prev && n-prev>1) out.push("…"); out.push(n); prev=n; }
+  return out;
+}
+function renderLlmPager(){
+  const box = $("#llm-pager"); if(!box) return;
+  const pages = Math.ceil(LL.total/LL.limit);
+  const cur = Math.floor(LL.offset/LL.limit)+1;
+  const sig = cur + "\u0000" + pages;
+  if(sig===llmPagerSig) return;
+  llmPagerSig = sig;
+  if(pages<=1){ box.innerHTML=""; return; }
+  const btn=(label,page,disabled,cls,aria)=>
+    `<button type="button" class="pg-btn${cls?" "+cls:""}" data-page="${page}"${disabled?" disabled":""} aria-label="${aria}"${cls==="on"?' aria-current="page"':''}>${label}</button>`;
+  let html = btn("«",1,cur<=1,"","Первая страница") + btn("‹",cur-1,cur<=1,"","Предыдущая страница");
+  for(const p of llmPages(cur,pages)){
+    html += p==="…" ? '<span class="pg-gap">…</span>'
+                    : btn(p,p,false,p===cur?"on":"",`Страница ${p}`);
+  }
+  html += btn("›",cur+1,cur>=pages,"","Следующая страница") + btn("»",pages,cur>=pages,"","Последняя страница");
+  box.innerHTML = html;
+}
+function gotoLlmPage(page){
+  const pages = Math.max(1, Math.ceil(LL.total/LL.limit));
+  page = Math.min(Math.max(1,page), pages);
+  const offset = (page-1)*LL.limit;
+  if(offset===LL.offset) return;
+  LL.offset = offset;
+  loadLlmLog();
+  const card = $("#llm-list-card");
+  if(card) card.scrollIntoView({behavior:"smooth", block:"start"});
 }
 async function openLlmItem(id){
   let r; try{ r = await api("/api/llmlog/item?id="+id); }catch(e){ toast(e.message,"err"); return; }
@@ -674,8 +743,11 @@ function bind(){
   on("llm-errors","change",()=>{ LL.errors=checked("llm-errors"); LL.offset=0; loadLlmLog(); });
   on("llm-search","change",()=>{ LL.search=val("llm-search").trim(); LL.offset=0; loadLlmLog(); });
   on("llm-refresh","click",()=>loadLlmLog());
-  on("llm-prev","click",()=>{ LL.offset=Math.max(0,LL.offset-LL.limit); loadLlmLog(); });
-  on("llm-next","click",()=>{ LL.offset+=LL.limit; loadLlmLog(); });
+  const llmPager=$("#llm-pager");
+  if(llmPager) llmPager.addEventListener("click",e=>{
+    const b=e.target.closest("button[data-page]");
+    if(b && !b.disabled) gotoLlmPage(+b.dataset.page);
+  });
   const llmTable=$("#llm-table");
   if(llmTable) llmTable.addEventListener("click",e=>{
     const tr=e.target.closest("tr[data-id]"); if(tr) openLlmItem(+tr.dataset.id);

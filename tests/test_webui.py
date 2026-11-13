@@ -243,6 +243,37 @@ def test_http_llm_log_end_to_end(tmp_path, monkeypatch, llm_cfg):
     os.remove(db)
 
 
+def test_http_llm_log_pagination_15(tmp_path, monkeypatch, llm_cfg):
+    """Постраничный вывод журнала: по 15 записей, offset листает страницы."""
+    from confdb import llm_log
+    writer = llm_log.LlmLogWriter(llm_cfg)
+    for i in range(35):
+        writer.append('find_objects', {'mask': f'товар{i}'}, f'ответ {i}')
+    writer.close()
+    with _http(monkeypatch, tmp_path) as (web, port):
+        # страница 1: 15 записей, всего 35
+        code, r = _req(port, 'GET', '/api/llmlog?limit=15&offset=0')
+        assert code == 200 and r['total'] == 35 and len(r['rows']) == 15
+        first_ids = [row['id'] for row in r['rows']]
+        # страница 2: следующие 15, без пересечений с первой
+        code, r = _req(port, 'GET', '/api/llmlog?limit=15&offset=15')
+        assert code == 200 and len(r['rows']) == 15
+        second_ids = [row['id'] for row in r['rows']]
+        assert set(first_ids).isdisjoint(second_ids)
+        # страница 3: остаток 5
+        code, r = _req(port, 'GET', '/api/llmlog?limit=15&offset=30')
+        assert code == 200 and len(r['rows']) == 5
+        assert r['total'] == 35
+        # новые сверху: первая страница начинается с последней записи
+        assert first_ids[0] == 35
+        # в HTML есть нумерованная пагинация
+        conn = http.client.HTTPConnection('127.0.0.1', port, timeout=10)
+        conn.request('GET', '/')
+        html = conn.getresponse().read().decode('utf-8')
+        conn.close()
+        assert 'id="llm-pager"' in html and 'LLM_PAGE_SIZE = 15' in html
+
+
 def test_core_extract_calls_pipeline(core, tmp_path, monkeypatch):
     src = tmp_path / 'Конфигурация.cf'
     src.write_bytes(b'data')
