@@ -506,8 +506,9 @@ def test_scan_cf_sources_matches_by_sha_and_notes_conflict(tmp_path, monkeypatch
 
 
 def test_scan_cf_sources_flags_old_unpacker_version(tmp_path, monkeypatch):
-    """Проверка версий распаковщика: тот же файл, но база собрана старой
-    версией — статус 'version' (пересборка); текущая версия — 'current'."""
+    """Проверка версий распаковщика: пересборка только при другой ревизии схемы
+    (первые две цифры версии). Патч (последняя цифра) — минорное обновление
+    инструментов, распаковщика не касается: статус 'current'."""
     from confdb.extract import file_sha256
     from confdb import __version__
 
@@ -533,6 +534,30 @@ def test_scan_cf_sources_flags_old_unpacker_version(tmp_path, monkeypatch):
     rec2 = scan_cf_sources(str(cf_dir), [db_cur], log=lambda *a: None)[0]
     assert rec2['status'] == 'current'
     assert rec2['db_version'] == __version__
+    # другой патч при той же ревизии схемы — актуальна (минорное обновление)
+    major, minor, patch = __version__.split('.')
+    db_patch = _source_db(tmp_path / 'patch_ver.sqlite', 'Конфигурация.cf', sha,
+                          extractor_version=f'{major}.{minor}.{int(patch) + 7}')
+    rec3 = scan_cf_sources(str(cf_dir), [db_patch], log=lambda *a: None)[0]
+    assert rec3['status'] == 'current'
+    # другая ревизия схемы (вторая цифра) — пересборка, даже если патч новее
+    db_rev = _source_db(tmp_path / 'rev_ver.sqlite', 'Конфигурация.cf', sha,
+                        extractor_version=f'{major}.{int(minor) - 1}.99')
+    rec4 = scan_cf_sources(str(cf_dir), [db_rev], log=lambda *a: None)[0]
+    assert rec4['status'] == 'version'
+
+
+def test_version_schema_helper():
+    """Пересборку решает ревизия схемы — первые две цифры версии."""
+    from confdb.ui_core import _version_schema
+    assert _version_schema('1.12.3') == (1, 12)
+    assert _version_schema('1.12.0') == _version_schema('1.12.99')
+    assert _version_schema('1.11.5') != _version_schema('1.12.0')
+    assert _version_schema('2.0.0') != _version_schema('1.12.0')
+    assert _version_schema(None) is None
+    assert _version_schema('') is None
+    assert _version_schema('abc') is None
+    assert _version_schema('1') is None
 
 
 def test_scan_cf_sources_flags_missing_version(tmp_path, monkeypatch):

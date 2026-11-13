@@ -132,6 +132,22 @@ def extract_options(opts):
     return options
 
 
+def _version_schema(version):
+    """Первые две цифры версии (major, ревизия схемы) либо None.
+
+    По ним решается, нужна ли пересборка базы: изменение ревизии схемы меняет
+    данные/декодер, а патч (последняя цифра) — только инструменты MCP/CLI.
+    None (нет версии/не распознана) != текущая ревизия — база на пересборку.
+    """
+    parts = str(version or '').split('.')
+    if len(parts) < 2:
+        return None
+    try:
+        return int(parts[0]), int(parts[1])
+    except ValueError:
+        return None
+
+
 def scan_cf_sources(cf_dir, db_pool, log=print):
     """Сверяет файлы 1С каталога с базами знаний по SHA-256 исходника.
 
@@ -145,13 +161,18 @@ def scan_cf_sources(cf_dir, db_pool, log=print):
         'current'  — база уже собрана из этого же файла текущим распаковщиком
                      (извлечение не нужно);
         'outdated' — база из одноимённого файла, но отпечаток другой (замена);
-        'version'  — файл тот же, но база собрана другой версией распаковщика
+        'version'  — файл тот же, но ревизия схемы распаковщика другая
                      (пересборка: новые данные/исправления декодера);
         'new'      — базы нет (извлечение в путь по умолчанию out_defaults).
         ext — тип файла (cf/cfe/epf/erf); name/root_type — имя и тип корневого
         объекта метаданных из собранной базы (для 'new' — None); db_version —
         версия распаковщика, которым собрана найденная база (source.extractor_version),
         cur_version — текущая версия.
+
+        Версии сравниваются по ПЕРВЫМ ДВУМ цифрам (major.ревизия схемы):
+        только их изменение требует пересборки. Последняя цифра — доработки
+        инструментов (MCP/CLI), распаковщика не касается (правило пользователя
+        2026-11-13). У старых баз версии нет (None) — они помечаются на пересборку.
     """
     from .extract import file_sha256, source_info
     files = cf_files(cf_dir)
@@ -195,13 +216,15 @@ def scan_cf_sources(cf_dir, db_pool, log=print):
         ext = os.path.splitext(src)[1].lstrip('.').lower()
         meta = pool.get(found) or {}
         db_version = meta.get('extractor_version')
-        # проверка версии распаковщика: файл тот же, но база собрана другой
-        # версией — пересобрать (новые таблицы/исправления декодера). Версия
-        # берётся из source.extractor_version; у старых баз её нет (None).
-        if status == 'current' and db_version != __version__:
+        # проверка версии распаковщика: пересборка нужна только при другой
+        # ревизии схемы — первые две цифры версии (major.ревизия). Патч
+        # (последняя цифра) — доработки инструментов, распаковщика не касается.
+        # Версия берётся из source.extractor_version; у старых баз её нет (None).
+        if (status == 'current'
+                and _version_schema(db_version) != _version_schema(__version__)):
             status = 'version'
             note = (f'собрана распаковщиком {db_version or "неизвестной версии"}, '
-                    f'актуальный {__version__} — пересобрать')
+                    f'актуальный {__version__} — другая ревизия схемы, пересобрать')
         records.append({'src': src, 'sha': sha, 'status': status,
                         'db': db, 'found': found, 'note': note,
                         'ext': ext, 'name': meta.get('root_name'),
