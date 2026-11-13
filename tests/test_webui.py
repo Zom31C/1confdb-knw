@@ -99,6 +99,23 @@ def test_core_scan_statuses(core, tmp_path, monkeypatch):
     assert recs['Новая.cf']['name'] is None
 
 
+def test_core_server_llm_log_not_running(core):
+    assert core.server_llm_log() == []
+
+
+def test_core_server_llm_log_returns_server_lines(core):
+    class _FakeServer:
+        def llm_log_lines(self):
+            return ['LLM → db_list {}', 'ответ сервера']
+
+    class _FakeRunner:
+        running = True
+        server = _FakeServer()
+
+    core.runner = _FakeRunner()
+    assert core.server_llm_log() == ['LLM → db_list {}', 'ответ сервера']
+
+
 def test_core_extract_calls_pipeline(core, tmp_path, monkeypatch):
     src = tmp_path / 'Конфигурация.cf'
     src.write_bytes(b'data')

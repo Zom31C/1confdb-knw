@@ -103,6 +103,41 @@ def test_tools_list(tmp_path_factory):
         assert tool['description'] and tool['inputSchema']['type'] == 'object'
 
 
+def test_llm_log_records_request_and_response(tmp_path_factory):
+    """Ответ на запрос LLM попадает в журнал (консоль лога)."""
+    server = _server(tmp_path_factory)
+    assert server.llm_log_lines() == []
+    resp = _call(server, 'db_list')
+    text = resp['content'][0]['text']
+    lines = server.llm_log_lines()
+    assert any(ln.startswith('LLM → db_list') for ln in lines)
+    # текст ответа сервера присутствует в журнале
+    assert any(text.splitlines()[0] in ln for ln in lines)
+
+
+def test_llm_log_records_unknown_tool_error(tmp_path_factory):
+    server = _server(tmp_path_factory)
+    server.handle({'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call',
+                   'params': {'name': 'no_such_tool', 'arguments': {}}})
+    assert any(ln.startswith('LLM ✗ no_such_tool')
+               for ln in server.llm_log_lines())
+
+
+def test_llm_log_sink_echoes_lines(tmp_path_factory):
+    server = _server(tmp_path_factory)
+    captured = []
+    server.llm_log_sink = captured.append
+    _call(server, 'db_list')
+    assert captured and captured[0].startswith('LLM → db_list')
+
+
+def test_llm_log_truncates_large_response(tmp_path_factory):
+    from confdb.mcp_server import LLM_RESP_CHARS
+    server = _server(tmp_path_factory)
+    server._log_llm_call('sql', {'query': 'SELECT'}, 'x' * (LLM_RESP_CHARS + 500))
+    assert any('обрезано' in ln for ln in server.llm_log_lines())
+
+
 def test_close_all_releases_db_files(tmp_path_factory, tmp_path):
     """close_all освобождает файлы: Windows держит их, пока соединение живо.
 

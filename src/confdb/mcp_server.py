@@ -27,6 +27,7 @@
 активная база переключается инструментом db_use.
 """
 import argparse
+import collections
 import functools
 import glob
 import json
@@ -644,6 +645,13 @@ def _synchronized(fn):
     return wrapper
 
 
+# Журнал запросов LLM (консоль лога): кольцевой буфер строк и предел длины
+# ответа в записи — целиком ответы бывают очень большими (карточки, sql).
+LLM_LOG_LINES = 400      # строк журнала держим в памяти
+LLM_RESP_CHARS = 2000    # символов ответа на запись
+LLM_RESP_LINES = 60      # строк ответа на запись
+
+
 class McpServer:
     """Обработчик JSON-RPC сообщений MCP поверх баз SQLite (read-only).
 
@@ -660,6 +668,10 @@ class McpServer:
         self.syntax = None  # база синтакс-помощника: {'path','conn',…} или None
         # сериализация вызовов: см. _synchronized
         self._lock = threading.RLock()
+        # журнал запросов LLM и ответов сервера (консоль лога TUI/веб);
+        # llm_log_sink — необязательное эхо строк в консоль (stdio/HTTP standalone)
+        self.llm_log = collections.deque(maxlen=LLM_LOG_LINES)
+        self.llm_log_sink = None
         if isinstance(db_paths, str):
             db_paths = [db_paths]
         # Группы открываются первыми: активными становятся первая группа и её
@@ -671,6 +683,49 @@ class McpServer:
             self.open_db(path, activate=False)
         if syntax_db:
             self.attach_syntax_db(syntax_db)
+
+    # -- журнал запросов LLM (консоль лога) ----------------------------------
+    def _log_llm_call(self, name, args, text, is_error=False):
+        """Записывает запрос LLM и ответ сервера в журнал (консоль лога).
+
+        Ответ обрезается до LLM_RESP_CHARS/LLM_RESP_LINES — целиком ответы
+        бывают очень большими; полный текст всё равно уходит клиенту.
+        """
+        try:
+            argstr = json.dumps(args, ensure_ascii=False)
+        except (TypeError, ValueError):
+            argstr = str(args)
+        if len(argstr) > 200:
+            argstr = argstr[:200] + '…'
+        mark = '✗' if is_error else '→'
+        lines = [f'LLM {mark} {name} {argstr}']
+        body = text if isinstance(text, str) else str(text)
+        total = len(body)
+        all_lines = body.splitlines() or ['']
+        truncated = total > LLM_RESP_CHARS
+        if truncated:
+            body = body[:LLM_RESP_CHARS]
+        blines = body.splitlines() or ['']
+        hidden = len(all_lines) - len(blines)
+        if len(blines) > LLM_RESP_LINES:
+            hidden += len(blines) - LLM_RESP_LINES
+            blines = blines[:LLM_RESP_LINES]
+        if hidden > 0:
+            blines.append(f'… (скрыто строк: {hidden})')
+        if truncated:
+            blines.append(f'… (обрезано, всего {total} симв.)')
+        lines.extend(blines)
+        self.llm_log.extend(lines)
+        if self.llm_log_sink is not None:
+            for ln in lines:
+                try:
+                    self.llm_log_sink(ln)
+                except Exception:  # noqa: BLE001 — эхо не должно ронять ответ
+                    pass
+
+    def llm_log_lines(self):
+        """Строки журнала запросов LLM для консоли лога (TUI/веб)."""
+        return list(self.llm_log)
 
     # -- реестр баз ----------------------------------------------------------
     def _make_alias(self, path):
@@ -1190,19 +1245,24 @@ class McpServer:
             args = params.get('arguments', {}) or {}
             tool = next((t for t in TOOLS if t.name == name), None)
             if tool is None:
+                self._log_llm_call(name, args, f'unknown tool: {name}',
+                                   is_error=True)
                 return {'jsonrpc': '2.0', 'id': msg_id, 'error': {
                     'code': -32602, 'message': f'unknown tool: {name}'}}
             try:
                 text = tool.run(self, **args)
+                self._log_llm_call(name, args, text)
                 return {'jsonrpc': '2.0', 'id': msg_id, 'result': {
                     'content': [{'type': 'text', 'text': text}]}}
             except FanoutError as err:
                 # групповой вызов, в котором отказали все базы: секции видны,
                 # но это отказ вызова — частичного ответа здесь нет
+                self._log_llm_call(name, args, str(err), is_error=True)
                 return {'jsonrpc': '2.0', 'id': msg_id, 'result': {
                     'content': [{'type': 'text', 'text': str(err)}],
                     'isError': True}}
             except Exception as err:  # noqa: BLE001 — ошибка инструмента, не сервера
+                self._log_llm_call(name, args, error_text(err), is_error=True)
                 return {'jsonrpc': '2.0', 'id': msg_id, 'result': {
                     'content': [{'type': 'text', 'text': error_text(err)}],
                     'isError': True}}
@@ -5569,6 +5629,8 @@ def serve_http(db_paths, host='127.0.0.1', port=8765, groups=None,
             print(f'Файл базы не найден: {path}', file=sys.stderr)
             return 2
     server = McpServer(db_paths, groups=group_items, syntax_db=syntax_db)
+    # ответы на запросы LLM — в консоль (stderr), не в поток протокола
+    server.llm_log_sink = lambda line: print(line, file=sys.stderr)
     _print_dbs(server)
     httpd, real_port = start_http_server(server, host, port)
     print(f'1confdb-knw: слушаю http://{host}:{real_port}/mcp '
@@ -5665,6 +5727,8 @@ def main(argv=None):
         return serve_http(dbs, args.host, args.port, groups=groups,
                           syntax_db=syntax_db)
     server = McpServer(dbs, groups=groups, syntax_db=syntax_db)
+    # ответы на запросы LLM — в консоль (stderr), не в поток протокола stdout
+    server.llm_log_sink = lambda line: print(line, file=sys.stderr)
     _print_dbs(server)
     import atexit
     pidfiles = _write_pidfiles(server)

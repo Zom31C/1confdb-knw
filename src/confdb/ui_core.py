@@ -571,6 +571,16 @@ class UiCore:
             raise ValueError('сервер не запущен')
         return self.runner.server
 
+    def server_llm_log(self):
+        """Строки журнала запросов LLM запущенного сервера (консоль лога).
+
+        Пустой список, если сервер не запущен. Ответы на запросы LLM копятся
+        в кольцевом буфере сервера (mcp_server.McpServer.llm_log).
+        """
+        if not self.runner.running:
+            return []
+        return self.runner.server.llm_log_lines()
+
     def server_use(self, alias):
         self._server().active = self._server()._alias(alias)
         return self.server_status()

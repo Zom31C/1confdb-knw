@@ -195,6 +195,9 @@ def make_handler(web):
                     _json_response(self, {'task': web.tasks.snapshot()})
                 elif path == '/api/server':
                     _json_response(self, web.core.server_status())
+                elif path == '/api/server/log':
+                    _json_response(self, {'log': web.core.server_llm_log(),
+                                          'running': web.core.runner.running})
                 else:
                     _json_response(self, {'error': f'нет такого пути: {path}'}, 404)
             except Exception as err:  # noqa: BLE001

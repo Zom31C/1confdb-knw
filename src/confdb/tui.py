@@ -886,6 +886,7 @@ class Tui:
             print(' 5. Создать группу конфигураций')
             print(' 6. Добавить базу в группу конфигураций')
             print(' 7. Удалить группу конфигураций')
+            print(' 8. Журнал запросов LLM (ответы сервера)')
             print(' 0. Остановить сервер и выйти')
             choice = input('Выбор: ').strip()
             if choice == '0':
@@ -986,6 +987,16 @@ class Tui:
                         print(f'Группа {group_name} удалена.')
                     except ValueError as err:
                         print(f'Ошибка: {err}')
+                input('Нажмите Enter…')
+            elif choice == '8':
+                lines = server.llm_log_lines()
+                print()
+                if not lines:
+                    print('Запросов LLM пока не было.')
+                else:
+                    print(f'--- Журнал запросов LLM ({len(lines)} строк) ---')
+                    for ln in lines:
+                        print(ln)
                 input('Нажмите Enter…')
             else:
                 print('Неизвестный пункт.')

@@ -589,7 +589,9 @@ function renderLog(lines){
   logSig = sig;
   $("#t-log").innerHTML = lines.map(ln=>{
     let cls = "ll";
-    if(/^Стадия|Пишем базу|Строим FTS|Бенчмарк:/.test(ln)) cls += " ll-stage";
+    if(/^LLM ✗/.test(ln)) cls += " ll-err";
+    else if(/^LLM →/.test(ln)) cls += " ll-stage";
+    else if(/^Стадия|Пишем базу|Строим FTS|Бенчмарк:/.test(ln)) cls += " ll-stage";
     else if(/^Готово|Извлечение не требуется/.test(ln)) cls += " ll-ok";
     else if(/Ошибка|error|Traceback/i.test(ln)) cls += " ll-err";
     else if(/^SHA-256|^Хэш /.test(ln)) cls += " ll-dim";
@@ -602,6 +604,18 @@ async function pollTask(){
     const title=$("#t-title"), status=$("#t-status"), dot=$("#t-dot"), log=$("#t-log"),
           spin=$("#t-spin"), foot=$("#t-foot"), empty=$("#log-empty"), toggle=$("#log-toggle");
     if(!task){
+      // задачи нет: если сервер запущен — консоль лога показывает ответы LLM
+      if(S && S.server && S.server.running){
+        let lines=[]; try{ const r=await api("/api/server/log"); lines=r.log||[]; }catch(e){}
+        title.textContent="Журнал запросов LLM";
+        status.textContent=lines.length?"ответы сервера на запросы LLM":"запросов LLM пока не было";
+        dot.className="dot run"; spin.style.display="none";
+        empty.style.display="none"; log.style.display="block";
+        renderLog(lines.length?lines:["Ожидание запросов LLM…"]);
+        if(autoScroll) log.scrollTop=log.scrollHeight;
+        foot.textContent=""; toggle.classList.remove("running");
+        return;
+      }
       title.textContent="Журнал задач"; status.textContent="Задачи не запускались";
       dot.className="dot"; spin.style.display="none";
       log.innerHTML=""; logSig=null; log.style.display="none"; empty.style.display="flex";
