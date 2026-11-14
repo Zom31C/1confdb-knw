@@ -52,6 +52,9 @@ CONTAINER_UUID = 'f0ba0954-0000-0000-0000-00000000f002'
 CAT_UUID = 'bbbbbbbb-0000-0000-0000-00000000f003'
 ATTR_STR_UUID = 'aaaaaaaa-0000-0000-0000-00000000f011'   # РеквизитСтрока
 ATTR_REF_UUID = 'aaaaaaaa-0000-0000-0000-00000000f012'   # РодительСсылка
+ATTR_VS_UUID = 'aaaaaaaa-0000-0000-0000-00000000f013'    # РеквизитХранилище
+# канонический uuid платформенного типа ХранилищеЗначения (writer.PLATFORM_TYPE_UUIDS)
+PLATFORM_VS_UUID = 'e199ca70-93cf-46ce-a54b-6edc88c3a296'
 TS_UUID = 'aaaaaaaa-0000-0000-0000-00000000f013'         # ТЧ Товары
 TS_COLL_UUID = 'aaaaaaaa-0000-0000-0000-00000000f014'    # uuid коллекции полей ТЧ
 TSF_UUID = 'aaaaaaaa-0000-0000-0000-00000000f015'        # поле Количество
@@ -210,6 +213,10 @@ def make_cf_tree(base):
              ['"Pattern"', ['"S"', '10', '1']]],
             ['2', _core('РодительСсылка', ATTR_REF_UUID),
              ['"Pattern"', ['"#"', REF_CAT]]],
+            # платформенный тип: канонический uuid платформы вместо кода
+            # примитива (ревизия 14, паритет с dump v8:ValueStorage)
+            ['2', _core('РеквизитХранилище', ATTR_VS_UUID),
+             ['"Pattern"', ['"#"', PLATFORM_VS_UUID]]],
             # табличная часть Товары с полем Количество
             ['1', ['11', TS_COLL_UUID, ['0', _flag_desc(TS_UUID, 'Товары')]],
              '0', ['0'], ['1', '"ru"', '"Товары"']],
@@ -406,6 +413,14 @@ def make_xml_dump(base):
        '\t\t\t\t\t</Type>\n'
        '\t\t\t\t</Properties>\n'
        '\t\t\t</Attribute>\n'
+        '\t\t\t<Attribute uuid="%s">\n'
+        '\t\t\t\t<Properties>\n'
+        '\t\t\t\t\t<Name>РеквизитХранилище</Name>\n'
+        '\t\t\t\t\t<Type>\n'
+        '\t\t\t\t\t\t<v8:Type>v8:ValueStorage</v8:Type>\n'
+        '\t\t\t\t\t</Type>\n'
+        '\t\t\t\t</Properties>\n'
+        '\t\t\t</Attribute>\n'
        '\t\t\t<TabularSection uuid="%s">\n'
        '\t\t\t\t<Properties><Name>Товары</Name></Properties>\n'
        '\t\t\t\t<ChildObjects>\n'
@@ -426,7 +441,8 @@ def make_xml_dump(base):
        '\t\t</ChildObjects>\n'
        '\t</Catalog>\n'
        '</MetaDataObject>'
-       % (NS, CAT_UUID, ATTR_STR_UUID, ATTR_REF_UUID, TS_UUID, TSF_UUID))
+       % (NS, CAT_UUID, ATTR_STR_UUID, ATTR_REF_UUID, ATTR_VS_UUID,
+           TS_UUID, TSF_UUID))
     _w(base, 'Catalogs/Справочник1/Ext/ObjectModule.bsl', CAT_OBJ_BSL)
     _w(base, 'Catalogs/Справочник1/Ext/Predefined.xml',
        '<?xml version="1.0" encoding="UTF-8"?>\n'

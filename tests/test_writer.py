@@ -955,6 +955,37 @@ def test_composite_pattern_and_alias_resolution():
     assert r.describe(['"Pattern"', ['"#"', ua]]) == 'Ссылка: Document/Док1'
 
 
+def test_platform_type_uuids_resolved():
+    """Платформенные типы cf: канонический uuid → имя, без ссылки (ревизия 14)."""
+    from confdb.db.writer import _TypeResolver, PLATFORM_TYPE_UUIDS
+    r = _TypeResolver({}, {}, {}, {}, {})
+    vs = 'e199ca70-93cf-46ce-a54b-6edc88c3a296'      # ХранилищеЗначения
+    uuid_t = 'fc01b5df-97fe-449b-83d4-218a090e681e'   # УникальныйИдентификатор
+    # простой тип
+    assert r.describe(['"Pattern"', ['"#"', vs]]) == 'ХранилищеЗначения'
+    assert r.links == []          # платформенный тип — не объект конфигурации
+    # составной тип: платформенный + примитив
+    desc = ['"Pattern"', ['"#"', uuid_t], ['"S"', '10', '1']]
+    assert r.describe(desc) == 'УникальныйИдентификатор | Строка(10)'
+    assert r.links == []
+    # составной под обёрткой ["0", N, …]
+    desc0 = ['"0"', '2', ['"#"', vs], ['"B"']]
+    assert r.describe(desc0) == 'ХранилищеЗначения | Булево'
+    # неизвестный uuid по-прежнему обобщённая «Ссылка» (не угадываем)
+    unknown = 'cccccccc-cccc-cccc-cccc-cccccccccccc'
+    assert r.describe(['"Pattern"', ['"#"', unknown]]) == 'Ссылка'
+
+
+def test_platform_type_names_match_dump():
+    """Имена платформенных типов cf совпадают с dump (паритет cf/dump)."""
+    from confdb.db.writer import PLATFORM_TYPE_UUIDS
+    from confdb.dump.xmlmeta import V8_TYPES
+    dump_names = {v for v in V8_TYPES.values() if v}
+    assert set(PLATFORM_TYPE_UUIDS.values()) <= dump_names
+    # все 9 подтверждённых типов на месте
+    assert len(PLATFORM_TYPE_UUIDS) == 9
+
+
 def test_write_db_drops_stale_fts_shards(tmp_path):
     """Перезапись базы с --no-fts обязана снести старый приставной индекс.
 

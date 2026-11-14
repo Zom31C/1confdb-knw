@@ -36,7 +36,8 @@ REF_CLASS = {
     'InformationRegisterRecordKey': None,
 }
 
-# Платформенные типы v8: — человекочитаемые имена (в .cf-базах type_str NULL)
+# Платформенные типы v8: — человекочитаемые имена (в cf с ревизии 14 те же
+# имена даёт writer.PLATFORM_TYPE_UUIDS по каноническим uuid платформы)
 V8_TYPES = {
     'ValueStorage': 'ХранилищеЗначения',
     'UUID': 'УникальныйИдентификатор',
