@@ -58,6 +58,11 @@ BSL с разбором до методов, права ролей с RLS, за�
 - **запущенный MCP-сервер останавливать не нужно**: база из выгрузки в WAL,
   сервер подхватывает обновление сам (hot reload по `PRAGMA data_version`),
   FTS-индекс пересобирается поколениями шардов, не блокируя читателей;
+- **git-источники баз** (`confdb repos`): репозитории выгрузок в файлы, `.cf`,
+  `.epf`, `.cfe` клонируются в управляемое зеркало (`~/.confdb/repos`), база
+  собирается из них автоматически; слежение за изменениями (`watch`) обновляет
+  базу частично (выгрузка) или полностью (файл 1С) — доступно в CLI, консольном
+  и веб-интерфейсе (вкладка «Git-репозитории»);
 - FTS5-индекс по телам методов (`<база>.fts\` — приставные файлы, поиск по
   текстам в ~100 раз быстрее полного прохода);
 - `confdb check` — прогон всех СКД-запросов базы через встроенный валидатор
@@ -98,6 +103,10 @@ confdb.bat extract config.cf --db out.db --workers 8     :: из файла ко
 confdb.bat extract cf\БП_РФ --db bp.db --workers 8       :: из каталога выгрузки
 confdb.bat update cf\БП_РФ --db bp.db                    :: инкремент после правок
 
+:: 1б. Или из git-репозитория (выгрузка в файлы / .cf / .epf / .cfe)
+confdb.bat repos add <URL-репозитория> --watch --sync    :: клон + сборка базы
+confdb.bat repos watch --interval 300                    :: слежение: автообновление
+
 :: 2. (необязательно) Собрать базу синтакс-помощника платформы из .hbk
 confdb.bat hbk unpack shcntx_ru.hbk -o extracted         :: распаковка справки
 confdb.bat hbk build extracted --db syntax.db            :: сборка (~25 тыс. тем)
@@ -136,6 +145,9 @@ confdb extract <file.cf|каталог> --db out.db  :: сборка (--force, -
                                               ::  --skip-errors, --workers N)
 confdb update <каталог> --db out.db           :: инкремент; безопасно при
                                               ::  запущенном MCP-сервере
+confdb repos add <URL> [--path P] [--db F] [--watch] [--sync]
+                                              :: git-источник базы (выгрузка/cf/epf/cfe)
+confdb repos list|sync|check|remove|watch     :: состояние, обновление, слежение
 confdb check out.db                           :: валидация всех СКД-запросов
 confdb fts out.db --workers 8                 :: достроить индекс по телам
 confdb bench file.cf                          :: автонастройка workers

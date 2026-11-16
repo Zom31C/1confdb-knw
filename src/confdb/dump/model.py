@@ -257,6 +257,10 @@ def scan(dump_dir):
     known_dirs = set(CLASS_DIRS)
     for entry in sorted(os.listdir(dump_dir)):
         full = os.path.join(dump_dir, entry)
+        if entry.startswith('.'):
+            # служебные файлы/каталоги VCS (.git, .gitignore…): выгрузка из
+            # git-репозитория несёт их рядом с деревом — это не метаданные
+            continue
         if not os.path.isdir(full):
             if entry == 'Ext' or entry in ROOT_SERVICE_FILES \
                     or entry == 'Configuration.xml':

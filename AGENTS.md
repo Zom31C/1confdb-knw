@@ -38,7 +38,7 @@ file and NOTICE.md — the only documentation shipped to `dist\`.
   3.10, so green tests do NOT prove 3.9 compatibility — check new syntax by eye.
 - Windows-oriented: `.bat` wrappers in repo root, venv in `.venv`. Comments, docstrings and
   user-facing text are in **Russian**.
-- Package version is `<major>.<schema revision>.<tool patch>` — now **1.14.0** (schema rev 14).
+- Package version is `<major>.<schema revision>.<tool patch>` — now **1.14.1** (schema rev 14).
   User rule (2026-11-08): the SECOND digit follows the DB schema revision
   (`writer.SCHEMA_VERSION` = `PRAGMA user_version` of built bases) and resets the last digit
   to 0; the LAST digit increments on tool improvements/fixes (MCP/CLI). Guards:
@@ -84,8 +84,17 @@ One line each; detail in docs/details.md «Состав» and on the page named 
   hot reload via `PRAGMA data_version` cache invalidation + pidfile `<db>.server.json`;
   FTS rebuilds in shard GENERATIONS so open connections never block the swap). A dump DB is
   schema-rev 14 like cf DBs; the ONLY stop-the-server case is a full rebuild (file delete).
-- `__main__.py` — CLI: `extract` (.cf OR a dump dir), `update`, `check`, `fts`, `bench`,
-  `1confdb-knw`, `web`.
+- `__main__.py` — CLI: `extract` (.cf OR a dump dir), `update`, `repos` (git sources),
+  `check`, `fts`, `bench`, `1confdb-knw`, `web`.
+- `repos.py` — git sources of knowledge bases: registry `git_sources` in
+  `~/.confdb/config.json`, managed shallow mirrors `~/.confdb/repos/<id>`
+  (clone/fetch + reset --hard + clean -fd), source detection (dump dir with
+  `ConfigDumpInfo.xml` or a .cf/.cfe/.epf/.erf file, root + one subdir level,
+  ambiguity = error), `watch_loop`. Build orchestration lives in `ui_core`
+  (`UiCore.repos_sync`, `RepoWatcher`): dump → partial `update_db` (safe while MCP
+  runs), file → full rebuild on SHA-256 change; a different schema revision forces
+  a rebuild too. Git via subprocess (stdlib), `GIT_TERMINAL_PROMPT=0`,
+  `core.longpaths=true`. Page `git-sources`.
 - `mcp_server.py` — the MCP server: read-only tools, multi-base plus configuration GROUPS,
   paged search, stdio and `--port`. Page `mcp-server-1confdb-knw`.
 - `ui_core.py` — the SHARED logic layer of BOTH frontends (state in `~/.confdb/config.json`,
@@ -164,6 +173,8 @@ test.bat                                              :: pytest
 confdb.bat extract <file.cf> --db out.db --workers 8   :: --force, --no-fts, --skip-errors
 confdb.bat extract <dump-dir> --db out.db              :: build from a Designer file dump
 confdb.bat update <dump-dir> --db out.db               :: incremental; safe while MCP runs
+confdb.bat repos add <URL> [--path P] [--db F] [--watch] [--sync]  :: git source (dump/cf/epf/cfe)
+confdb.bat repos list|sync|check|remove|watch          :: registry, rebuild/partial update, watch loop
 confdb.bat check out.db                               :: validate all SKD queries (375/375)
 confdb.bat fts out.db --workers 8                      :: body index later, as sidecar shards
 confdb.bat hbk unpack <file.hbk> -o DIR                :: platform help unpacker (shcntx_ru.hbk)

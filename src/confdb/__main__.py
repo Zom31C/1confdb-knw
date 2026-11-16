@@ -176,6 +176,63 @@ def build_parser():
                    help='порт веб-интерфейса (по умолчанию 8766)')
     w.add_argument('--no-browser', action='store_true',
                    help='не открывать браузер автоматически')
+
+    r = subparsers.add_parser(
+        'repos',
+        help='git-источники баз знаний: репозитории выгрузок в файлы, .cf, '
+             '.epf, .cfe — клонирование, сборка SQLite, слежение за '
+             'изменениями и частичное/полное обновление баз')
+    rsub = r.add_subparsers(dest='repos_cmd', required=True)
+
+    ra = rsub.add_parser(
+        'add', help='зарегистрировать git-репозиторий как источник базы')
+    ra.add_argument('url', help='URL репозитория (https://… или git@…) '
+                                'либо локальный путь')
+    ra.add_argument('--id', metavar='NAME',
+                    help='короткое имя источника (по умолчанию из URL)')
+    ra.add_argument('--branch', metavar='B', default='',
+                    help='ветка (по умолчанию — основная ветка репозитория)')
+    ra.add_argument('--path', metavar='P', default='',
+                    help='путь внутри репозитория: каталог выгрузки или файл '
+                         '.cf/.cfe/.epf/.erf (по умолчанию — автоопределение)')
+    ra.add_argument('--db', metavar='FILE',
+                    help='база SQLite (по умолчанию ~/.confdb/dbs/<имя>.sqlite)')
+    ra.add_argument('--mode', choices=('auto', 'partial', 'full'),
+                    default='auto',
+                    help='стратегия обновления: auto — выгрузка частично, '
+                         'файл 1С полностью; partial — выгрузка только '
+                         'частично; full — всегда полная пересборка')
+    ra.add_argument('--watch', action='store_true',
+                    help='включить источник в слежение (confdb repos watch)')
+    ra.add_argument('--sync', action='store_true',
+                    help='сразу клонировать и собрать базу')
+
+    rsub.add_parser('list', help='список источников и их состояние')
+
+    rs = rsub.add_parser(
+        'sync', help='клонировать/подтянуть изменения и собрать/обновить базы')
+    rs.add_argument('ids', nargs='*', help='имена источников (пусто — все)')
+    rs.add_argument('--force', action='store_true',
+                    help='пересобрать базы, даже если изменений нет')
+
+    rcheck = rsub.add_parser(
+        'check', help='проверить изменения в удалённых ветках (без сборки)')
+    rcheck.add_argument('ids', nargs='*', help='имена источников (пусто — все)')
+
+    rr = rsub.add_parser('remove', help='убрать источник из реестра')
+    rr.add_argument('id', help='имя источника')
+    rr.add_argument('--purge', action='store_true',
+                    help='удалить и каталог клона (база остаётся)')
+
+    rw = rsub.add_parser(
+        'watch', help='следить за изменениями: циклы проверки и обновления '
+                      'источников с флагом watch (Ctrl+C — остановка)')
+    rw.add_argument('--interval', metavar='SEC', type=int, default=300,
+                    help='пауза между циклами, с (по умолчанию 300, минимум 10)')
+    rw.add_argument('--once', action='store_true',
+                    help='один проход и выход (для планировщика/cron)')
+    rw.add_argument('--all', action='store_true',
+                    help='все источники, а не только с флагом watch')
     return parser
 
 
@@ -442,9 +499,120 @@ def run_hbk(args):
         conn.close()
 
 
+def _print_repos_results(results):
+    """Печать итогов синхронизации; код возврата 1 при ошибках."""
+    fails = 0
+    for r in results:
+        mark = 'ОК' if r['ok'] else 'ОШИБКА'
+        print(f'[{mark}] {r["id"]}: {r["summary"]}')
+        if not r['ok']:
+            fails += 1
+    return 1 if fails else 0
+
+
+def run_repos(args):
+    """Git-источники баз: реестр, клонирование, сборка, слежение (ui_core)."""
+    from . import repos
+    from .ui_core import UiCore
+    core = UiCore()
+    cmd = args.repos_cmd
+
+    if cmd == 'add':
+        try:
+            rec = core.repos_add(args.url, source_id=args.id,
+                                 branch=args.branch, path=args.path,
+                                 db=args.db, mode=args.mode, watch=args.watch)
+        except ValueError as err:
+            print(f'Ошибка: {err}', file=sys.stderr)
+            return 2
+        print(f'Источник «{rec["id"]}» зарегистрирован: {rec["url"]}')
+        print(f'База: {rec["db"]}')
+        if args.sync:
+            return _print_repos_results(core.repos_sync(ids=[rec['id']]))
+        print(f'Клонирование и сборка — confdb repos sync {rec["id"]}')
+        return 0
+
+    if cmd == 'list':
+        rows = core.repos_list()
+        if not rows:
+            print('Git-источников нет — добавьте: confdb repos add <URL>')
+            return 0
+        for r in rows:
+            commit = (r.get('commit') or '')[:8] or 'не клонирован'
+            state = r.get('last_result') or 'новый'
+            db_mark = 'есть' if r['db_exists'] else 'нет'
+            print(f'{r["id"]}: {r["url"]}')
+            print(f'   тип {r.get("kind") or "?"} · ветка '
+                  f'{r.get("branch") or "основная"} · коммит {commit} · '
+                  f'режим {r.get("mode", "auto")} · '
+                  f'{"watch" if r.get("watch") else "без слежения"}')
+            print(f'   база {r["db"]} ({db_mark}) · последний результат: {state}')
+            if r.get('last_error'):
+                print(f'   ошибка: {r["last_error"]}')
+        return 0
+
+    if cmd == 'sync':
+        return _print_repos_results(
+            core.repos_sync(ids=args.ids or None, force=args.force))
+
+    if cmd == 'check':
+        results = core.repos_check(ids=args.ids or None)
+        fails = 0
+        for r in results:
+            if not r['ok']:
+                print(f'{r["id"]}: ошибка — {r.get("error")}')
+                fails += 1
+            elif not r['cloned']:
+                print(f'{r["id"]}: не клонирован (нужен confdb repos sync)')
+            elif r['changed']:
+                print(f'{r["id"]}: есть изменения '
+                      f'{r["local"][:8]} → {r["remote"][:8]}')
+            else:
+                print(f'{r["id"]}: изменений нет ({r["local"][:8]})')
+        return 1 if fails else 0
+
+    if cmd == 'remove':
+        try:
+            rec = core.repos_remove(args.id, purge=args.purge)
+        except ValueError as err:
+            print(f'Ошибка: {err}', file=sys.stderr)
+            return 2
+        tail = (' Клон удалён.' if args.purge
+                else ' Клон и база остались на диске (--purge удаляет клон).')
+        print(f'Источник «{rec["id"]}» удалён из реестра.' + tail)
+        return 0
+
+    # watch
+    if not repos.git_available():
+        print('git не найден — установите Git и добавьте его в PATH',
+              file=sys.stderr)
+        return 2
+
+    def sources_fn():
+        return [r for r in repos.load_sources() if args.all or r.get('watch')]
+
+    def sync_fn(source_id):
+        # свежий UiCore каждый цикл — настройки могли изменить в интерфейсе
+        results = UiCore().repos_sync(ids=[source_id])
+        return results[0] if results else {}
+
+    interval = max(10, args.interval)
+    print(f'Слежение за git-источниками (интервал {interval} с). '
+          'Ctrl+C — остановка.')
+    try:
+        repos.watch_loop(sources_fn, sync_fn, interval=interval,
+                         once=args.once)
+    except KeyboardInterrupt:
+        print('\nСлежение остановлено.')
+    return 0
+
+
 def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    if args.cmd == 'repos':
+        return run_repos(args)
 
     if args.cmd == 'hbk':
         return run_hbk(args)

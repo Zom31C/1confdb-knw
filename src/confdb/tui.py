@@ -85,6 +85,8 @@ class Tui:
         self.build_fts = bool(opts.get('build_fts', True))
         self.workers = int(opts.get('workers') or bench_workers() or 1)
         self.groups = load_groups(config)
+        # общий слой для git-источников (создаётся лениво, пункт 6)
+        self._core = None
 
     def _save(self):
         # сливаем с текущим конфигом, чтобы не затереть чужие ключи
@@ -124,6 +126,7 @@ class Tui:
             print(' 3. Опции извлечения')
             print(' 4. Группы баз: именованные наборы для MCP-сервера')
             print(' 5. Журнал LLM: запись вызовов в базу и просмотр')
+            print(' 6. Git-репозитории: выгрузки/cf/обработки/расширения -> SQLite')
             print(' 0. Выход')
             if self.last_db:
                 print(f'Последняя БД: {self.last_db}')
@@ -138,6 +141,8 @@ class Tui:
                 self._groups_menu()
             elif choice == '5':
                 self._llm_log_menu()
+            elif choice == '6':
+                self._repos_menu()
             elif choice in ('0', 'q', 'exit', 'выход'):
                 _cls()
                 print('До свидания.')
@@ -512,6 +517,209 @@ class Tui:
             return
         print(f'Готово: {methods} методов за {time.time() - begin:.1f} с')
         print(f'Файлы индекса: {fts_dir(db_path)} — без них база тоже рабочая')
+        input('Нажмите Enter…')
+
+    # ---------- git-репозитории (источники баз знаний) ----------
+
+    def _ui_core(self):
+        if self._core is None:
+            from .ui_core import UiCore
+            self._core = UiCore()
+        return self._core
+
+    def _repos_sync(self, core, source_id=None, force=False):
+        """Синхронизация с опциями этого интерфейса (процессы/FTS/BLOB)."""
+        results = core.repos_sync(
+            ids=[source_id] if source_id else None, force=force,
+            workers=self.workers, build_fts=self.build_fts,
+            store_blobs=self.store_blobs)
+        for r in results:
+            mark = 'ОК' if r['ok'] else 'ОШИБКА'
+            print(f'[{mark}] {r["id"]}: {r["summary"]}')
+        return results
+
+    def _pick_repo(self, rows, allow_all=True):
+        """Номер/имя источника; пусто — все (если allow_all)."""
+        hint = 'Номер или имя источника' + (' (пусто — все)' if allow_all else '')
+        answer = input(f'{hint}: ').strip()
+        if not answer:
+            return None if allow_all else ''
+        if answer.isdigit() and 1 <= int(answer) <= len(rows):
+            return rows[int(answer) - 1]['id']
+        return answer
+
+    def _repos_menu(self):
+        from . import repos
+        core = self._ui_core()
+        while True:
+            _cls()
+            print('--- Git-репозитории: источники баз знаний ---')
+            if not repos.git_available():
+                print(' ВНИМАНИЕ: git не найден в PATH — клонирование недоступно.')
+            rows = core.repos_list()
+            if rows:
+                for i, r in enumerate(rows, 1):
+                    commit = (r.get('commit') or '')[:8] or 'не клонирован'
+                    state = r.get('last_result') or 'новый'
+                    watch = ' [watch]' if r.get('watch') else ''
+                    db_mark = '' if r['db_exists'] else ' (базы нет)'
+                    print(f' {i}. {r["id"]}{watch} — {r.get("kind") or "?"}, '
+                          f'коммит {commit}, {state}{db_mark}')
+                    print(f'    {r["url"]}')
+                    print(f'    -> {r["db"]}')
+                    if r.get('last_error'):
+                        print(f'    ошибка: {r["last_error"]}')
+            else:
+                print(' Источников пока нет — добавьте репозиторий (n).')
+            print(' n. Добавить репозиторий (выгрузка/cf/cfe/epf/erf)')
+            print(' s. Синхронизировать: клон/pull + сборка/обновление базы')
+            print(' f. Полная пересборка (force)')
+            print(' c. Проверить изменения в удалённых ветках (без сборки)')
+            print(' w. Флаг watch у источника (для слежения)')
+            print(' e. Настройки источника (ветка/путь/база/режим)')
+            print(' d. Удалить источник')
+            print(' m. Слежение за изменениями (цикл, Ctrl+C — стоп)')
+            print(' 0. Назад')
+            choice = input('Выбор: ').strip().lower()
+            if choice == '0':
+                return
+            if choice == 'n':
+                self._repos_add(core)
+            elif choice == 's':
+                source_id = self._pick_repo(rows)
+                self._repos_sync(core, source_id)
+                input('Нажмите Enter…')
+            elif choice == 'f':
+                source_id = self._pick_repo(rows)
+                if _yes_no('Пересобрать базы полностью (даже без изменений)?', False):
+                    self._repos_sync(core, source_id, force=True)
+                input('Нажмите Enter…')
+            elif choice == 'c':
+                source_id = self._pick_repo(rows)
+                for r in core.repos_check(ids=[source_id] if source_id else None):
+                    if not r['ok']:
+                        print(f'{r["id"]}: ошибка — {r.get("error")}')
+                    elif not r['cloned']:
+                        print(f'{r["id"]}: не клонирован (нужна синхронизация)')
+                    elif r['changed']:
+                        print(f'{r["id"]}: есть изменения '
+                              f'{r["local"][:8]} -> {r["remote"][:8]}')
+                    else:
+                        print(f'{r["id"]}: изменений нет ({r["local"][:8]})')
+                input('Нажмите Enter…')
+            elif choice == 'w':
+                source_id = self._pick_repo(rows, allow_all=False)
+                if source_id:
+                    try:
+                        rec = repos.find_source(repos.load_sources(), source_id)
+                        rec = core.repos_update(source_id, watch=not rec.get('watch'))
+                        print(f'{source_id}: слежение '
+                              f'{"включено" if rec["watch"] else "выключено"}.')
+                    except ValueError as err:
+                        print(f'Ошибка: {err}')
+                input('Нажмите Enter…')
+            elif choice == 'e':
+                self._repos_edit(core, rows)
+            elif choice == 'd':
+                self._repos_remove(core, rows)
+            elif choice == 'm':
+                self._repos_watch(core)
+            else:
+                print('Неизвестный пункт меню.')
+                input('Нажмите Enter…')
+
+    def _repos_add(self, core):
+        _cls()
+        print('--- Добавить git-репозиторий ---')
+        print(' Внутри репозитория: каталог выгрузки в файлы (ConfigDumpInfo.xml)')
+        print(' или файл .cf/.cfe/.epf/.erf. Путь внутри репозитория можно не')
+        print(' указывать — определится автоматически (если кандидат один).')
+        url = _ask('URL репозитория (https://… или git@…)', '')
+        if not url:
+            return
+        source_id = _ask('Короткое имя (пусто — из URL)', '')
+        branch = _ask('Ветка (пусто — основная)', '')
+        path = _ask('Путь внутри репозитория (пусто — авто)', '')
+        db = _ask_path('База SQLite (пусто — ~/.confdb/dbs/<имя>.sqlite)', '')
+        mode = _ask('Режим: auto / partial / full', 'auto')
+        watch = _yes_no('Включить в слежение (watch)?', False)
+        try:
+            rec = core.repos_add(url, source_id=source_id or None,
+                                 branch=branch, path=path, db=db or None,
+                                 mode=mode, watch=watch)
+        except ValueError as err:
+            print(f'Ошибка: {err}')
+            input('Нажмите Enter…')
+            return
+        print(f'Источник «{rec["id"]}» зарегистрирован. База: {rec["db"]}')
+        if _yes_no('Сразу клонировать и собрать базу?', True):
+            self._repos_sync(core, rec['id'])
+        input('Нажмите Enter…')
+
+    def _repos_edit(self, core, rows):
+        source_id = self._pick_repo(rows, allow_all=False)
+        if not source_id:
+            return
+        from . import repos
+        try:
+            rec = repos.find_source(repos.load_sources(), source_id)
+        except ValueError as err:
+            print(f'Ошибка: {err}')
+            input('Нажмите Enter…')
+            return
+        _cls()
+        print(f'--- Настройки источника «{source_id}» (Enter — оставить) ---')
+        print(f' URL: {rec["url"]} (не меняется)')
+        branch = _ask('Ветка', rec.get('branch') or '')
+        path = _ask('Путь внутри репозитория', rec.get('path') or '')
+        db = _ask_path('База SQLite', rec.get('db') or '')
+        mode = _ask('Режим: auto / partial / full', rec.get('mode') or 'auto')
+        try:
+            core.repos_update(source_id, branch=branch, path=path,
+                              db=db or None, mode=mode)
+            print('Сохранено.')
+        except ValueError as err:
+            print(f'Ошибка: {err}')
+        input('Нажмите Enter…')
+
+    def _repos_remove(self, core, rows):
+        source_id = self._pick_repo(rows, allow_all=False)
+        if not source_id:
+            return
+        if not _yes_no(f'Удалить источник «{source_id}» из реестра?', False):
+            return
+        purge = _yes_no('Удалить и каталог клона? (база останется)', False)
+        try:
+            core.repos_remove(source_id, purge=purge)
+            print('Удалён.' + (' Клон удалён.' if purge else ''))
+        except ValueError as err:
+            print(f'Ошибка: {err}')
+        input('Нажмите Enter…')
+
+    def _repos_watch(self, core):
+        from . import repos
+        _cls()
+        print('--- Слежение за git-источниками ---')
+        interval = _ask('Интервал проверки, с', '300')
+        if not interval.isdigit() or int(interval) < 10:
+            interval = '300'
+        watch_all = _yes_no('Все источники (иначе только с флагом watch)?', False)
+
+        def sources_fn():
+            return [r for r in repos.load_sources()
+                    if watch_all or r.get('watch')]
+
+        def sync_fn(sid):
+            results = core.repos_sync(
+                ids=[sid], workers=self.workers, build_fts=self.build_fts,
+                store_blobs=self.store_blobs)
+            return results[0] if results else {}
+
+        print(f'Цикл каждые {interval} с. Ctrl+C — остановка и возврат в меню.')
+        try:
+            repos.watch_loop(sources_fn, sync_fn, interval=int(interval))
+        except KeyboardInterrupt:
+            print('\nСлежение остановлено.')
         input('Нажмите Enter…')
 
     # ---------- опции ----------

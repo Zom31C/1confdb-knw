@@ -139,6 +139,15 @@ class WebUi:
         return self.tasks.start('bench', f'Бенчмарк {os.path.basename(src)}',
                                 lambda: self.core.bench(src))
 
+    # ---------- git-источники ----------
+
+    def repos_sync(self, ids, force=False):
+        title = ('Синхронизация git-источников'
+                 + (f' ({len(ids)})' if ids else ' (все)'))
+        return self.tasks.start(
+            'repos', title,
+            lambda: self.core.repos_sync(ids=ids or None, force=force))
+
     # ---------- MCP-сервер ----------
 
     def start_server(self, dbs, group_names, port):
@@ -263,6 +272,38 @@ def make_handler(web):
                 return {'task': web.fts(data['db'])}
             if path == '/api/bench':
                 return {'task': web.bench(data['src'])}
+            if path == '/api/repos/add':
+                rec = core.repos_add(
+                    data.get('url') or '', source_id=data.get('id') or None,
+                    branch=data.get('branch') or '',
+                    path=data.get('path') or '', db=data.get('db') or None,
+                    mode=data.get('mode') or 'auto',
+                    watch=bool(data.get('watch')))
+                return {'ok': True, 'source': rec, 'repos': core.repos_list()}
+            if path == '/api/repos/update':
+                fields = {k: data[k] for k in
+                          ('branch', 'path', 'db', 'mode', 'watch') if k in data}
+                rec = core.repos_update(data['id'], **fields)
+                return {'ok': True, 'source': rec, 'repos': core.repos_list()}
+            if path == '/api/repos/remove':
+                core.repos_remove(data['id'], purge=bool(data.get('purge')))
+                return {'ok': True, 'repos': core.repos_list()}
+            if path == '/api/repos/sync':
+                if tasks.busy():
+                    raise ValueError('уже выполняется задача')
+                return {'task': web.repos_sync(data.get('ids') or [],
+                                               bool(data.get('force')))}
+            if path == '/api/repos/check':
+                return {'results': core.repos_check(
+                    ids=data.get('ids') or None)}
+            if path == '/api/repos/watch':
+                if data.get('enabled'):
+                    status = core.repos_watch_start(
+                        interval=int(data.get('interval') or 300),
+                        busy_fn=tasks.busy)
+                else:
+                    status = core.repos_watch_stop()
+                return {'status': status}
             if path == '/api/llmlog/toggle':
                 return {'status': core.set_llm_log_enabled(
                     bool(data.get('enabled')))}
@@ -327,6 +368,7 @@ def main(argv=None):
     except KeyboardInterrupt:
         print('\nОстанавливаю…')
     finally:
+        web.core.repo_watcher.stop()
         web.core.stop_server()
         httpd.server_close()
     return 0

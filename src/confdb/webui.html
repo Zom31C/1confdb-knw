@@ -192,13 +192,14 @@
   </div>
   <div class="htext">
     <h1>confdb — база знаний конфигурации 1С:Предприятие 8</h1>
-    <div class="sub">MCP-сервер 1confdb-knw · извлечение · каталог cf · группы баз · <span id="ver"></span></div>
+    <div class="sub">MCP-сервер 1confdb-knw · извлечение · каталог cf · git-источники · группы баз · <span id="ver"></span></div>
   </div>
 </header>
 <nav id="nav">
   <button data-tab="server" class="active">MCP-сервер</button>
   <button data-tab="extract">Извлечение</button>
   <button data-tab="catalog">Каталог cf</button>
+  <button data-tab="repos">Git-репозитории</button>
   <button data-tab="groups">Группы баз</button>
   <button data-tab="llmlog">Журнал LLM</button>
   <button data-tab="settings">Настройки</button>
@@ -297,6 +298,21 @@ $("#main").addEventListener("click", async e=>{
     else if(id==="cfg-replace"){ await applyCfg(true); }
     else if(b.dataset.close){ await api("/api/server/close","POST",{alias:b.dataset.close}); await refresh(true); }
     else if(b.dataset.gclose){ await api("/api/server/group/close","POST",{name:b.dataset.gclose}); await refresh(true); }
+    else if(b.dataset.repoSync){ await api("/api/repos/sync","POST",{ids:[b.dataset.repoSync]}); toast("Синхронизация запущена","ok"); pollTask(); }
+    else if(b.dataset.repoForce){ if(!confirm("Пересобрать базу полностью (даже без изменений)?"))return;
+      await api("/api/repos/sync","POST",{ids:[b.dataset.repoForce],force:true}); toast("Пересборка запущена","ok"); pollTask(); }
+    else if(b.dataset.repoCheck){ const r=await api("/api/repos/check","POST",{ids:[b.dataset.repoCheck]});
+      const x=(r.results||[])[0]||{};
+      if(!x.ok) toast(x.error||"Ошибка проверки","err");
+      else if(!x.cloned) toast("Не клонирован — нужна синхронизация","info");
+      else if(x.changed) toast("Есть изменения: "+x.local.slice(0,8)+" → "+x.remote.slice(0,8),"info");
+      else toast("Изменений нет ("+x.local.slice(0,8)+")","ok"); }
+    else if(b.dataset.repoWatch){ const rec=(S.repos||[]).find(x=>x.id===b.dataset.repoWatch); if(!rec)return;
+      await api("/api/repos/update","POST",{id:rec.id,watch:!rec.watch}); await refresh(); }
+    else if(b.dataset.repoEdit){ fillRepoForm(b.dataset.repoEdit); }
+    else if(b.dataset.repoDel){ const rec=(S.repos||[]).find(x=>x.id===b.dataset.repoDel); if(!rec)return;
+      if(!confirm("Удалить источник «"+rec.id+"» из реестра? Клон и база останутся на диске."))return;
+      await api("/api/repos/remove","POST",{id:rec.id}); toast("Источник удалён","ok"); await refresh(true); }
   }catch(err){ toast(err.message,"err"); }
 });
 
@@ -344,6 +360,23 @@ function render(full=false){
   }
   if(TAB==="extract") m.innerHTML = viewExtract();
   else if(TAB==="catalog") m.innerHTML = viewCatalog();
+  else if(TAB==="repos"){
+    if(full || !$("#repos-list")){ m.innerHTML = viewRepos(); bind(); }
+    else {
+      // живое обновление: только список источников и панель слежения —
+      // форма добавления/правки не перерисовывается (ввод сохраняется)
+      $("#repos-list").innerHTML = reposListHtml();
+      const w = S.repo_watch||{};
+      const st=$("#repo-watch-status"); if(st) st.innerHTML = watchStatusText(w);
+      const lg=$("#repo-watch-log");
+      if(lg){ const txt=(w.log||[]).map(esc).join("\n")||"Слежение не запущено.";
+              if(lg.innerHTML!==txt) lg.innerHTML=txt; }
+      const tog=$("#repo-watch-toggle");
+      if(tog){ tog.textContent=w.running?"Остановить слежение":"Запустить слежение";
+               tog.classList.toggle("danger", !!w.running); }
+    }
+    return;
+  }
   else if(TAB==="groups") m.innerHTML = viewGroups();
   else if(TAB==="llmlog"){
     if(S.llm_log){ llmStatus.enabled = S.llm_log.enabled; llmStatus.path = S.llm_log.path; }
@@ -491,6 +524,103 @@ function viewCatalog(){
       <button class="btn" id="cat-selected">Извлечь выбранные</button>
       <button class="btn ok" id="cat-all">Все новые и устаревшие (${actionable})</button></div>`:""}
     </div>`;
+}
+
+// ---------- вкладка: Git-репозитории ----------
+// Источники баз знаний из git: выгрузки в файлы, .cf/.cfe/.epf/.erf.
+// Список обновляется живым опросом (#repos-list), форма добавления/правки
+// и панель слежения не перерисовываются без полного обновления.
+const REPO_RESULT = {built:["собрана","b-current"], updated:["обновлена","b-current"],
+                     skipped:["актуальна","b-current"], "no-change":["актуальна","b-current"],
+                     error:["ошибка","b-err"], "":["новый","b-new"]};
+function repoBadge(r){
+  if(r.kind==="dump") return '<span class="badge t-cf" title="выгрузка конфигурации в файлы">DUMP</span>';
+  return r.kind ? typeBadge(r.kind) : '<span class="badge t-x" title="тип определится после клонирования">?</span>';
+}
+function reposListHtml(){
+  const rows = S.repos||[];
+  if(!rows.length) return '<div class="empty">Источников пока нет — добавьте репозиторий ниже.</div>';
+  return rows.map(r=>{
+    const res = REPO_RESULT[r.last_result||""]||[r.last_result,"b-new"];
+    const commit = r.commit ? r.commit.slice(0,8) : "не клонирован";
+    const watch = r.watch ? '<span class="pill" title="участвует в слежении">watch</span>' : "";
+    const dbMark = r.db_exists ? "" : ' <span class="badge b-new">базы нет</span>';
+    const err = r.last_error ? `<div class="hint" style="color:var(--err)">Ошибка: ${esc(r.last_error)}</div>` : "";
+    return `<div class="card" style="padding:14px 18px;margin-bottom:10px">
+      <div class="row"><b>${esc(r.id)}</b> ${repoBadge(r)} ${watch}
+        <span class="badge ${res[1]}">${esc(res[0])}</span><span class="grow"></span>
+        <button class="btn sm" data-repo-sync="${esc(r.id)}">Синхронизировать</button>
+        <button class="btn ghost sm" data-repo-force="${esc(r.id)}" title="полная пересборка даже без изменений">Пересобрать</button>
+        <button class="btn ghost sm" data-repo-check="${esc(r.id)}" title="fetch без сборки">Проверить</button>
+        <button class="btn ghost sm" data-repo-watch="${esc(r.id)}" title="включить/выключить слежение">${r.watch?"watch: вкл":"watch: выкл"}</button>
+        <button class="btn ghost sm" data-repo-edit="${esc(r.id)}">Настройки</button>
+        <button class="btn danger sm" data-repo-del="${esc(r.id)}">Удалить</button></div>
+      <div class="path" style="margin-top:6px">${esc(r.url)}${r.branch?" · ветка "+esc(r.branch):""}${r.src_path?" · "+esc(r.src_path):""}</div>
+      <div class="muted small">коммит ${esc(commit)} · режим ${esc(r.mode||"auto")}${r.last_sync?" · синхронизация "+esc(r.last_sync):""}</div>
+      <div class="path">→ ${esc(r.db)}${dbMark}</div>${err}</div>`;
+  }).join("");
+}
+function watchStatusText(w){
+  return (w.running?"работает":"остановлено")+" · источников с watch: "+(w.watched||0);
+}
+function viewRepos(){
+  const w = S.repo_watch||{};
+  return `<div class="card"><h2>Git-репозитории — источники баз знаний</h2>
+    <p class="muted small">Репозиторий с выгрузкой конфигурации в файлы (ConfigDumpInfo.xml) или файлом .cf/.cfe/.epf/.erf.
+    Клон хранится в ~/.confdb/repos; выгрузка обновляется <b>частично</b> (только изменённые объекты, работает при запущенном MCP-сервере),
+    файлы 1С пересобираются полностью при изменении. Другая ревизия схемы распаковщика тоже требует пересборки.</p>
+    <div id="repos-list">${reposListHtml()}</div>
+    <div class="row" style="margin-top:12px">
+      <button class="btn" id="repos-sync-all">Синхронизировать все</button>
+      <button class="btn ghost" id="repos-check-all">Проверить изменения во всех</button>
+    </div></div>
+  <div class="card"><h2 id="repo-form-title">Добавить репозиторий</h2>
+    <input type="hidden" id="repo-edit-id" value="">
+    <div class="field"><label>URL репозитория</label>
+      <input type="text" id="repo-url" placeholder="https://github.com/…/config.git или git@…"></div>
+    <div class="grid2">
+      <div class="field"><label>Имя (пусто — из URL)</label><input type="text" id="repo-id"></div>
+      <div class="field"><label>Ветка (пусто — основная)</label><input type="text" id="repo-branch"></div>
+      <div class="field"><label>Путь внутри репозитория (пусто — авто)</label><input type="text" id="repo-path" placeholder="каталог выгрузки или файл .cf"></div>
+      <div class="field"><label>База SQLite (пусто — ~/.confdb/dbs/&lt;имя&gt;.sqlite)</label><input type="text" id="repo-db"></div>
+    </div>
+    <div class="row">
+      <div style="min-width:280px"><label>Режим обновления</label><select id="repo-mode">
+        <option value="auto">auto — выгрузка частично, файл полностью</option>
+        <option value="partial">partial — выгрузка только частично</option>
+        <option value="full">full — всегда полная пересборка</option></select></div>
+      <label style="display:flex;gap:6px;align-items:center;white-space:nowrap"><input type="checkbox" id="repo-watch" style="width:auto"> watch (слежение)</label>
+    </div>
+    <div class="row" style="margin-top:12px"><button class="btn" id="repo-save">Добавить</button>
+      <button class="btn ghost" id="repo-reset">Очистить</button></div></div>
+  <div class="card"><h2>Слежение за изменениями</h2>
+    <p class="muted small">Фоновый цикл: источники с флагом watch проверяются на новые коммиты, базы обновляются автоматически.
+    Пока выполняется другая задача (извлечение/скан), цикл пропускается.</p>
+    <div class="row">
+      <div style="width:160px"><label>Интервал, с</label><input type="number" id="repo-watch-interval" min="10" value="${w.interval||300}"></div>
+      <button class="btn ${w.running?"danger":""}" id="repo-watch-toggle" style="align-self:flex-end">${w.running?"Остановить слежение":"Запустить слежение"}</button>
+      <span class="muted small" id="repo-watch-status" style="align-self:flex-end">${watchStatusText(w)}</span>
+    </div>
+    <pre class="llm-pre" id="repo-watch-log" style="max-height:220px;overflow:auto;margin-top:10px">${(w.log||[]).map(esc).join("\n")||"Слежение не запущено."}</pre></div>`;
+}
+function fillRepoForm(id){
+  const r = (S.repos||[]).find(x=>x.id===id); if(!r) return;
+  $("#repo-form-title").textContent = "Настройки источника «"+id+"»";
+  $("#repo-edit-id").value = id;
+  $("#repo-url").value = r.url; $("#repo-url").disabled = true;
+  $("#repo-id").value = r.id; $("#repo-id").disabled = true;
+  $("#repo-branch").value = r.branch||""; $("#repo-path").value = r.path||"";
+  $("#repo-db").value = r.db||""; $("#repo-mode").value = r.mode||"auto";
+  $("#repo-watch").checked = !!r.watch;
+  $("#repo-save").textContent = "Сохранить";
+  $("#repo-form-title").scrollIntoView({behavior:"smooth", block:"start"});
+}
+function resetRepoForm(){
+  $("#repo-form-title").textContent = "Добавить репозиторий";
+  $("#repo-edit-id").value = "";
+  ["repo-url","repo-id","repo-branch","repo-path","repo-db"].forEach(id=>{ const el=$("#"+id); if(el){ el.value=""; el.disabled=false; } });
+  $("#repo-mode").value = "auto"; $("#repo-watch").checked = false;
+  $("#repo-save").textContent = "Добавить";
 }
 
 // ---------- вкладка: Группы баз ----------
@@ -710,6 +840,34 @@ function bind(){
   on("cat-selected","click",()=>batchSelected(false));
   on("cat-all","click",()=>batchSelected(true));
 
+  // git-репозитории
+  on("repo-save","click",async()=>{
+    const editId=val("repo-edit-id");
+    const body={branch:val("repo-branch"),path:val("repo-path"),db:val("repo-db"),
+                mode:val("repo-mode"),watch:checked("repo-watch")};
+    try{
+      if(editId){ await api("/api/repos/update","POST",{id:editId,...body});
+        toast("Источник сохранён","ok"); }
+      else { const url=val("repo-url").trim(); if(!url){toast("Укажите URL репозитория","err");return;}
+        await api("/api/repos/add","POST",{url,id:val("repo-id"),...body});
+        toast("Источник добавлен — запустите синхронизацию","ok"); }
+      resetRepoForm(); await refresh(true);
+    }catch(e){ toast(e.message,"err"); } });
+  on("repo-reset","click",resetRepoForm);
+  on("repos-sync-all","click",async()=>{ try{ await api("/api/repos/sync","POST",{ids:[]}); toast("Синхронизация всех источников запущена","ok"); pollTask(); }catch(e){ toast(e.message,"err"); } });
+  on("repos-check-all","click",async()=>{ try{
+      const r=await api("/api/repos/check","POST",{ids:[]});
+      const changed=(r.results||[]).filter(x=>x.ok&&x.changed).length;
+      const failed=(r.results||[]).filter(x=>!x.ok).length;
+      toast("Проверено: "+(r.results||[]).length+", с изменениями: "+changed+(failed?", ошибок: "+failed:""), failed?"err":"ok");
+      await refresh();
+    }catch(e){ toast(e.message,"err"); } });
+  on("repo-watch-toggle","click",async()=>{ try{
+      const w=S.repo_watch||{};
+      const r=await api("/api/repos/watch","POST",{enabled:!w.running,interval:val("repo-watch-interval")||300});
+      toast(r.status.running?"Слежение запущено":"Слежение остановлено","ok"); await refresh();
+    }catch(e){ toast(e.message,"err"); } });
+
   // группы
   on("grp-save","click",async()=>{ const name=val("grp-name").trim(); if(!name){toast("Укажите имя группы","err");return;}
     const paths=[...document.querySelectorAll(".grp-db:checked")].map(x=>x.value);
@@ -854,6 +1012,8 @@ async function pollTask(){
         if(task.kind==="scan"){ scanRows=task.result||[]; toast("Сканирование завершено","ok"); }
         else if(task.kind==="batch"){ const r=task.result; toast("Извлечено: "+r.done.length+", ошибок: "+r.failed.length, r.failed.length?"err":"ok"); }
         else if(task.kind==="bench"){ toast("Бенчмарк: рекомендовано процессов "+task.result,"ok"); }
+        else if(task.kind==="repos"){ const rs=task.result||[]; const bad=rs.filter(x=>!x.ok).length;
+          toast("Git-синхронизация: "+(rs.length-bad)+" ОК, ошибок: "+bad, bad?"err":"ok"); }
         else toast("Задача завершена","ok");
         await refresh();
       } else { toast(task.error||"Ошибка задачи","err"); }
@@ -862,6 +1022,7 @@ async function pollTask(){
 }
 setInterval(pollTask, 1000);
 setInterval(()=>{ if(TAB==="server" && S && S.server.running) refresh(); }, 3000);
+setInterval(()=>{ if(TAB==="repos") refresh(); }, 3000);
 setInterval(()=>{ if(TAB==="llmlog") loadLlmLog(); }, 2000);
 pollTask();
 refresh().catch(e=>toast("Не удалось загрузить состояние: "+e.message,"err"));

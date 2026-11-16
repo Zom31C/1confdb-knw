@@ -13,6 +13,7 @@
 import glob
 import os
 import threading
+from datetime import datetime
 
 from . import __version__
 from . import llm_log
@@ -146,6 +147,13 @@ def _version_schema(version):
         return int(parts[0]), int(parts[1])
     except ValueError:
         return None
+
+
+def _count(value):
+    """Количество элементов статистики: список — длина, число — как есть."""
+    if isinstance(value, (list, tuple)):
+        return len(value)
+    return value if value is not None else 0
 
 
 def scan_cf_sources(cf_dir, db_pool, log=print):
@@ -389,6 +397,86 @@ class ServerRunner:
         self.port = None
 
 
+class RepoWatcher:
+    """Фоновое слежение за git-источниками (общее для TUI и веб).
+
+    Поток периодически синхронизирует источники с включённым флагом watch
+    (repos.watch_loop): клонирует/подтягивает коммиты и обновляет базы.
+    Каждый цикл перечитывает реестр и настройки из конфига — новые источники
+    и правки опций подхватываются без перезапуска. Журнал — кольцевой буфер
+    строк для панели интерфейса.
+    """
+
+    LOG_LIMIT = 200
+
+    def __init__(self):
+        self._thread = None
+        self._stop = threading.Event()
+        self._lock = threading.Lock()
+        self._busy_fn = None
+        self.interval = 300
+        self.log = []
+
+    @property
+    def running(self):
+        return self._thread is not None and self._thread.is_alive()
+
+    def _log(self, line):
+        with self._lock:
+            self.log.append(line)
+            if len(self.log) > self.LOG_LIMIT:
+                del self.log[:len(self.log) - self.LOG_LIMIT]
+
+    def start(self, interval=300, busy_fn=None):
+        """Запускает слежение; busy_fn — «занята ли тяжёлая задача» (веб)."""
+        from . import repos
+        if self.running:
+            raise ValueError('слежение за git-репозиториями уже запущено')
+        self._stop.clear()
+        self._busy_fn = busy_fn
+        self.interval = max(10, int(interval))
+        self._log(f'Слежение запущено: интервал {self.interval} с, '
+                  'источники с флагом watch.')
+
+        def sources_fn():
+            return [r for r in repos.load_sources() if r.get('watch')]
+
+        def sync_fn(source_id):
+            # свежий UiCore каждый цикл: настройки/реестр могли изменить
+            core = UiCore()
+            results = core.repos_sync(ids=[source_id])
+            return results[0] if results else {}
+
+        def run():
+            try:
+                repos.watch_loop(sources_fn, sync_fn, interval=self.interval,
+                                 log=self._log, stop_event=self._stop,
+                                 busy_fn=self._busy_fn)
+            finally:
+                self._log('Слежение остановлено.')
+
+        self._thread = threading.Thread(target=run, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        if not self.running:
+            return
+        self._stop.set()
+        self._thread.join(timeout=10)
+        self._thread = None
+
+    def status(self):
+        from . import repos
+        with self._lock:
+            log = list(self.log[-60:])
+        try:
+            watched = sum(1 for r in repos.load_sources() if r.get('watch'))
+        except Exception:  # noqa: BLE001 — статус не должен ронять интерфейс
+            watched = 0
+        return {'running': self.running, 'interval': self.interval,
+                'watched': watched, 'log': log}
+
+
 class UiCore:
     """Состояние и операции интерфейсов (общие для TUI и веб).
 
@@ -401,6 +489,7 @@ class UiCore:
     def __init__(self):
         self._lock = threading.RLock()
         self.runner = ServerRunner()
+        self.repo_watcher = RepoWatcher()
         self._load()
 
     # ---------- состояние ----------
@@ -489,7 +578,12 @@ class UiCore:
         return cf_candidates([self.cf_dir])
 
     def db_candidates(self):
-        return db_candidates(self.db_dirs)
+        from . import repos
+        paths = db_candidates(self.db_dirs)
+        # базы git-источников видны интерфейсу наравне с остальными
+        paths += [r['db'] for r in repos.load_sources()
+                  if r.get('db') and os.path.isfile(r['db'])]
+        return sorted(set(paths))
 
     def db_pool(self):
         recent = [r for r in ([self.last_db] + self.recent_db)
@@ -609,6 +703,193 @@ class UiCore:
     def delete_group(self, name):
         self.groups.pop(name, None)
         self.save()
+
+    # ---------- git-источники баз (репозитории выгрузок/cf/epf/cfe) ----------
+    # Реестр и git-операции — в repos.py; здесь оркестрация сборки/обновления
+    # базами общего конвейера (extract / dump.build_db / dump.update_db).
+    # Частичное обновление возможно только для выгрузок (dump_file хранит
+    # состав); файлы 1С пересобираются полностью при изменении SHA-256.
+
+    def repos_list(self):
+        """Источники с признаками для интерфейса (клон/база существуют)."""
+        from . import repos
+        result = []
+        for rec in repos.load_sources():
+            item = dict(rec)
+            item['clone_exists'] = os.path.isdir(
+                os.path.join(repos.clone_dir(rec), '.git'))
+            item['db_exists'] = os.path.isfile(rec.get('db') or '')
+            result.append(item)
+        return result
+
+    def repos_add(self, url, source_id=None, branch='', path='', db=None,
+                  mode='auto', watch=False):
+        from . import repos
+        return repos.add_source(url, source_id=source_id, branch=branch,
+                                path=path, db=db, mode=mode, watch=watch)
+
+    def repos_update(self, source_id, **fields):
+        from . import repos
+        return repos.update_source(source_id, **fields)
+
+    def repos_remove(self, source_id, purge=False):
+        from . import repos
+        return repos.remove_source(source_id, purge=purge)
+
+    def _guard_full_rebuild(self, db):
+        """Полная пересборка невозможна, пока базу держит живой MCP-сервер."""
+        if not os.path.isfile(db):
+            return
+        from .dump.update import read_server_pidfile
+        server = read_server_pidfile(db)
+        if server:
+            raise ValueError(
+                f'полная пересборка невозможна: базу держит MCP-сервер '
+                f'(pid {server.get("pid")}). Остановите сервер; частичное '
+                'обновление выгрузки работает и при запущенном сервере.')
+
+    def repos_sync(self, ids=None, force=False, log=print, workers=None,
+                   build_fts=None, store_blobs=None):
+        """Синхронизация git-источников: клон/pull + сборка/обновление базы.
+
+        ids — список имён источников (None/пусто — все). force — пересобрать
+        базы, даже если git-коммит и файл не изменились. Стратегия: выгрузка —
+        частичное обновление (режим full/force — полная сборка), файл 1С —
+        полная пересборка при изменении (SHA-256). Другая ревизия схемы
+        распаковщика тоже требует пересборки (правило 2026-11-13). Ошибка
+        одного источника не прерывает остальные; состояние пишется в реестр.
+        """
+        from . import repos
+        from .extract import source_info
+        sources = repos.load_sources()
+        records = ([repos.find_source(sources, i) for i in ids]
+                   if ids else list(sources))
+        workers = self.workers if workers is None else int(workers)
+        build_fts = self.build_fts if build_fts is None else bool(build_fts)
+        store_blobs = self.store_blobs if store_blobs is None else bool(store_blobs)
+        options = extract_options({'store_blobs': store_blobs,
+                                   'prefix': self.prefix,
+                                   'skip_errors': self.skip_errors})
+        results = []
+        for rec in records:
+            result = {'id': rec['id'], 'ok': False, 'action': '',
+                      'changed': False, 'build': '', 'commit': '',
+                      'summary': '', 'error': None}
+            try:
+                git = repos.pull(rec, log=log)
+                result.update(action=git['action'], changed=git['changed'],
+                              commit=git['commit'])
+                kind, rel = repos.detect_source(repos.clone_dir(rec),
+                                                rec.get('path'))
+                rec['kind'], rec['src_path'] = kind, rel
+                directory = repos.clone_dir(rec)
+                src = os.path.join(directory, rel) if rel else directory
+                db = rec['db']
+                os.makedirs(os.path.dirname(os.path.abspath(db)), exist_ok=True)
+                info = source_info(db)
+                stale_schema = bool(info) and (
+                    _version_schema(info.get('extractor_version'))
+                    != _version_schema(__version__))
+                if stale_schema:
+                    log('База собрана другой ревизией схемы распаковщика — '
+                        'нужна пересборка.')
+                stats, build = {}, 'skip'
+                if (not git['changed'] and not force and not stale_schema
+                        and os.path.isfile(db)):
+                    result['summary'] = 'изменений нет — база актуальна'
+                    rec['last_result'] = 'no-change'
+                elif kind == 'dump':
+                    from .dump import build_db, update_db
+                    if force or rec.get('mode') == 'full' or stale_schema:
+                        self._guard_full_rebuild(db)
+                        log('Полная сборка базы из выгрузки…')
+                        stats = build_db(src, db, workers=workers,
+                                         build_fts=build_fts,
+                                         store_blobs=store_blobs, log=log)
+                        build = 'full'
+                    else:
+                        # update_db сам решает: нет базы/не из выгрузки —
+                        # полная сборка; иначе частичное обновление (WAL,
+                        # работает при живом MCP-сервере)
+                        stats = update_db(
+                            src, db, workers=workers,
+                            rebuild_fts=None if build_fts else False, log=log)
+                        changed = stats.get('changed_granules')
+                        if isinstance(changed, list):
+                            build = 'partial' if changed else 'skip'
+                        else:
+                            build = 'full'
+                    if build == 'full':
+                        result['summary'] = (
+                            f'полная сборка: {_count(stats.get("objects"))} объектов')
+                    elif build == 'partial':
+                        result['summary'] = (
+                            'частичное обновление: '
+                            f'{len(stats["changed_granules"])} гранул')
+                    else:
+                        result['summary'] = 'изменений в выгрузке нет'
+                    rec['last_result'] = {'full': 'built', 'partial': 'updated',
+                                          'skip': 'skipped'}[build]
+                else:
+                    sha, skip = check_same_source(
+                        src, db, force=force or stale_schema, log=log)
+                    if skip:
+                        result['summary'] = 'файл не изменился (SHA-256 совпал)'
+                        rec['last_result'] = 'skipped'
+                    else:
+                        self._guard_full_rebuild(db)
+                        stats = _extract_cf(
+                            src, db_path=db, temp_dir=self.temp or None,
+                            keep_temp=self.keep_temp, options=options,
+                            workers=workers, build_fts=build_fts,
+                            source_sha256=sha)
+                        build = 'full'
+                        result['summary'] = (
+                            f'полная пересборка за {stats.get("elapsed")}')
+                        rec['last_result'] = 'built'
+                if git['action'] == 'clone':
+                    result['summary'] = 'клонирован; ' + result['summary']
+                elif git['action'] == 'pull':
+                    result['summary'] = (f'коммит {git["commit"][:8]}; '
+                                         + result['summary'])
+                rec['last_sync'] = datetime.now().isoformat(timespec='seconds')
+                rec['last_error'] = ''
+                result.update(ok=True, build=build, stats=stats)
+                if build in ('full', 'partial'):
+                    self._remember_extract(src, db, stats)
+            except Exception as err:  # noqa: BLE001 — один источник не роняет пакет
+                rec['last_result'] = 'error'
+                rec['last_error'] = str(err)
+                result.update(error=str(err), summary=f'ошибка: {err}')
+                log(f'Источник {rec["id"]}: ошибка — {err}')
+            repos.save_sources(sources)
+            results.append(result)
+        return results
+
+    def repos_check(self, ids=None):
+        """Проверка изменений в удалённых ветках без обновления зеркал/баз."""
+        from . import repos
+        sources = repos.load_sources()
+        records = ([repos.find_source(sources, i) for i in ids]
+                   if ids else list(sources))
+        results = []
+        for rec in records:
+            item = {'id': rec['id'], 'ok': False}
+            try:
+                item.update(repos.remote_check(rec))
+                item['ok'] = True
+            except Exception as err:  # noqa: BLE001
+                item['error'] = str(err)
+            results.append(item)
+        return results
+
+    def repos_watch_start(self, interval=300, busy_fn=None):
+        self.repo_watcher.start(interval=interval, busy_fn=busy_fn)
+        return self.repo_watcher.status()
+
+    def repos_watch_stop(self):
+        self.repo_watcher.stop()
+        return self.repo_watcher.status()
 
     # ---------- MCP-сервер ----------
 
@@ -748,4 +1029,6 @@ class UiCore:
                 'db_candidates': self.db_candidates(),
                 'db_meta': self.db_meta_map(),
                 'llm_log': llm_log.settings(),
+                'repos': self.repos_list(),
+                'repo_watch': self.repo_watcher.status(),
                 'server': self.server_status()}
