@@ -20,6 +20,7 @@ from . import llm_log
 from .config import bench_workers
 from .config import load_config as _load_config
 from .config import save_config as _save_config
+from .dump import is_dump_dir
 from .extract import check_same_source
 from .extract import extract as _extract_cf
 
@@ -52,6 +53,38 @@ def cf_files(directory):
     return sorted(found)
 
 
+def dump_dirs(directory):
+    """Каталоги выгрузки в файлы (признак ConfigDumpInfo.xml) среди детей."""
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return []
+    found = []
+    for name in names:
+        full = os.path.join(directory, name)
+        if os.path.isdir(full) and is_dump_dir(full):
+            found.append(os.path.abspath(full))
+    return sorted(found)
+
+
+def _is_dump_db(db_path):
+    """База собрана из выгрузки в файлы (есть таблица состояния dump_state)."""
+    import sqlite3
+    uri = 'file:' + os.path.abspath(db_path).replace(os.sep, '/') + '?mode=ro'
+    try:
+        conn = sqlite3.connect(uri, uri=True)
+    except sqlite3.Error:
+        return False
+    try:
+        row = conn.execute("SELECT COUNT(*) FROM sqlite_master "
+                           "WHERE type='table' AND name='dump_state'").fetchone()
+        return bool(row and row[0])
+    except sqlite3.Error:
+        return False
+    finally:
+        conn.close()
+
+
 def cf_candidates(extra_dirs=()):
     """Файлы 1С для выбора: текущий каталог, корень проекта, cf/, доп. каталоги."""
     roots = [os.getcwd(), _project_root()]
@@ -61,6 +94,12 @@ def cf_candidates(extra_dirs=()):
         for pattern in ('*.cf', '*.cfe', '*.epf', '*.erf',
                         os.path.join('cf', '*.cf'), os.path.join('cf', '*.cfe')):
             found += glob.glob(os.path.join(root, pattern))
+        # выгрузки в файлы — тоже кандидаты извлечения: сам каталог,
+        # дети-выгрузки и выгрузки внутри cf/
+        if is_dump_dir(root):
+            found.append(root)
+        found += dump_dirs(root)
+        found += dump_dirs(os.path.join(root, 'cf'))
     return sorted({os.path.abspath(p) for p in found})
 
 
@@ -172,6 +211,10 @@ def scan_cf_sources(cf_dir, db_pool, log=print):
         'version'  — файл тот же, но ревизия схемы распаковщика другая
                      (пересборка: новые данные/исправления декодера);
         'new'      — базы нет (извлечение в путь по умолчанию out_defaults).
+        Выгрузки в файлы (каталоги с ConfigDumpInfo.xml) попадают в список
+        с ext='dump' и sha=None: изменённость определяется состоянием состава
+        dump_file (stat-обход + хэши изменённых файлов), 'outdated' означает
+        инкрементальное обновление; база ищется по source.file = путь выгрузки.
         ext — тип файла (cf/cfe/epf/erf); name/root_type — имя и тип корневого
         объекта метаданных из собранной базы (для 'new' — None); db_version —
         версия распаковщика, которым собрана найденная база (source.extractor_version),
@@ -236,6 +279,67 @@ def scan_cf_sources(cf_dir, db_pool, log=print):
         records.append({'src': src, 'sha': sha, 'status': status,
                         'db': db, 'found': found, 'note': note,
                         'ext': ext, 'name': meta.get('root_name'),
+                        'root_type': meta.get('root_type'),
+                        'db_version': db_version, 'cur_version': __version__})
+
+    # Выгрузки в файлы: каталоги с ConfigDumpInfo.xml среди детей каталога
+    # (и сам каталог, если он выгрузка). Признак изменённости — не SHA-256
+    # всего дерева (дорого), а состояние состава dump_file: stat-обход +
+    # хэши только изменённых файлов, как в confdb update. База ищется по
+    # source.file (путь выгрузки при сборке); 'outdated' для выгрузки означает
+    # ИНКРЕМЕНТАЛЬНОЕ обновление, а не замену базы.
+    import sqlite3
+
+    from .dump import model as dump_model
+    from .dump.update import scan_changes
+    dirs = dump_dirs(cf_dir)
+    if is_dump_dir(cf_dir):
+        dirs.append(os.path.abspath(cf_dir))
+    for i, src in enumerate(dirs, 1):
+        log(f'Выгрузка {i}/{len(dirs)}: {os.path.basename(src)}')
+        same_path = sorted(p for p, inf in pool.items()
+                           if os.path.abspath(inf.get('file') or '') == src)
+        default_db = out_defaults(src)[0]
+        note = ''
+        if same_path:
+            found = default_db if default_db in same_path else same_path[0]
+            status, db = 'current', found
+            db_version = pool[found].get('extractor_version')
+            if not _is_dump_db(found):
+                status = 'outdated'
+                note = 'база собрана не из выгрузки — будет полная сборка'
+            elif _version_schema(db_version) != _version_schema(__version__):
+                status = 'version'
+                note = (f'собрана распаковщиком {db_version or "неизвестной версии"}, '
+                        f'актуальный {__version__} — другая ревизия схемы, пересобрать')
+            else:
+                try:
+                    _objects, granule_files, _warnings = dump_model.scan(src)
+                    uri = ('file:' + os.path.abspath(found).replace(os.sep, '/')
+                           + '?mode=ro')
+                    conn = sqlite3.connect(uri, uri=True)
+                    try:
+                        dirty, _current, _stored = scan_changes(
+                            conn, src, granule_files)
+                    finally:
+                        conn.close()
+                except (sqlite3.Error, OSError, ValueError) as err:
+                    status = 'outdated'
+                    note = f'состояние выгрузки не читается ({err}) — обновление'
+                else:
+                    if dirty:
+                        status = 'outdated'
+                        note = (f'изменённых гранул: {len(dirty)} — '
+                                f'инкрементальное обновление')
+        else:
+            status, db, found = 'new', default_db, None
+            db_version = None
+            if os.path.isfile(default_db):
+                note = 'путь по умолчанию занят другой базой — будет заменён'
+        meta = pool.get(found) or {}
+        records.append({'src': src, 'sha': None, 'status': status,
+                        'db': db, 'found': found, 'note': note,
+                        'ext': 'dump', 'name': meta.get('root_name'),
                         'root_type': meta.get('root_type'),
                         'db_version': db_version, 'cur_version': __version__})
     return records
@@ -596,12 +700,15 @@ class UiCore:
         if not self.cf_dir or not os.path.isdir(self.cf_dir):
             raise ValueError('каталог cf не задан или не существует')
         files = cf_files(self.cf_dir)
-        if not files:
+        dumps = dump_dirs(self.cf_dir)
+        if is_dump_dir(self.cf_dir):
+            dumps.append(os.path.abspath(self.cf_dir))
+        if not files and not dumps:
             return []
         pool = self.db_pool()
         for paths in self.groups.values():
             pool += paths
-        pool += [out_defaults(src)[0] for src in files]
+        pool += [out_defaults(src)[0] for src in files + dumps]
         return scan_cf_sources(self.cf_dir, pool, log=log)
 
     # ---------- извлечение ----------

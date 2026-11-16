@@ -547,6 +547,88 @@ def test_scan_cf_sources_flags_old_unpacker_version(tmp_path, monkeypatch):
     assert rec4['status'] == 'version'
 
 
+def test_dump_dirs_and_candidates(tmp_path):
+    from confdb.ui_core import cf_candidates, dump_dirs
+    from test_parity import make_xml_dump
+
+    cf_dir = tmp_path / 'cf'
+    cf_dir.mkdir()
+    (cf_dir / 'Конфигурация.cf').write_bytes(b'x')
+    dump = cf_dir / 'ВыгрузкаБП'
+    dump.mkdir()
+    make_xml_dump(str(dump))
+    (cf_dir / 'обычный_каталог').mkdir()
+    assert dump_dirs(str(cf_dir)) == [str(dump)]
+    cands = cf_candidates([str(cf_dir)])
+    assert str(dump) in cands
+    assert str(cf_dir / 'Конфигурация.cf') in cands
+
+
+def test_scan_cf_sources_dump_statuses(tmp_path, monkeypatch):
+    """Выгрузки в каталоге cf: новая/актуальна/устарела (инкремент)/пересборка."""
+    from confdb.dump import build_db
+    from confdb.ui_core import out_defaults
+    from test_parity import make_xml_dump
+
+    cf_dir = tmp_path / 'cf'
+    cf_dir.mkdir()
+    dump = cf_dir / 'ВыгрузкаБП'
+    dump.mkdir()
+    make_xml_dump(str(dump))
+    db = str(tmp_path / 'dump.sqlite')
+    silent = lambda *a: None
+
+    def dump_rec(pool):
+        return next(r for r in scan_cf_sources(str(cf_dir), pool, log=silent)
+                    if r['ext'] == 'dump')
+
+    # базы нет — новая выгрузка, путь по умолчанию, sha не считается
+    rec = dump_rec([])
+    assert rec['status'] == 'new' and rec['sha'] is None
+    assert rec['db'] == out_defaults(str(dump))[0]
+    # собрана из этой выгрузки — актуальна
+    build_db(str(dump), db, workers=1, build_fts=False, log=silent)
+    rec = dump_rec([db])
+    assert rec['status'] == 'current' and rec['db'] == db
+    assert rec['name'] == 'ТестКонф'
+    # правка модуля — устарела, но обновляется инкрементально
+    mod = dump / 'Catalogs' / 'Справочник1' / 'Ext' / 'ObjectModule.bsl'
+    mod.write_text(mod.read_text(encoding='utf-8') + '\n// правка\n',
+                   encoding='utf-8')
+    rec = dump_rec([db])
+    assert rec['status'] == 'outdated'
+    assert 'гранул' in rec['note'] and 'инкрементальное' in rec['note']
+    # другая ревизия схемы распаковщика — пересборка
+    monkeypatch.setattr('confdb.ui_core.__version__', '99.99.0')
+    rec = dump_rec([db])
+    assert rec['status'] == 'version'
+
+
+def test_scan_cf_sources_dump_db_not_from_dump(tmp_path):
+    """База по пути выгрузки, но собранная не из неё — полная сборка."""
+    import sqlite3
+
+    from confdb import __version__
+    cf_dir = tmp_path / 'cf'
+    cf_dir.mkdir()
+    dump = cf_dir / 'ВыгрузкаБП'
+    dump.mkdir()
+    (dump / 'ConfigDumpInfo.xml').write_text('<x/>', encoding='utf-8')
+    db = str(tmp_path / 'cf.sqlite')
+    conn = sqlite3.connect(db)
+    conn.execute('CREATE TABLE source (id INTEGER PRIMARY KEY, file TEXT, '
+                 'created TEXT, file_sha256 TEXT, file_size INTEGER, '
+                 'root_name TEXT, root_type TEXT, extractor_version TEXT)')
+    conn.execute('INSERT INTO source (file, created, extractor_version) '
+                 'VALUES (?, ?, ?)', (str(dump), '2026-01-01', __version__))
+    conn.commit()
+    conn.close()
+    rec = next(r for r in scan_cf_sources(str(cf_dir), [db], log=lambda *a: None)
+               if r['ext'] == 'dump')
+    assert rec['status'] == 'outdated'
+    assert 'не из выгрузки' in rec['note']
+
+
 def test_version_schema_helper():
     """Пересборку решает ревизия схемы — первые две цифры версии."""
     from confdb.ui_core import _version_schema

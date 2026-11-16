@@ -17,9 +17,10 @@ from . import __version__
 from .config import bench_workers
 from .config import load_config as _load_config
 from .config import save_config as _save_config
+from .dump import is_dump_dir
 from .extract import check_same_source, extract
 # общая логика интерфейсов (TUI и web UI используют один слой — ui_core)
-from .ui_core import CF_EXTS, ServerRunner, cf_files, compact_db_list
+from .ui_core import CF_EXTS, ServerRunner, cf_files, compact_db_list, dump_dirs
 from .ui_core import cf_candidates as _cf_candidates
 from .ui_core import db_candidates as _db_candidates_fn
 from .ui_core import extract_options as _extract_options_fn
@@ -295,8 +296,12 @@ class Tui:
             self.cf_dir = os.path.abspath(picked)
             self._save()
         files = cf_files(self.cf_dir)
-        if not files:
-            print(f'В каталоге нет файлов .cf/.cfe/.epf/.erf: {self.cf_dir}')
+        dumps = dump_dirs(self.cf_dir)
+        if is_dump_dir(self.cf_dir):
+            dumps.append(os.path.abspath(self.cf_dir))
+        if not files and not dumps:
+            print(f'В каталоге нет файлов .cf/.cfe/.epf/.erf и выгрузок '
+                  f'(ConfigDumpInfo.xml): {self.cf_dir}')
             input('Нажмите Enter…')
             return
         # пул баз-кандидатов: известные каталоги + группы + недавние + пути
@@ -305,9 +310,10 @@ class Tui:
         for paths in self.groups.values():
             pool += paths
         pool += [p for p in ([self.last_db] + self.recent_db) if p]
-        pool += [_out_defaults(src)[0] for src in files]
+        pool += [_out_defaults(src)[0] for src in files + dumps]
         _cls()
-        print(f'Сканирую {self.cf_dir} (файлов: {len(files)})…')
+        print(f'Сканирую {self.cf_dir} (файлов: {len(files)}, '
+              f'выгрузок: {len(dumps)})…')
         records = scan_cf_sources(self.cf_dir, pool)
         labels = {'new': 'новая   ', 'outdated': 'устарела', 'current': 'актуальна',
                   'version': 'версия  '}
@@ -321,10 +327,16 @@ class Tui:
                 name = r.get('name') or os.path.basename(r['src'])
                 print(f' {i}. [{labels[r["status"]]}] [{ext}] {name}')
                 if r.get('name'):
-                    print(f'      файл: {os.path.basename(r["src"])}')
+                    kind = 'каталог' if r.get('ext') == 'dump' else 'файл'
+                    print(f'      {kind}: {os.path.basename(r["src"])}')
                 if r['status'] != 'current':
-                    tail = (' (замена)' if r['status'] == 'outdated'
-                            else ' (пересборка)' if r['status'] == 'version' else '')
+                    if r['status'] == 'outdated':
+                        tail = (' (обновление)' if r.get('ext') == 'dump'
+                                else ' (замена)')
+                    elif r['status'] == 'version':
+                        tail = ' (пересборка)'
+                    else:
+                        tail = ''
                     print(f'      → {r["db"]}{tail}')
                 if r['note']:
                     print(f'      {r["note"]}')
@@ -367,11 +379,25 @@ class Tui:
             try:
                 os.makedirs(os.path.dirname(os.path.abspath(r['db'])),
                             exist_ok=True)
-                stats = extract(
-                    r['src'], db_path=r['db'], temp_dir=self.temp or None,
-                    keep_temp=self.keep_temp, options=self._extract_options(),
-                    workers=self.workers, build_fts=self.build_fts,
-                    source_sha256=r['sha'])
+                if os.path.isdir(r['src']):
+                    # выгрузка в файлы: повторный запуск = инкрементальное
+                    # обновление (только изменённые гранулы)
+                    from .dump import build_db, update_db
+                    if os.path.isfile(r['db']):
+                        stats = update_db(
+                            r['src'], r['db'], workers=self.workers,
+                            rebuild_fts=None if self.build_fts else False)
+                    else:
+                        stats = build_db(
+                            r['src'], r['db'], workers=self.workers,
+                            build_fts=self.build_fts,
+                            store_blobs=self.store_blobs)
+                else:
+                    stats = extract(
+                        r['src'], db_path=r['db'], temp_dir=self.temp or None,
+                        keep_temp=self.keep_temp, options=self._extract_options(),
+                        workers=self.workers, build_fts=self.build_fts,
+                        source_sha256=r['sha'])
             except PermissionError as err:
                 print(f'Файл базы занят другим процессом (запущен MCP-сервер?): {err}')
                 failed.append(os.path.basename(r['src']))

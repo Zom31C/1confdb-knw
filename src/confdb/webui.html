@@ -76,6 +76,7 @@
   /* тип файла 1С: cf — конфигурация, cfe — расширение, epf — обработка, erf — отчёт */
   .t-cf{background:#e7eefe;color:#2f6df6} .t-cfe{background:#efe7fb;color:#7c4dcc}
   .t-epf{background:#fdf0e2;color:#d98324} .t-erf{background:#e4f6ee;color:#1a9e6c}
+  .t-dump{background:#e0f7f7;color:#0f766e}
   .t-x{background:#eef1f6;color:var(--muted)}
   table{width:100%;border-collapse:collapse;font-size:14px}
   th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:top}
@@ -491,7 +492,8 @@ function viewExtract(){
 
 // ---------- вкладка: Каталог cf ----------
 const TYPE_KIND = {cf:"конфигурация", cfe:"расширение конфигурации",
-                   epf:"внешняя обработка", erf:"внешний отчёт"};
+                   epf:"внешняя обработка", erf:"внешний отчёт",
+                   dump:"выгрузка конфигурации в файлы"};
 const typeBadge = ext => `<span class="badge t-${esc(ext||'x')}" title="${esc(TYPE_KIND[ext]||'файл 1С')}">${esc((ext||"?").toUpperCase())}</span>`;
 // классификация готовой базы (тип исходника + имя корневого объекта) — из snapshot
 const dbMeta = p => (S && S.db_meta && S.db_meta[p]) || {};
@@ -504,7 +506,9 @@ function viewCatalog(){
       : r.status==="version"?'<span class="badge b-outdated">пересборка</span>'
       : '<span class="badge b-new">новая</span>';
     const check = r.status==="current"?"":`<input type="checkbox" class="scan-check" data-i="${i}">`;
-    const target = r.status==="current"?"":`<div class="path">→ ${esc(r.db)}${r.status==="outdated"?" (замена)":r.status==="version"?" (пересборка)":""}</div>`;
+    const repl = r.status==="outdated" ? (r.ext==="dump"?" (обновление)":" (замена)")
+               : r.status==="version" ? " (пересборка)" : "";
+    const target = r.status==="current"?"":`<div class="path">→ ${esc(r.db)}${repl}</div>`;
     // имя корневого объекта метаданных (из собранной базы); для новой базы — имя файла
     const title = r.name ? esc(r.name) : esc(base(r.src));
     const fname = r.name ? `<div class="path">${esc(base(r.src))}</div>` : "";
@@ -520,7 +524,7 @@ function viewCatalog(){
       <input type="text" id="cat-dir" value="${esc(S.options.cf_dir)}" placeholder="D:\\cf"></div>
       <button class="btn ghost" id="cat-save" style="align-self:flex-end">Сохранить</button>
       <button class="btn" id="cat-scan" style="align-self:flex-end">Сканировать</button></div>
-    <p class="hint">Сканирование считает SHA-256 каждого файла и сверяет с базами: <span class="badge b-current">актуальна</span> — уже собрана; <span class="badge b-outdated">устарела</span> — другой хэш, будет заменена; <span class="badge b-outdated">пересборка</span> — файл тот же, но другая ревизия схемы распаковщика (патч-версии инструментов пересборки не требуют); <span class="badge b-new">новая</span> — базы нет.</p>
+    <p class="hint">Сканирование считает SHA-256 каждого файла и сверяет с базами: <span class="badge b-current">актуальна</span> — уже собрана; <span class="badge b-outdated">устарела</span> — другой хэш, будет заменена; <span class="badge b-outdated">пересборка</span> — файл тот же, но другая ревизия схемы распаковщика (патч-версии инструментов пересборки не требуют); <span class="badge b-new">новая</span> — базы нет. Каталоги выгрузки в файлы (<code>ConfigDumpInfo.xml</code>) тоже видны: их изменённость определяется по состоянию состава (<code>dump_file</code>), а «устарела» означает <b>инкрементальное обновление</b> только изменённых объектов — безопасно при запущенном MCP-сервере.</p>
     ${table}
     ${actionable?`<div class="row" style="margin-top:14px">
       <button class="btn" id="cat-selected">Извлечь выбранные</button>
