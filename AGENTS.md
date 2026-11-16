@@ -38,7 +38,7 @@ file and NOTICE.md — the only documentation shipped to `dist\`.
   3.10, so green tests do NOT prove 3.9 compatibility — check new syntax by eye.
 - Windows-oriented: `.bat` wrappers in repo root, venv in `.venv`. Comments, docstrings and
   user-facing text are in **Russian**.
-- Package version is `<major>.<schema revision>.<tool patch>` — now **1.14.5** (schema rev 14).
+- Package version is `<major>.<schema revision>.<tool patch>` — now **1.15.0** (schema rev 15).
   User rule (2026-11-08): the SECOND digit follows the DB schema revision
   (`writer.SCHEMA_VERSION` = `PRAGMA user_version` of built bases) and resets the last digit
   to 0; the LAST digit increments on tool improvements/fixes (MCP/CLI). Guards:
@@ -83,7 +83,7 @@ One line each; detail in docs/details.md «Состав» and on the page named 
   reinstalled granules re-resolved; **works while the MCP server runs** — WAL + server
   hot reload via `PRAGMA data_version` cache invalidation + pidfile `<db>.server.json`;
   FTS rebuilds in shard GENERATIONS so open connections never block the swap). A dump DB is
-  schema-rev 14 like cf DBs; the ONLY stop-the-server case is a full rebuild (file delete).
+  schema-rev 15 like cf DBs; the ONLY stop-the-server case is a full rebuild (file delete).
 - `__main__.py` — CLI: `extract` (.cf OR a dump dir), `update`, `repos` (git sources),
   `check`, `fts`, `bench`, `1confdb-knw`, `web`.
 - `repos.py` — git sources of knowledge bases: registry `git_sources` in
@@ -95,6 +95,12 @@ One line each; detail in docs/details.md «Состав» and on the page named 
   runs), file → full rebuild on SHA-256 change; a different schema revision forces
   a rebuild too. Git via subprocess (stdlib), `GIT_TERMINAL_PROMPT=0`,
   `core.longpaths=true`. Page `git-sources`.
+- `cf_update.py` — cf-incremental: partial update of a knowledge base straight
+  from .cf/.cfe/.epf/.erf (no dump conversion): unpack to a temp tree
+  (`extract.decode_tree`), granule fingerprints vs `cf_granule` (schema rev 15),
+  reinstall dirty granules via shared writer helpers + global relink (refs,
+  role rights, subconto, subsystem/common-attribute content), FTS generations;
+  live MCP server keeps running (WAL + hot reload). Page `cf-incremental`.
 - `mcp_server.py` — the MCP server: read-only tools, multi-base plus configuration GROUPS,
   paged search, stdio and `--port`. Page `mcp-server-1confdb-knw`.
 - `ui_core.py` — the SHARED logic layer of BOTH frontends (state in `~/.confdb/config.json`,
@@ -172,7 +178,7 @@ One line each; detail in docs/details.md «Состав» and on the page named 
 test.bat                                              :: pytest
 confdb.bat extract <file.cf> --db out.db --workers 8   :: --force, --no-fts, --skip-errors
 confdb.bat extract <dump-dir> --db out.db              :: build from a Designer file dump
-confdb.bat update <dump-dir> --db out.db               :: incremental; safe while MCP runs
+confdb.bat update <dump-dir|file.cf> --db out.db       :: incremental; safe while MCP runs
 confdb.bat repos add <URL> [--path P] [--db F] [--watch] [--sync]  :: git source (dump/cf/epf/cfe)
 confdb.bat repos list|sync|check|remove|watch          :: registry, rebuild/partial update, watch loop
 confdb.bat check out.db                               :: validate all SKD queries (375/375)

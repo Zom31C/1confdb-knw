@@ -694,7 +694,12 @@ def test_scan_cf_dir_extracts_new_and_replaces_outdated(tmp_path, monkeypatch):
         calls.append((src, kw['db_path'], kw['source_sha256']))
         return {'db': kw['db_path'], 'elapsed': '0:00:01'}
 
+    def fake_update(src, db, **kw):
+        calls.append((src, db, kw.get('source_sha256')))
+        return {'db': db, 'elapsed': '0:00:01', 'changed_granules': ['Catalog/Х']}
+
     monkeypatch.setattr('confdb.tui.extract', fake_extract)
+    monkeypatch.setattr('confdb.cf_update.update_cf', fake_update)
     tui = _Tui(db_entries=[db_old, db_cur])
     tui.cf_dir = str(cf_dir)
     tui.groups = {}

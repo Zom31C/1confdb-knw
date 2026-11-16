@@ -175,6 +175,38 @@ def make_temp_dir(target=None):
         return tempfile.mkdtemp(prefix='confdb_')
 
 
+def decode_tree(src_file, temp_dir, options=None, workers=1, dump_dir=None,
+                headers_dir=None):
+    """Стадии 0/1/3: контейнеры → inflate → декодированное дерево stage 3.
+
+    Общая часть полного извлечения (`extract`) и инкрементального обновления
+    базы прямо из cf (`cf_update`): возвращает каталог stage 3. С headers_dir
+    заголовки объектов уходят потоком (helper.sink_put), минуя файлы
+    <Класс>.json дампа; без него дерево полное (заголовки в JSON-файлах).
+    """
+    if options is None:
+        options = {}
+    stage0 = os.path.join(temp_dir, 'decode_stage_0')
+    stage1 = os.path.join(temp_dir, 'decode_stage_1')
+    print(f'Стадия 0: читаем контейнеры {src_file}')
+    container_reader.extract(src_file, stage0, deflate=False, recursive=False)
+    print('Стадия 1: разжимаем файлы контейнеров')
+    container_reader.decompress_and_extract(stage0, stage1)
+    if dump_dir:
+        dump_dir = os.path.abspath(dump_dir)
+        stage3 = dump_dir
+    else:
+        stage3 = os.path.join(temp_dir, 'decode_stage_3')
+    decode_options = options
+    if headers_dir:
+        decode_options = dict(options)
+        decode_options['header_sink'] = headers_dir
+        decode_options['dump_headers'] = bool(dump_dir)
+    print(f'Стадия 3: декодируем метаданные в {stage3}')
+    v8_decoder.decode(stage1, stage3, options=decode_options, workers=workers)
+    return stage3
+
+
 def extract(src_file, *, db_path=None, dump_dir=None, temp_dir=None, keep_temp=False, options=None,
             workers=1, build_fts=True, source_sha256=None):
     """Распаковывает файл 1С и (опционально) загружает результат в SQLite.
@@ -211,37 +243,14 @@ def extract(src_file, *, db_path=None, dump_dir=None, temp_dir=None, keep_temp=F
     own_temp = temp_dir is None
     if own_temp:
         temp_dir = make_temp_dir(db_path or dump_dir)
-    stage0 = os.path.join(temp_dir, 'decode_stage_0')
-    stage1 = os.path.join(temp_dir, 'decode_stage_1')
 
     stats = {'src': src_file, 'src_sha256': source_sha256, 'src_size': src_size,
              'temp_dir': temp_dir, 'dump_dir': dump_dir, 'db': db_path}
     begin = datetime.now()
     try:
-        print(f'Стадия 0: читаем контейнеры {src_file}')
-        container_reader.extract(src_file, stage0, deflate=False, recursive=False)
-
-        print('Стадия 1: разжимаем файлы контейнеров')
-        container_reader.decompress_and_extract(stage0, stage1)
-
-        if dump_dir:
-            dump_dir = os.path.abspath(dump_dir)
-            stage3 = dump_dir
-        else:
-            stage3 = os.path.join(temp_dir, 'decode_stage_3')
-
-        headers_dir = None
-        decode_options = options
-        if db_path:
-            # заголовки объектов уходят записи БД потоком (helper.sink_put), минуя
-            # 47 тысяч мелких файлов дампа; само дерево остаётся полным, только
-            # если его просили сохранить
-            headers_dir = os.path.join(temp_dir, 'headers')
-            decode_options = dict(options)
-            decode_options['header_sink'] = headers_dir
-            decode_options['dump_headers'] = bool(dump_dir)
-        print(f'Стадия 3: декодируем метаданные в {stage3}')
-        v8_decoder.decode(stage1, stage3, options=decode_options, workers=workers)
+        headers_dir = os.path.join(temp_dir, 'headers') if db_path else None
+        stage3 = decode_tree(src_file, temp_dir, options=options, workers=workers,
+                             dump_dir=dump_dir, headers_dir=headers_dir)
 
         if db_path:
             # импорт здесь, чтобы не тянуть sqlite при работе без БД

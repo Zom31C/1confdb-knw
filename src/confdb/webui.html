@@ -506,7 +506,7 @@ function viewCatalog(){
       : r.status==="version"?'<span class="badge b-outdated">пересборка</span>'
       : '<span class="badge b-new">новая</span>';
     const check = r.status==="current"?"":`<input type="checkbox" class="scan-check" data-i="${i}">`;
-    const repl = r.status==="outdated" ? (r.ext==="dump"?" (обновление)":" (замена)")
+    const repl = r.status==="outdated" ? (r.incremental?" (обновление)":" (замена)")
                : r.status==="version" ? " (пересборка)" : "";
     const target = r.status==="current"?"":`<div class="path">→ ${esc(r.db)}${repl}</div>`;
     // имя корневого объекта метаданных (из собранной базы); для новой базы — имя файла
@@ -524,7 +524,7 @@ function viewCatalog(){
       <input type="text" id="cat-dir" value="${esc(S.options.cf_dir)}" placeholder="D:\\cf"></div>
       <button class="btn ghost" id="cat-save" style="align-self:flex-end">Сохранить</button>
       <button class="btn" id="cat-scan" style="align-self:flex-end">Сканировать</button></div>
-    <p class="hint">Сканирование считает SHA-256 каждого файла и сверяет с базами: <span class="badge b-current">актуальна</span> — уже собрана; <span class="badge b-outdated">устарела</span> — другой хэш, будет заменена; <span class="badge b-outdated">пересборка</span> — файл тот же, но другая ревизия схемы распаковщика (патч-версии инструментов пересборки не требуют); <span class="badge b-new">новая</span> — базы нет. Каталоги выгрузки в файлы (<code>ConfigDumpInfo.xml</code>) тоже видны: их изменённость определяется по состоянию состава (<code>dump_file</code>), а «устарела» означает <b>инкрементальное обновление</b> только изменённых объектов — безопасно при запущенном MCP-сервере.</p>
+    <p class="hint">Сканирование считает SHA-256 каждого файла и сверяет с базами: <span class="badge b-current">актуальна</span> — уже собрана; <span class="badge b-outdated">устарела</span> — другой хэш; <span class="badge b-outdated">пересборка</span> — файл тот же, но другая ревизия схемы распаковщика (патч-версии инструментов пересборки не требуют); <span class="badge b-new">новая</span> — базы нет. Каталоги выгрузки в файлы (<code>ConfigDumpInfo.xml</code>) тоже видны: их изменённость определяется по состоянию состава (<code>dump_file</code>). «Устарела» с пометкой <b>(обновление)</b> — инкрементальное обновление только изменённых объектов/гранул (выгрузка и cf), безопасно при запущенном MCP-сервере; <b>(замена)</b> — полная пересборка базы.</p>
     ${table}
     ${actionable?`<div class="row" style="margin-top:14px">
       <button class="btn" id="cat-selected">Извлечь выбранные</button>

@@ -225,6 +225,7 @@ def scan_cf_sources(cf_dir, db_pool, log=print):
         инструментов (MCP/CLI), распаковщика не касается (правило пользователя
         2026-11-13). У старых баз версии нет (None) — они помечаются на пересборку.
     """
+    from .cf_update import _cf_db_state
     from .extract import file_sha256, source_info
     files = cf_files(cf_dir)
     pool = {}
@@ -276,11 +277,17 @@ def scan_cf_sources(cf_dir, db_pool, log=print):
             status = 'version'
             note = (f'собрана распаковщиком {db_version or "неизвестной версии"}, '
                     f'актуальный {__version__} — другая ревизия схемы, пересобрать')
+        incremental = bool(status == 'outdated' and found
+                           and _cf_db_state(found)[1])
+        if incremental:
+            note = ('другой отпечаток cf — инкрементальное обновление '
+                    'изменённых гранул')
         records.append({'src': src, 'sha': sha, 'status': status,
                         'db': db, 'found': found, 'note': note,
                         'ext': ext, 'name': meta.get('root_name'),
                         'root_type': meta.get('root_type'),
-                        'db_version': db_version, 'cur_version': __version__})
+                        'db_version': db_version, 'cur_version': __version__,
+                        'incremental': incremental})
 
     # Выгрузки в файлы: каталоги с ConfigDumpInfo.xml среди детей каталога
     # (и сам каталог, если он выгрузка). Признак изменённости — не SHA-256
@@ -341,7 +348,9 @@ def scan_cf_sources(cf_dir, db_pool, log=print):
                         'db': db, 'found': found, 'note': note,
                         'ext': 'dump', 'name': meta.get('root_name'),
                         'root_type': meta.get('root_type'),
-                        'db_version': db_version, 'cur_version': __version__})
+                        'db_version': db_version, 'cur_version': __version__,
+                        'incremental': bool(status == 'outdated'
+                                            and 'гранул' in note)})
     return records
 
 
@@ -752,11 +761,22 @@ class UiCore:
             if skip:
                 return {'skipped': True, 'db': db, 'src': src,
                         'elapsed': '0:00:00'}
-        stats = _extract_cf(
-            src, db_path=db, dump_dir=dump, temp_dir=self.temp or None,
-            keep_temp=self.keep_temp, options=self.extract_options(),
-            workers=self.workers, build_fts=self.build_fts,
-            source_sha256=source_sha256)
+        if db and os.path.isfile(db) and not dump:
+            # существующая база из cf — инкрементальное обновление (только
+            # изменённые гранулы); update_cf сам сделает полную сборку, если
+            # база не из cf или прежней ревизии схемы
+            from .cf_update import update_cf
+            stats = update_cf(
+                src, db, workers=self.workers,
+                rebuild_fts=None if self.build_fts else False,
+                store_blobs=self.store_blobs, log=log,
+                source_sha256=source_sha256)
+        else:
+            stats = _extract_cf(
+                src, db_path=db, dump_dir=dump, temp_dir=self.temp or None,
+                keep_temp=self.keep_temp, options=self.extract_options(),
+                workers=self.workers, build_fts=self.build_fts,
+                source_sha256=source_sha256)
         self._remember_extract(src, db, stats)
         return stats
 
@@ -943,6 +963,22 @@ class UiCore:
                     if skip:
                         result['summary'] = 'файл не изменился (SHA-256 совпал)'
                         rec['last_result'] = 'skipped'
+                    elif (os.path.isfile(db) and not force and not stale_schema
+                          and rec.get('mode') != 'full'):
+                        # cf-инкремент: только изменённые гранулы декодированного
+                        # дерева; живой MCP-сервер не останавливается
+                        from .cf_update import update_cf
+                        stats = update_cf(
+                            src, db, workers=workers,
+                            rebuild_fts=None if build_fts else False,
+                            store_blobs=store_blobs, log=log,
+                            source_sha256=sha)
+                        changed = stats.get('changed_granules') or []
+                        build = 'partial' if changed else 'skip'
+                        result['summary'] = (
+                            f'инкрементальное обновление: {len(changed)} гранул'
+                            if changed else 'изменений в cf нет')
+                        rec['last_result'] = 'updated' if changed else 'skipped'
                     else:
                         self._guard_full_rebuild(db)
                         stats = _extract_cf(

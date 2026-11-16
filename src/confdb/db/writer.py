@@ -17,6 +17,8 @@ import sqlite3
 import xml.sax.saxutils
 from datetime import datetime
 
+import hashlib
+
 from .. import __version__, rights, xdto
 from ..bsl_parser import parse_methods
 from ..v8 import helper
@@ -52,7 +54,11 @@ ROOT_TYPES = ('Configuration', 'ConfigurationExtension', 'ExternalDataProcessor'
 # УникальныйИдентификатор…): канонические uuid платформы в ["#", uuid]
 # распознаются (PLATFORM_TYPE_UUIDS) вместо обобщённой «Ссылки»; паритет с
 # dump по именам (2026-11-14, полнота извлечения). Данные меняются — пересборка.
-SCHEMA_VERSION = 14
+# 15 — cf_granule: отпечатки гранул (объект верхнего уровня с деревом)
+# декодированного содержимого cf — основа инкрементального обновления базы
+# прямо из .cf (cf_update.update_cf, 2026-11-16). Данные не меняются, но
+# состояние гранул есть только у баз, собранных/обновлённых ревизией 15+.
+SCHEMA_VERSION = 15
 
 RE_UUID = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.I)
 
@@ -1519,6 +1525,14 @@ CREATE TABLE dump_file (
     sha256 TEXT NOT NULL
 );
 CREATE INDEX ix_dump_file_granule ON dump_file(granule);
+-- состояние гранул cf-декодированного дерева: гранула = объект верхнего
+-- уровня со всем деревом (подобъекты/формы/модули), '' — корень. Отпечаток
+-- по содержимому файлов гранулы; cf_update сверяет и переустанавливает только
+-- изменившиеся гранулы. В dump-базах таблица пуста (там своё состояние dump_file).
+CREATE TABLE cf_granule (
+    path TEXT PRIMARY KEY,
+    sha256 TEXT NOT NULL
+);
 """
 
 TEXT_KINDS = ('bsl', 'html', 'htm', 'txt', 'json', 'xml', 'css', 'js')
@@ -1536,6 +1550,8 @@ INSERT_SQL = {
     'source':
         'INSERT INTO source (file, created, file_size, file_sha256,'
         ' extractor_version) VALUES (?, ?, ?, ?, ?)',
+    'cf_granule':
+        'INSERT OR REPLACE INTO cf_granule (path, sha256) VALUES (?, ?)',
     'meta_object':
         'INSERT INTO meta_object (source_id, parent_id, ord, path, type,'
         ' type_ru, name, uuid, comment, obj_version, header_json)'
@@ -2086,6 +2102,198 @@ def _target_flags(target):
     return '/'.join(_flag_token(value) for value in (target.flag_a, target.flag_b))
 
 
+def build_infos(dump_dir, tree, rel_by_dir, objects, headers=None):
+    """Сведения об объектах дерева stage 3: заголовок, uuid, родитель, ord.
+
+    Общий первый проход полной записи (write_db) и инкрементального
+    обновления cf (cf_update): состав и порядок infos одинаковы, поэтому
+    строки объектов совпадают между сборкой и переустановкой гранул.
+    """
+    files_of = dict(tree)
+    infos = {}
+    for dirpath in sorted(objects, key=lambda d: d.count(os.sep)):
+        stem = objects[dirpath]
+        rel = rel_by_dir[dirpath]
+        if headers is not None:
+            stem, uuid, header_text = headers[rel]
+            header = json.loads(header_text)
+        else:
+            header, header_text = _read_header(os.path.join(dirpath, f'{stem}.json'))
+            id_name = f'{stem}.id.json'
+            # состав каталога уже есть в снимке обхода — os.path.isfile не нужен
+            if any(fn == id_name for fn, _size in files_of[dirpath]):
+                uuid = _read_id_uuid(os.path.join(dirpath, id_name))
+            else:
+                # у корня нет .id.json, а заголовок несёт два uuid:
+                # 'uuid' — внутренний uuid файла контейнера, 'file_uuid' —
+                # uuid метаданных Configuration. Права ролей адресуют цель
+                # вторым, и корень dump-базы носит именно его — в базу
+                # попадает file_uuid (паритет cf/dump, права на конфигурацию
+                # разрешаются в корневой объект)
+                uuid = header.get('file_uuid') or header.get('uuid')
+        parent_rel = None
+        parent_dir = os.path.dirname(dirpath)
+        while parent_dir and parent_dir.startswith(dump_dir):
+            candidate = rel_by_dir.get(parent_dir)
+            if candidate is not None and candidate in infos:
+                parent_rel = candidate
+                break
+            parent_dir = os.path.dirname(parent_dir)
+        infos[rel] = dict(dirpath=dirpath, stem=stem, uuid=uuid,
+                          name=header.get('name') or os.path.basename(dirpath),
+                          header=header, header_text=header_text,
+                          parent_rel=parent_rel)
+    # ord: позиция uuid объекта в заголовке родителя (корня — в заголовке корня)
+    uuid_index_cache = {}
+    for rel, info in infos.items():
+        parent_rel = info['parent_rel']
+        parent_header = infos[parent_rel]['header'] if parent_rel is not None else None
+        if parent_header is None or not info['uuid']:
+            info['ord'] = None
+            continue
+        if parent_rel not in uuid_index_cache:
+            uuid_index_cache[parent_rel] = _uuid_first_index(parent_header)
+        info['ord'] = uuid_index_cache[parent_rel].get(info['uuid'])
+    return infos
+
+
+def granule_of(rel):
+    """Гранула cf-дерева: объект верхнего уровня со всем деревом; '' — корень."""
+    if not rel:
+        return ''
+    return '/'.join(rel.split('/')[:2])
+
+
+def granule_fingerprints(dump_dir, tree, rel_by_dir):
+    """Отпечатки гранул по содержимому файлов (sorted rel-путь + sha256 файла).
+
+    Основа инкрементального обновления cf: гранула изменилась, если изменился
+    любой её файл (заголовок, модуль, макет, права…). Хэши считаются потоково.
+    """
+    from ..extract import file_sha256
+    per = {}
+    for dirpath, files in tree:
+        rel = rel_by_dir[dirpath]
+        granule = granule_of(rel)
+        prefix = rel + '/' if rel else ''
+        for fn, _size in files:
+            per.setdefault(granule, []).append(
+                (prefix + fn, os.path.join(dirpath, fn)))
+    out = {}
+    for granule, items in per.items():
+        digest = hashlib.sha256()
+        for rel_file, full in sorted(items):
+            digest.update(rel_file.encode('utf-8'))
+            digest.update(b'\0')
+            digest.update(file_sha256(full).encode('ascii'))
+            digest.update(b'\n')
+        out[granule] = digest.hexdigest()
+    return out
+
+
+def collect_object_rows(info, obj_id, resolver, uuid_to_id, uuid_to_path):
+    """Строки содержимого одного объекта по заголовку и файлам каталога.
+
+    Общий проход полной записи (write_db) и инкрементальной переустановки
+    гранул cf (cf_update): {таблица: [строки]} плюс 'subconto_raw' — привязки
+    субконто до разрешения kind_id (второй проход полной записи либо
+    глобальный relink при обновлении).
+    """
+    rows = {'meta_tabular': [], 'meta_subobject': [], 'enum_value': [],
+            'common_target': [], 'predefined': [], 'form_attribute': [],
+            'form_command': [], 'form_event': [], 'form_parameter': [],
+            'object_property': [], 'http_method': [], 'webservice_operation': [],
+            'subconto_raw': []}
+    tabular = info.get('tabular')
+    if tabular is None:
+        # полный проход write_db уже посчитал ТЧ из bags реквизитов;
+        # инкрементальная переустановка считает их здесь
+        tabular = _tabular_rows(_section_bags(info['header']))
+    for ord_no, (name, uuid) in enumerate(tabular):
+        rows['meta_tabular'].append((obj_id, ord_no, name, uuid))
+    # подобъекты: заглушка, извлечение будет реализовано позже
+    for kind, sub_name, sub_uuid in _extract_subobjects(info['header'], obj_id):
+        rows['meta_subobject'].append(
+            (obj_id, kind, len(rows['meta_subobject']), sub_uuid, sub_name))
+    if info['stem'] == 'Enum':
+        for ord_no, (name, syn) in enumerate(_extract_enum_values(info['header'])):
+            rows['enum_value'].append((obj_id, ord_no, name, syn))
+    elif info['stem'] == 'CommonAttribute':
+        for target in _extract_common_targets(info['header'], uuid_to_id, obj_id):
+            rows['common_target'].append((obj_id, target))
+    elif info['stem'].endswith('Form'):
+        # содержимое формы: реквизиты/команды/параметры из elem.json,
+        # события — из заголовка формы
+        elem_path = os.path.join(info['dirpath'], f'{info["stem"]}.elem.json')
+        if os.path.isfile(helper.long_path(elem_path)):
+            try:
+                with open(helper.long_path(elem_path), encoding='utf-8') as f:
+                    elem = json.load(f)
+            except (OSError, ValueError):
+                elem = None
+            if elem:
+                fa, fc, fp = _extract_form_elem(elem, resolver, info['parent_rel'])
+                for o, row in enumerate(fa):
+                    rows['form_attribute'].append((obj_id, o) + row)
+                for o, row in enumerate(fc):
+                    rows['form_command'].append((obj_id, o) + row)
+                for o, row in enumerate(fp):
+                    rows['form_parameter'].append((obj_id, o) + row)
+        for o, (ev, h) in enumerate(_extract_form_events(info['header'])):
+            rows['form_event'].append((obj_id, o, ev, h))
+    if info['stem'] in ('Constant', 'SessionParameter', 'DocumentJournal',
+                        'Sequences', 'ScheduledJob', 'FunctionalOption',
+                        'Document', 'FunctionalOptionsParameter',
+                        'CommonCommand', 'StyleItem', 'WSReference',
+                        'IntegrationService', 'HTTPService', 'WebService'):
+        for o, (n, v) in enumerate(_extract_object_properties(
+                info['header'], info['stem'], resolver, uuid_to_path)):
+            rows['object_property'].append((obj_id, o, n, v))
+    if info['stem'] == 'HTTPService':
+        for o, row in enumerate(_extract_http_methods(info['header'])):
+            rows['http_method'].append((obj_id, o) + row)
+    elif info['stem'] == 'WebService':
+        for o, row in enumerate(_extract_webservice_operations(info['header'])):
+            rows['webservice_operation'].append((obj_id, o) + row)
+    elements, subcontos = _extract_predefined(
+        os.path.join(info['dirpath'], 'Предустановленные данные.bin'),
+        info['header'])
+    for element in elements:
+        rows['predefined'].append((obj_id,) + element)
+    for subconto in subcontos:
+        rows['subconto_raw'].append((obj_id,) + subconto)
+    return rows
+
+
+def _role_right_rows(conn, role_id, role_dir, resolver, stats):
+    """Права одной роли: (right_params, tmpl_params, state_params).
+
+    Общий проход полной записи (_write_role_rights) и инкрементального
+    обновления cf: разбор `Role/<имя>/Role.0.c1brace` и разрешение целей по
+    uuid общим резолвером. Сбой разбора одной роли не прерывает запись.
+    """
+    try:
+        parsed = rights.parse_role_file(role_dir)
+    except Exception as err:  # noqa: BLE001
+        stats['role_rights_failed'] += 1
+        return [], [], [(role_id, None, 0, 0, 0, 0, str(err)[:300])]
+    right_params = []
+    for target, entry in parsed.entries():
+        obj_id, attr_id, tab_id, sub_id = resolver.resolve_uuid(target.uuid)
+        right_params.append((role_id, target.uuid, obj_id, attr_id, tab_id,
+                             sub_id,
+                             target.sub_index, target.collection_uuid,
+                             _target_flags(target), entry.right_uuid,
+                             entry.value, entry.rls_text))
+    tmpl_params = [(role_id, o, name, text)
+                   for o, (name, text) in enumerate(parsed.rls_templates)]
+    state_params = [(role_id, parsed.version, 1, len(parsed.targets),
+                     len(right_params), len(parsed.rls_templates), None)]
+    stats['role_rights'] += len(right_params)
+    stats['role_rls_templates'] += len(parsed.rls_templates)
+    return right_params, tmpl_params, state_params
+
+
 def _write_role_rights(conn, dump_dir, stats):
     """Права ролей из `Role/<имя>/Role.0.c1brace` — в role_right/role_rls_template.
 
@@ -2109,27 +2317,10 @@ def _write_role_rights(conn, dump_dir, stats):
         "SELECT id, path FROM meta_object WHERE type='Role' ORDER BY id").fetchall()
     for role_id, path in roles:
         role_dir = os.path.join(dump_dir, *path.split('/'))
-        try:
-            parsed = rights.parse_role_file(role_dir)
-        except Exception as err:  # noqa: BLE001
-            state_params.append((role_id, None, 0, 0, 0, 0, str(err)[:300]))
-            stats['role_rights_failed'] += 1
-            continue
-        count = 0
-        for target, entry in parsed.entries():
-            obj_id, attr_id, tab_id, sub_id = resolver.resolve_uuid(target.uuid)
-            right_params.append((role_id, target.uuid, obj_id, attr_id, tab_id,
-                                 sub_id,
-                                 target.sub_index, target.collection_uuid,
-                                 _target_flags(target), entry.right_uuid,
-                                 entry.value, entry.rls_text))
-            count += 1
-        for ord_no, (name, text) in enumerate(parsed.rls_templates):
-            tmpl_params.append((role_id, ord_no, name, text))
-        state_params.append((role_id, parsed.version, 1, len(parsed.targets),
-                             count, len(parsed.rls_templates), None))
-        stats['role_rights'] += count
-        stats['role_rls_templates'] += len(parsed.rls_templates)
+        rp, tp, sp = _role_right_rows(conn, role_id, role_dir, resolver, stats)
+        right_params.extend(rp)
+        tmpl_params.extend(tp)
+        state_params.extend(sp)
         if len(right_params) >= 20000:
             conn.executemany(_ROLE_RIGHT_SQL, right_params)
             right_params.clear()
@@ -2218,52 +2409,9 @@ def write_db(dump_dir, db_path, *, source_file=None, source_sha256=None,
         )
         source_id = cur.lastrowid
 
-        # первый проход: собираем сведения об объектах и порядок братьев (ord)
-        files_of = dict(tree)
-        infos = {}
-        for dirpath in sorted(objects, key=lambda d: d.count(os.sep)):
-            stem = objects[dirpath]
-            rel = rel_by_dir[dirpath]
-            if headers is not None:
-                stem, uuid, header_text = headers[rel]
-                header = json.loads(header_text)
-            else:
-                header, header_text = _read_header(os.path.join(dirpath, f'{stem}.json'))
-                id_name = f'{stem}.id.json'
-                # состав каталога уже есть в снимке обхода — os.path.isfile не нужен
-                if any(fn == id_name for fn, _size in files_of[dirpath]):
-                    uuid = _read_id_uuid(os.path.join(dirpath, id_name))
-                else:
-                    # у корня нет .id.json, а заголовок несёт два uuid:
-                    # 'uuid' — внутренний uuid файла контейнера, 'file_uuid' —
-                    # uuid метаданных Configuration. Права ролей адресуют цель
-                    # вторым, и корень dump-базы носит именно его — в базу
-                    # попадает file_uuid (паритет cf/dump, права на конфигурацию
-                    # разрешаются в корневой объект)
-                    uuid = header.get('file_uuid') or header.get('uuid')
-            parent_rel = None
-            parent_dir = os.path.dirname(dirpath)
-            while parent_dir and parent_dir.startswith(dump_dir):
-                candidate = rel_by_dir.get(parent_dir)
-                if candidate is not None and candidate in infos:
-                    parent_rel = candidate
-                    break
-                parent_dir = os.path.dirname(parent_dir)
-            infos[rel] = dict(dirpath=dirpath, stem=stem, uuid=uuid,
-                              name=header.get('name') or os.path.basename(dirpath),
-                              header=header, header_text=header_text, parent_rel=parent_rel)
-
-        # ord: позиция uuid объекта в заголовке родителя (корня — в заголовке корня)
-        uuid_index_cache = {}
-        for rel, info in infos.items():
-            parent_rel = info['parent_rel']
-            parent_header = infos[parent_rel]['header'] if parent_rel is not None else None
-            if parent_header is None or not info['uuid']:
-                info['ord'] = None
-                continue
-            if parent_rel not in uuid_index_cache:
-                uuid_index_cache[parent_rel] = _uuid_first_index(parent_header)
-            info['ord'] = uuid_index_cache[parent_rel].get(info['uuid'])
+        # первый проход: сведения об объектах и порядок братьев (ord) —
+        # общий с инкрементальным обновлением cf (cf_update)
+        infos = build_infos(dump_dir, tree, rel_by_dir, objects, headers)
 
         # id объектов — по порядку вставки (таблица пересоздаётся с нуля)
         dir_to_id = {}
@@ -2348,64 +2496,21 @@ def write_db(dump_dir, db_path, *, source_file=None, source_sha256=None,
         wsop_params = []
         for rel, info in infos.items():
             obj_id = dir_to_id[rel]
-            for ord_no, (name, uuid) in enumerate(info['tabular']):
-                tab_params.append((obj_id, ord_no, name, uuid))
-            # подобъекты: заглушка, извлечение будет реализовано позже
-            for kind, sub_name, sub_uuid in _extract_subobjects(
-                    info['header'], obj_id):
-                subobject_params.append(
-                    (obj_id, kind, len(subobject_params), sub_uuid, sub_name))
-            if info['stem'] == 'Enum':
-                for ord_no, (name, syn) in enumerate(
-                        _extract_enum_values(info['header'])):
-                    enum_params.append((obj_id, ord_no, name, syn))
-            elif info['stem'] == 'CommonAttribute':
-                for target in _extract_common_targets(info['header'], uuid_to_id, obj_id):
-                    common_params.append((obj_id, target))
-            elif info['stem'].endswith('Form'):
-                # содержимое формы: реквизиты/команды/параметры из elem.json,
-                # события — из заголовка формы
-                elem_path = os.path.join(info['dirpath'],
-                                         f'{info["stem"]}.elem.json')
-                if os.path.isfile(helper.long_path(elem_path)):
-                    try:
-                        with open(helper.long_path(elem_path),
-                                  encoding='utf-8') as f:
-                            elem = json.load(f)
-                    except (OSError, ValueError):
-                        elem = None
-                    if elem:
-                        fa, fc, fp = _extract_form_elem(
-                            elem, resolver, info['parent_rel'])
-                        for o, row in enumerate(fa):
-                            form_attr_params.append((obj_id, o) + row)
-                        for o, row in enumerate(fc):
-                            form_cmd_params.append((obj_id, o) + row)
-                        for o, row in enumerate(fp):
-                            form_par_params.append((obj_id, o) + row)
-                for o, (ev, h) in enumerate(_extract_form_events(info['header'])):
-                    form_evt_params.append((obj_id, o, ev, h))
-            if info['stem'] in ('Constant', 'SessionParameter', 'DocumentJournal',
-                                'Sequences', 'ScheduledJob', 'FunctionalOption',
-                                'Document', 'FunctionalOptionsParameter',
-                                'CommonCommand', 'StyleItem', 'WSReference',
-                                'IntegrationService', 'HTTPService', 'WebService'):
-                for o, (n, v) in enumerate(_extract_object_properties(
-                        info['header'], info['stem'], resolver, uuid_to_path)):
-                    objprop_params.append((obj_id, o, n, v))
-            if info['stem'] == 'HTTPService':
-                for o, row in enumerate(_extract_http_methods(info['header'])):
-                    http_params.append((obj_id, o) + row)
-            elif info['stem'] == 'WebService':
-                for o, row in enumerate(_extract_webservice_operations(info['header'])):
-                    wsop_params.append((obj_id, o) + row)
-            elements, subcontos = _extract_predefined(
-                os.path.join(info['dirpath'], 'Предустановленные данные.bin'),
-                info['header'])
-            for element in elements:
-                predef_params.append((obj_id,) + element)
-            for subconto in subcontos:
-                subconto_params.append((obj_id,) + subconto)
+            rows = collect_object_rows(info, obj_id, resolver, uuid_to_id,
+                                       uuid_to_path)
+            tab_params.extend(rows['meta_tabular'])
+            subobject_params.extend(rows['meta_subobject'])
+            enum_params.extend(rows['enum_value'])
+            common_params.extend(rows['common_target'])
+            predef_params.extend(rows['predefined'])
+            form_attr_params.extend(rows['form_attribute'])
+            form_cmd_params.extend(rows['form_command'])
+            form_evt_params.extend(rows['form_event'])
+            form_par_params.extend(rows['form_parameter'])
+            objprop_params.extend(rows['object_property'])
+            http_params.extend(rows['http_method'])
+            wsop_params.extend(rows['webservice_operation'])
+            subconto_params.extend(rows['subconto_raw'])
         conn.executemany(INSERT_SQL['meta_tabular'], tab_params)
         if subobject_params:
             conn.executemany(INSERT_SQL['meta_subobject'], subobject_params)
@@ -2582,6 +2687,9 @@ def write_db(dump_dir, db_path, *, source_file=None, source_sha256=None,
         flush(skd_params, INSERT_SQL['skd_query'])
         # права ролей — после объектов: нужны их id и карта uuid -> объект
         _write_role_rights(conn, dump_dir, stats)
+        # состояние гранул cf — основа инкрементального обновления (cf_update)
+        granules = granule_fingerprints(dump_dir, tree, rel_by_dir)
+        conn.executemany(INSERT_SQL['cf_granule'], sorted(granules.items()))
         conn.commit()
     except Exception:
         conn.rollback()

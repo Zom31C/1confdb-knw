@@ -55,10 +55,12 @@ def build_parser():
     u = subparsers.add_parser(
         'update',
         help='инкрементальное обновление базы из выгрузки конфигурации в '
-             'файлы: перезагружаются только изменённые объекты (хэши файлов '
-             'в dump_file); работает при запущенном MCP-сервере (WAL + hot '
-             'reload), без полной пересборки')
-    u.add_argument('src', help='каталог выгрузки конфигурации в файлы')
+             'файлы ИЛИ прямо из .cf/.cfe/.epf/.erf: перезагружаются только '
+             'изменённые объекты/гранулы (хэши файлов в dump_file / cf_granule); '
+             'работает при запущенном MCP-сервере (WAL + hot reload), без '
+             'полной пересборки')
+    u.add_argument('src', help='каталог выгрузки конфигурации в файлы или '
+                               'файл .cf/.cfe/.epf/.erf')
     u.add_argument('--db', metavar='FILE', required=True,
                    help='база знаний (нет или собрана из .cf — будет полная '
                         'сборка из выгрузки)')
@@ -302,12 +304,8 @@ def run_fts(db_path, workers=None):
 
 
 def run_update(args):
-    """Инкрементальное обновление базы из выгрузки конфигурации в файлы."""
+    """Инкрементальное обновление базы из выгрузки в файлы или прямо из cf."""
     from .dump import is_dump_dir, update_db
-    if not is_dump_dir(args.src):
-        print(f'Каталог не похож на выгрузку конфигурации '
-              f'(нет ConfigDumpInfo.xml): {args.src}', file=sys.stderr)
-        return 2
     workers = args.workers
     if workers is None:
         from .config import bench_workers
@@ -320,6 +318,32 @@ def run_update(args):
         rebuild_fts = False
     elif args.fts:
         rebuild_fts = True
+    if not is_dump_dir(args.src):
+        ext = os.path.splitext(args.src)[1].lower()
+        if os.path.isfile(args.src) and ext in ('.cf', '.cfe', '.epf', '.erf'):
+            from .cf_update import update_cf
+            try:
+                stats = update_cf(args.src, args.db, workers=workers,
+                                  rebuild_fts=rebuild_fts)
+            except PermissionError as err:
+                print(f'Файл базы занят другим процессом (запущен MCP-сервер?): {err}',
+                      file=sys.stderr)
+                _hint_db_holder(args.db)
+                return 1
+            except (ValueError, OSError) as err:
+                print(f'Ошибка: {err}', file=sys.stderr)
+                return 1
+            for key in ('changed_granules', 'objects', 'modules', 'methods',
+                        'elapsed'):
+                value = stats.get(key)
+                if isinstance(value, list):
+                    print(f'{key}: {len(value)}')
+                elif value is not None:
+                    print(f'{key}: {value}')
+            return 0
+        print(f'Каталог не похож на выгрузку конфигурации '
+              f'(нет ConfigDumpInfo.xml) и не файл 1С: {args.src}', file=sys.stderr)
+        return 2
     try:
         stats = update_db(args.src, args.db, workers=workers,
                           rebuild_fts=rebuild_fts)

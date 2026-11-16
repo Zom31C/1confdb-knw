@@ -331,7 +331,7 @@ class Tui:
                     print(f'      {kind}: {os.path.basename(r["src"])}')
                 if r['status'] != 'current':
                     if r['status'] == 'outdated':
-                        tail = (' (обновление)' if r.get('ext') == 'dump'
+                        tail = (' (обновление)' if r.get('incremental')
                                 else ' (замена)')
                     elif r['status'] == 'version':
                         tail = ' (пересборка)'
@@ -393,11 +393,20 @@ class Tui:
                             build_fts=self.build_fts,
                             store_blobs=self.store_blobs)
                 else:
-                    stats = extract(
-                        r['src'], db_path=r['db'], temp_dir=self.temp or None,
-                        keep_temp=self.keep_temp, options=self._extract_options(),
-                        workers=self.workers, build_fts=self.build_fts,
-                        source_sha256=r['sha'])
+                    if os.path.isfile(r['db']):
+                        # существующая база из cf — инкрементально
+                        from .cf_update import update_cf
+                        stats = update_cf(
+                            r['src'], r['db'], workers=self.workers,
+                            rebuild_fts=None if self.build_fts else False,
+                            store_blobs=self.store_blobs,
+                            source_sha256=r['sha'])
+                    else:
+                        stats = extract(
+                            r['src'], db_path=r['db'], temp_dir=self.temp or None,
+                            keep_temp=self.keep_temp, options=self._extract_options(),
+                            workers=self.workers, build_fts=self.build_fts,
+                            source_sha256=r['sha'])
             except PermissionError as err:
                 print(f'Файл базы занят другим процессом (запущен MCP-сервер?): {err}')
                 failed.append(os.path.basename(r['src']))
@@ -460,17 +469,26 @@ class Tui:
                 return
         _cls()
         try:
-            stats = extract(
-                self.src,
-                db_path=self.db or None,
-                dump_dir=self.dump or None,
-                temp_dir=self.temp or None,
-                keep_temp=self.keep_temp,
-                options=options,
-                workers=self.workers,
-                build_fts=self.build_fts,
-                source_sha256=src_sha256,
-            )
+            if self.db and os.path.isfile(self.db) and not self.dump:
+                # существующая база из cf — инкрементальное обновление
+                # (только изменённые гранулы); полная сборка — confdb extract
+                from .cf_update import update_cf
+                stats = update_cf(
+                    self.src, self.db, workers=self.workers,
+                    rebuild_fts=None if self.build_fts else False,
+                    store_blobs=self.store_blobs, source_sha256=src_sha256)
+            else:
+                stats = extract(
+                    self.src,
+                    db_path=self.db or None,
+                    dump_dir=self.dump or None,
+                    temp_dir=self.temp or None,
+                    keep_temp=self.keep_temp,
+                    options=options,
+                    workers=self.workers,
+                    build_fts=self.build_fts,
+                    source_sha256=src_sha256,
+                )
         except Exception as err:
             print(f'Ошибка извлечения: {err}')
             input('Нажмите Enter…')
