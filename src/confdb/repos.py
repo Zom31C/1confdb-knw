@@ -24,6 +24,7 @@ Git в PATH. GIT_TERMINAL_PROMPT=0 и credential.interactive=false — без з
 import os
 import re
 import shutil
+import stat
 import subprocess
 import threading
 import time
@@ -59,11 +60,35 @@ def clone_dir(rec):
     return os.path.join(clone_root(), rec['id'])
 
 
+def _remove_mirror(directory):
+    """Удаляет дерево зеркала: git помечает объекты read-only, на Windows
+    обычный unlink/rmtree получает PermissionError — снимаем атрибут."""
+    def _onerror(func, path, _exc):
+        try:
+            os.chmod(path, stat.S_IWRITE)
+            func(path)
+        except OSError:
+            pass
+    shutil.rmtree(directory, onerror=_onerror)
+
+
 # ---------- git ----------
 
 def _auth_hint(detail):
     """Подсказка к ошибкам авторизации/доступа git (по-русски, для пользователя)."""
     low = detail.lower()
+    if ('unable to update url base from redirection' in low
+            or '/login?next=' in low):
+        return ('Сервер git вместо ответа перенаправил запрос на страницу входа '
+                '(/login). Частая причина: указан WEB-адрес репозитория (страница '
+                'в браузере), а не адрес клонирования. Для Bitbucket Server адрес '
+                'клонирования — https://<хост>/scm/<проект>/<репозиторий>.git '
+                '(личный проект: /scm/~<пользователь>/<репозиторий>.git); возьмите '
+                'его кнопкой Clone на странице репозитория и поправьте URL '
+                'источника в настройках. Если адрес клонирования верный, сервер '
+                'требует сессионный вход/SSO: создайте HTTP-токен доступа '
+                '(Bitbucket: личные настройки → HTTP access tokens) и укажите '
+                'URL с токеном либо используйте SSH.')
     if any(m in low for m in ('could not read username', 'authentication failed',
                               'terminal prompts disabled', 'repository not found',
                               'access denied', 'permission denied')):
@@ -173,11 +198,11 @@ def pull(rec, log=print):
             # прерванный клон оставил .git без коммитов (например, оборвался
             # на запросе учётных данных) — зеркало негодно, клонируем заново
             log('Зеркало повреждено (прерванный клон) — клонирую заново.')
-            shutil.rmtree(directory, ignore_errors=True)
+            _remove_mirror(directory)
     if not os.path.isdir(os.path.join(directory, '.git')):
         if os.path.isdir(directory):
             # прерванный клон без .git — начинаем заново
-            shutil.rmtree(directory, ignore_errors=True)
+            _remove_mirror(directory)
         os.makedirs(clone_root(), exist_ok=True)
         log(f'Клонирую {url} (ветка {branch or "по умолчанию"}, depth {CLONE_DEPTH})…')
         args = ['clone', '--depth', CLONE_DEPTH, '--single-branch', '--no-tags']
@@ -327,17 +352,36 @@ def add_source(url, source_id=None, branch='', path='', db=None,
 
 
 def update_source(source_id, **fields):
-    """Правит поля источника: branch, path, db, mode, watch (URL неизменен)."""
-    allowed = ('branch', 'path', 'db', 'mode', 'watch')
+    """Правит поля источника: url, branch, path, db, mode, watch.
+
+    Смена URL = другой репозиторий: состояние и зеркало сбрасываются
+    (клон пересоздастся при следующей синхронизации).
+    """
+    allowed = ('url', 'branch', 'path', 'db', 'mode', 'watch')
     with _REGISTRY_LOCK:
         sources = load_sources()
         rec = find_source(sources, source_id)
         for key, value in fields.items():
             if key not in allowed:
-                raise RepoError(f'поле «{key}» изменить нельзя (URL — только пересозданием источника)')
+                raise RepoError(f'поле «{key}» изменить нельзя')
             if key == 'mode' and value not in MODES:
                 raise RepoError(f'режим обновления должен быть одним из: {", ".join(MODES)}')
-            if key == 'watch':
+            if key == 'url':
+                new = str(value or '').strip()
+                if not new:
+                    raise RepoError('URL репозитория не может быть пустым')
+                if new != rec['url']:
+                    if any(r['id'] != rec['id'] and r['url'] == new
+                           and (r.get('path') or '') == (rec.get('path') or '')
+                           and (r.get('branch') or '') == (rec.get('branch') or '')
+                           for r in sources):
+                        raise RepoError('такой репозиторий (URL + путь + ветка) '
+                                        'уже зарегистрирован')
+                    rec['url'] = new
+                    rec.update(commit='', commit_date='', kind='', src_path='',
+                               last_sync='', last_result='', last_error='')
+                    _remove_mirror(clone_dir(rec))
+            elif key == 'watch':
                 rec[key] = bool(value)
             elif key == 'db':
                 rec[key] = os.path.abspath(value) if value else os.path.join(
@@ -360,8 +404,7 @@ def remove_source(source_id, purge=False):
     if purge:
         directory = clone_dir(rec)
         if os.path.isdir(directory):
-            from .extract import remove_tree
-            remove_tree(directory)
+            _remove_mirror(directory)
     return rec
 
 

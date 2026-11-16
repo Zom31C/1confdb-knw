@@ -107,7 +107,7 @@ def test_update_source(home):
     assert rec['branch'] == 'dev' and rec['mode'] == 'full'
     assert rec['watch'] is True and rec['path'] == 'sub/dir'
     with pytest.raises(ValueError):
-        repos.update_source('s', url='https://другой')
+        repos.update_source('s', commit='abc')
     with pytest.raises(ValueError):
         repos.update_source('s', mode='magic')
     with pytest.raises(ValueError):
@@ -458,6 +458,34 @@ def test_auth_interactive_flags(monkeypatch):
 def test_authorize_public_local(home, origin):
     """Локальный/публичный репозиторий: доступ есть без входа."""
     assert repos.authorize(str(origin), log=lambda *a: None) is True
+
+
+def test_redirect_to_login_hint(monkeypatch):
+    """Bitbucket Server: web-адрес вместо адреса клонирования → редирект /login."""
+    class Proc:
+        returncode = 128
+        stdout = ''
+        stderr = ('fatal: unable to update url base from redirection:\n'
+                  'asked for: https://host/users/u/repos/r/info/refs?service=git-upload-pack\n'
+                  'redirect: https://host/login?next=%2Fusers%2Fu%2Frepos%2Fr')
+
+    monkeypatch.setattr(repos.subprocess, 'run', lambda *a, **kw: Proc())
+    with pytest.raises(ValueError, match='клонирования'):
+        repos._git(['ls-remote', 'https://host/users/u/repos/r'])
+
+
+@needs_git
+def test_update_url_resets_mirror(home, origin):
+    rec = _add_dump(home, origin)
+    repos.pull(rec, log=lambda *a: None)
+    assert os.path.isdir(repos.clone_dir(rec)) and rec['commit']
+    repos.update_source('test', url=str(origin) + '-new')
+    stored = repos.load_sources()[0]
+    assert stored['url'].endswith('-new')
+    assert stored['commit'] == '' and stored['last_result'] == ''
+    assert not os.path.isdir(repos.clone_dir(rec))
+    with pytest.raises(ValueError):
+        repos.update_source('test', url='')
 
 
 def test_cli_repos_parser():

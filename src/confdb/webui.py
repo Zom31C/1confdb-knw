@@ -288,7 +288,7 @@ def make_handler(web):
                 return {'ok': True, 'source': rec, 'repos': core.repos_list()}
             if path == '/api/repos/update':
                 fields = {k: data[k] for k in
-                          ('branch', 'path', 'db', 'mode', 'watch') if k in data}
+                          ('url', 'branch', 'path', 'db', 'mode', 'watch') if k in data}
                 rec = core.repos_update(data['id'], **fields)
                 return {'ok': True, 'source': rec, 'repos': core.repos_list()}
             if path == '/api/repos/remove':

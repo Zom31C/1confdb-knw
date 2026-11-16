@@ -611,7 +611,7 @@ function fillRepoForm(id){
   const r = (S.repos||[]).find(x=>x.id===id); if(!r) return;
   $("#repo-form-title").textContent = "Настройки источника «"+id+"»";
   $("#repo-edit-id").value = id;
-  $("#repo-url").value = r.url; $("#repo-url").disabled = true;
+  $("#repo-url").value = r.url;
   $("#repo-id").value = r.id; $("#repo-id").disabled = true;
   $("#repo-branch").value = r.branch||""; $("#repo-path").value = r.path||"";
   $("#repo-db").value = r.db||""; $("#repo-mode").value = r.mode||"auto";
@@ -850,7 +850,7 @@ function bind(){
     const body={branch:val("repo-branch"),path:val("repo-path"),db:val("repo-db"),
                 mode:val("repo-mode"),watch:checked("repo-watch")};
     try{
-      if(editId){ await api("/api/repos/update","POST",{id:editId,...body});
+      if(editId){ await api("/api/repos/update","POST",{id:editId,url:val("repo-url"),...body});
         toast("Источник сохранён","ok"); }
       else { const url=val("repo-url").trim(); if(!url){toast("Укажите URL репозитория","err");return;}
         await api("/api/repos/add","POST",{url,id:val("repo-id"),...body});

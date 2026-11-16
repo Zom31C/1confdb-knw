@@ -681,13 +681,13 @@ class Tui:
             return
         _cls()
         print(f'--- Настройки источника «{source_id}» (Enter — оставить) ---')
-        print(f' URL: {rec["url"]} (не меняется)')
+        url = _ask('URL репозитория (смена URL пересоздаст клон)', rec.get('url') or '')
         branch = _ask('Ветка', rec.get('branch') or '')
         path = _ask('Путь внутри репозитория', rec.get('path') or '')
         db = _ask_path('База SQLite', rec.get('db') or '')
         mode = _ask('Режим: auto / partial / full', rec.get('mode') or 'auto')
         try:
-            core.repos_update(source_id, branch=branch, path=path,
+            core.repos_update(source_id, url=url, branch=branch, path=path,
                               db=db or None, mode=mode)
             print('Сохранено.')
         except ValueError as err:
