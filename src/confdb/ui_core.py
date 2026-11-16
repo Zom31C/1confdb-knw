@@ -862,7 +862,9 @@ class UiCore:
                 rec['last_error'] = str(err)
                 result.update(error=str(err), summary=f'ошибка: {err}')
                 log(f'Источник {rec["id"]}: ошибка — {err}')
-            repos.save_sources(sources)
+            # только своя запись и со свежим реестром: добавленные/удалённые
+            # во время задачи источники не затираются старым снимком списка
+            repos.save_source(rec)
             results.append(result)
         return results
 

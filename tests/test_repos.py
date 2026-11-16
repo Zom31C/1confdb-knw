@@ -332,6 +332,102 @@ def test_watch_loop_once_and_busy(home):
     assert calls == []
 
 
+# ---------- реестр: параллельные правки не теряются ----------
+
+def test_save_source_merges_concurrent_add(home):
+    rec = repos.add_source('https://x/a.git', source_id='a')
+    repos.add_source('https://x/b.git', source_id='b')   # правка во время задачи
+    rec['last_result'] = 'built'
+    repos.save_source(rec)
+    ids = [r['id'] for r in repos.load_sources()]
+    assert ids == ['a', 'b']
+    assert repos.load_sources()[0]['last_result'] == 'built'
+
+
+def test_save_source_does_not_resurrect_removed(home):
+    rec = repos.add_source('https://x/a.git', source_id='a')
+    repos.remove_source('a')
+    repos.save_source(rec)                               # задача дописывает удалённый
+    assert repos.load_sources() == []
+
+
+@needs_git
+def test_sync_keeps_source_added_during_task(home, origin):
+    """Добавление источника во время синхронизации не затирается её записью."""
+    _add_dump(home, origin)
+    real_pull = repos.pull
+    added = []
+
+    def pull_with_concurrent_add(rec, log=print):
+        if not added:
+            added.append(True)
+            repos.add_source('https://x/added-during-sync.git', source_id='during')
+        return real_pull(rec, log=log)
+
+    original = repos.pull
+    repos.pull = pull_with_concurrent_add
+    try:
+        results = _sync(UiCore(), ids=['test'])
+    finally:
+        repos.pull = original
+    assert results[0]['ok'] is True
+    ids = [r['id'] for r in repos.load_sources()]
+    assert ids == ['test', 'during'], ids
+
+
+# ---------- неинтерактивный git и битые зеркала ----------
+
+def test_git_noninteractive_flags(monkeypatch):
+    """Ни консоли, ни GUI/браузера: клон не должен висеть на запросе пароля."""
+    seen = {}
+
+    class Proc:
+        returncode = 0
+        stdout = 'ok'
+        stderr = ''
+
+    def fake_run(cmd, **kw):
+        seen['cmd'] = cmd
+        seen['env'] = kw.get('env') or {}
+        return Proc()
+
+    monkeypatch.setattr(repos.subprocess, 'run', fake_run)
+    assert repos._git(['status']) == 'ok'
+    assert 'credential.interactive=false' in seen['cmd']
+    assert seen['env']['GIT_TERMINAL_PROMPT'] == '0'
+    assert seen['env']['GCM_INTERACTIVE'] == 'false'
+
+
+def test_auth_error_has_hint(monkeypatch):
+    class Proc:
+        returncode = 128
+        stdout = ''
+        stderr = ("fatal: could not read Username for 'https://github.com': "
+                  "terminal prompts disabled")
+
+    monkeypatch.setattr(repos.subprocess, 'run', lambda *a, **kw: Proc())
+    with pytest.raises(ValueError, match='приватный'):
+        repos._git(['clone', 'https://github.com/org/nope.git'])
+
+
+@needs_git
+def test_pull_reclones_broken_mirror(home, origin):
+    rec = _add_dump(home, origin)
+    # прерванный клон: .git есть, коммитов нет
+    os.makedirs(os.path.join(repos.clone_dir(rec), '.git'))
+    first = repos.pull(rec, log=lambda *a: None)
+    assert first['action'] == 'clone' and len(first['commit']) == 40
+    assert repos.remote_check(rec)['cloned'] is True
+
+
+@needs_git
+def test_remote_check_broken_mirror(home, origin):
+    rec = _add_dump(home, origin)
+    os.makedirs(os.path.join(repos.clone_dir(rec), '.git'))
+    check = repos.remote_check(rec)
+    assert check['cloned'] is False and check['changed'] is True
+
+
 def test_cli_repos_parser():
     args = build_parser().parse_args(
         ['repos', 'add', 'https://x/y.git', '--id', 's', '--branch', 'dev',

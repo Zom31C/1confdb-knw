@@ -15,13 +15,17 @@
 полностью при изменении. Здесь — только git, реестр и определение источника.
 
 Git вызывается через subprocess (стандартная библиотека); нужен установленный
-Git в PATH. GIT_TERMINAL_PROMPT=0 — запросы пароля в консоли не подвешивают
-фоновое слежение (для приватных репозиториев используйте SSH или URL с токеном).
+Git в PATH. GIT_TERMINAL_PROMPT=0 и credential.interactive=false — без запросов
+пароля в консоли и без GUI/браузера (Git Credential Manager): приватный или
+несуществующий репозиторий даёт быструю ошибку с подсказкой, а не зависший клон;
+сохранённые учётные данные helper использует молча (для приватных репозиториев
+удобнее SSH или URL с токеном).
 """
 import os
 import re
 import shutil
 import subprocess
+import threading
 import time
 from datetime import datetime
 
@@ -57,15 +61,39 @@ def clone_dir(rec):
 
 # ---------- git ----------
 
+def _auth_hint(detail):
+    """Подсказка к ошибкам авторизации/доступа git (по-русски, для пользователя)."""
+    low = detail.lower()
+    if any(m in low for m in ('could not read username', 'authentication failed',
+                              'terminal prompts disabled', 'repository not found',
+                              'access denied', 'permission denied')):
+        return ('Репозиторий не найден или приватный — сервер требует авторизацию. '
+                'Проверьте URL; для приватного репозитория используйте SSH '
+                '(git@github.com:org/repo.git) или https-URL с токеном. '
+                'Интерактивный вход (браузер/пароль) в confdb отключён, чтобы '
+                'синхронизация и слежение не зависали.')
+    if any(m in low for m in ('could not resolve host', 'failed to connect',
+                              'connection timed out', 'network is unreachable')):
+        return ('Нет соединения с сервером git — проверьте сеть/прокси '
+                '(настройки прокси берутся из окружения и git config).')
+    return ''
+
+
 def _git(args, cwd=None, timeout=120):
     """Вызов git с перехватом вывода; ошибка — RepoError с текстом git.
 
     core.longpaths=true — выгрузки 1С дают пути длиннее 260 символов
-    (Windows); GIT_TERMINAL_PROMPT=0 — без интерактивных запросов пароля.
+    (Windows); GIT_TERMINAL_PROMPT=0 и credential.interactive=false —
+    без интерактивных запросов пароля: Git Credential Manager иначе открывает
+    браузер с логином GitHub и клон висит до таймаута (приватный/несуществующий
+    репозиторий = 404 = запрос учётных данных). Сохранённые учётные данные
+    helper использует молча; если нужен вход — быстрая ошибка с подсказкой.
     """
     env = dict(os.environ)
     env['GIT_TERMINAL_PROMPT'] = '0'
-    cmd = ['git', '--no-pager', '-c', 'core.longpaths=true'] + list(args)
+    env['GCM_INTERACTIVE'] = 'false'
+    cmd = ['git', '--no-pager', '-c', 'core.longpaths=true',
+           '-c', 'credential.interactive=false'] + list(args)
     try:
         proc = subprocess.run(cmd, cwd=cwd, env=env, timeout=timeout,
                               capture_output=True, text=True,
@@ -76,7 +104,9 @@ def _git(args, cwd=None, timeout=120):
         raise RepoError(f'git не ответил за {timeout} с: {" ".join(args[:3])}…')
     if proc.returncode != 0:
         detail = (proc.stderr or proc.stdout or '').strip()
-        raise RepoError(f'git {" ".join(args[:3])}: {detail or "код " + str(proc.returncode)}')
+        hint = _auth_hint(detail)
+        raise RepoError(f'git {" ".join(args[:3])}: {detail or "код " + str(proc.returncode)}'
+                        + (f'\n{hint}' if hint else ''))
     return (proc.stdout or '').strip()
 
 
@@ -114,6 +144,14 @@ def pull(rec, log=print):
     directory = clone_dir(rec)
     url = rec['url']
     branch = (rec.get('branch') or '').strip()
+    if os.path.isdir(os.path.join(directory, '.git')):
+        try:
+            _head_commit(directory)
+        except RepoError:
+            # прерванный клон оставил .git без коммитов (например, оборвался
+            # на запросе учётных данных) — зеркало негодно, клонируем заново
+            log('Зеркало повреждено (прерванный клон) — клонирую заново.')
+            shutil.rmtree(directory, ignore_errors=True)
     if not os.path.isdir(os.path.join(directory, '.git')):
         if os.path.isdir(directory):
             # прерванный клон без .git — начинаем заново
@@ -162,16 +200,27 @@ def remote_check(rec):
     directory = clone_dir(rec)
     if not os.path.isdir(os.path.join(directory, '.git')):
         return {'cloned': False, 'changed': True, 'local': '', 'remote': ''}
+    try:
+        local = _head_commit(directory)
+    except RepoError:
+        # битое зеркало после прерванного клона — считаем неклонированным
+        return {'cloned': False, 'changed': True, 'local': '', 'remote': ''}
     branch = (rec.get('branch') or '').strip() or _current_branch(directory)
     _git(['fetch', '--depth', CLONE_DEPTH, '--no-tags', 'origin', branch],
          cwd=directory, timeout=600)
     remote = _git(['rev-parse', 'FETCH_HEAD'], cwd=directory)
-    local = _head_commit(directory)
     return {'cloned': True, 'changed': remote != local,
             'local': local, 'remote': remote}
 
 
 # ---------- реестр источников (config.json) ----------
+
+# Реестр правят параллельно: задача синхронизации (фон) и интерфейс
+# (добавление/удаление/настройки). Замок сериализует read-modify-write внутри
+# процесса; запись ОДНОЙ записи (save_source) перечитывает реестр, чтобы не
+# затереть чужие правки старым снимком списка.
+_REGISTRY_LOCK = threading.RLock()
+
 
 def load_sources():
     """Список записей git_sources из конфига (всегда список словарей)."""
@@ -182,9 +231,31 @@ def load_sources():
 
 
 def save_sources(sources):
-    config = load_config()
-    config['git_sources'] = sources
-    save_config(config)
+    with _REGISTRY_LOCK:
+        config = load_config()
+        config['git_sources'] = sources
+        save_config(config)
+
+
+def save_source(rec):
+    """Сохраняет ОДНУ запись источника, перечитывая реестр перед записью.
+
+    Синхронизация идёт минутами (клон/сборка), и за это время пользователь
+    может добавить/удалить другой источник в интерфейсе: запись всего списка
+    старым снимком затирала бы эти правки (источники «пропадали»). Здесь
+    меняется только своя запись; удалённую во время задачи не воскрешаем.
+    """
+    with _REGISTRY_LOCK:
+        sources = load_sources()
+        for i, item in enumerate(sources):
+            if item['id'] == rec['id']:
+                sources[i] = rec
+                break
+        else:
+            return  # источник удалили во время синхронизации
+        config = load_config()
+        config['git_sources'] = sources
+        save_config(config)
 
 
 def find_source(sources, source_id):
@@ -211,56 +282,59 @@ def add_source(url, source_id=None, branch='', path='', db=None,
         raise RepoError('укажите URL git-репозитория (https://… или git@…)')
     if mode not in MODES:
         raise RepoError(f'режим обновления должен быть одним из: {", ".join(MODES)}')
-    sources = load_sources()
-    source_id = (source_id or '').strip() or make_id(url)
-    if not re.fullmatch(r'[\w\-]{1,64}', source_id, flags=re.UNICODE):
-        raise RepoError('имя источника: буквы/цифры/дефис/подчёркивание, до 64 символов')
-    if any(r['id'] == source_id for r in sources):
-        raise RepoError(f'источник «{source_id}» уже есть — выберите другое имя')
-    if any(r['url'] == url and (r.get('path') or '') == (path or '')
-           and (r.get('branch') or '') == (branch or '') for r in sources):
-        raise RepoError('такой репозиторий (URL + путь + ветка) уже зарегистрирован')
-    db = os.path.abspath(db) if db else os.path.join(db_root(), source_id + '.sqlite')
-    rec = {'id': source_id, 'url': url, 'branch': (branch or '').strip(),
-           'path': (path or '').strip().replace('\\', '/'),
-           'db': db, 'mode': mode, 'watch': bool(watch),
-           'added': datetime.now().isoformat(timespec='seconds'),
-           'commit': '', 'commit_date': '', 'kind': '', 'src_path': '',
-           'last_sync': '', 'last_result': '', 'last_error': ''}
-    sources.append(rec)
-    save_sources(sources)
+    with _REGISTRY_LOCK:
+        sources = load_sources()
+        source_id = (source_id or '').strip() or make_id(url)
+        if not re.fullmatch(r'[\w\-]{1,64}', source_id, flags=re.UNICODE):
+            raise RepoError('имя источника: буквы/цифры/дефис/подчёркивание, до 64 символов')
+        if any(r['id'] == source_id for r in sources):
+            raise RepoError(f'источник «{source_id}» уже есть — выберите другое имя')
+        if any(r['url'] == url and (r.get('path') or '') == (path or '')
+               and (r.get('branch') or '') == (branch or '') for r in sources):
+            raise RepoError('такой репозиторий (URL + путь + ветка) уже зарегистрирован')
+        db = os.path.abspath(db) if db else os.path.join(db_root(), source_id + '.sqlite')
+        rec = {'id': source_id, 'url': url, 'branch': (branch or '').strip(),
+               'path': (path or '').strip().replace('\\', '/'),
+               'db': db, 'mode': mode, 'watch': bool(watch),
+               'added': datetime.now().isoformat(timespec='seconds'),
+               'commit': '', 'commit_date': '', 'kind': '', 'src_path': '',
+               'last_sync': '', 'last_result': '', 'last_error': ''}
+        sources.append(rec)
+        save_sources(sources)
     return rec
 
 
 def update_source(source_id, **fields):
     """Правит поля источника: branch, path, db, mode, watch (URL неизменен)."""
-    sources = load_sources()
-    rec = find_source(sources, source_id)
     allowed = ('branch', 'path', 'db', 'mode', 'watch')
-    for key, value in fields.items():
-        if key not in allowed:
-            raise RepoError(f'поле «{key}» изменить нельзя (URL — только пересозданием источника)')
-        if key == 'mode' and value not in MODES:
-            raise RepoError(f'режим обновления должен быть одним из: {", ".join(MODES)}')
-        if key == 'watch':
-            rec[key] = bool(value)
-        elif key == 'db':
-            rec[key] = os.path.abspath(value) if value else os.path.join(
-                db_root(), source_id + '.sqlite')
-        elif key == 'path':
-            rec[key] = str(value or '').strip().replace('\\', '/')
-        else:
-            rec[key] = str(value or '').strip()
-    save_sources(sources)
+    with _REGISTRY_LOCK:
+        sources = load_sources()
+        rec = find_source(sources, source_id)
+        for key, value in fields.items():
+            if key not in allowed:
+                raise RepoError(f'поле «{key}» изменить нельзя (URL — только пересозданием источника)')
+            if key == 'mode' and value not in MODES:
+                raise RepoError(f'режим обновления должен быть одним из: {", ".join(MODES)}')
+            if key == 'watch':
+                rec[key] = bool(value)
+            elif key == 'db':
+                rec[key] = os.path.abspath(value) if value else os.path.join(
+                    db_root(), source_id + '.sqlite')
+            elif key == 'path':
+                rec[key] = str(value or '').strip().replace('\\', '/')
+            else:
+                rec[key] = str(value or '').strip()
+        save_sources(sources)
     return rec
 
 
 def remove_source(source_id, purge=False):
     """Убирает источник из реестра; purge — удаляет и каталог клона (база остаётся)."""
-    sources = load_sources()
-    rec = find_source(sources, source_id)
-    sources.remove(rec)
-    save_sources(sources)
+    with _REGISTRY_LOCK:
+        sources = load_sources()
+        rec = find_source(sources, source_id)
+        sources.remove(rec)
+        save_sources(sources)
     if purge:
         directory = clone_dir(rec)
         if os.path.isdir(directory):
