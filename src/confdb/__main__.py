@@ -219,6 +219,15 @@ def build_parser():
         'check', help='проверить изменения в удалённых ветках (без сборки)')
     rcheck.add_argument('ids', nargs='*', help='имена источников (пусто — все)')
 
+    ra_auth = rsub.add_parser(
+        'auth', help='авторизоваться в git-хостинге (браузер/окно входа GCM): '
+                     'учётные данные сохранятся для синхронизации приватных '
+                     'репозиториев')
+    ra_auth.add_argument('id', nargs='?', default=None,
+                         help='имя источника (или --url)')
+    ra_auth.add_argument('--url', metavar='URL', default=None,
+                         help='URL репозитория напрямую (без источника)')
+
     rr = rsub.add_parser('remove', help='убрать источник из реестра')
     rr.add_argument('id', help='имя источника')
     rr.add_argument('--purge', action='store_true',
@@ -570,6 +579,18 @@ def run_repos(args):
             else:
                 print(f'{r["id"]}: изменений нет ({r["local"][:8]})')
         return 1 if fails else 0
+
+    if cmd == 'auth':
+        if not args.id and not args.url:
+            print('Укажите имя источника или --url', file=sys.stderr)
+            return 2
+        try:
+            core.repos_auth(source_id=args.id, url=args.url)
+        except ValueError as err:
+            print(f'Ошибка: {err}', file=sys.stderr)
+            return 1
+        print('Доступ есть: авторизация не требуется или выполнена успешно.')
+        return 0
 
     if cmd == 'remove':
         try:

@@ -575,6 +575,7 @@ class Tui:
             print(' s. Синхронизировать: клон/pull + сборка/обновление базы')
             print(' f. Полная пересборка (force)')
             print(' c. Проверить изменения в удалённых ветках (без сборки)')
+            print(' a. Авторизоваться в git (браузер/окно входа, для приватных)')
             print(' w. Флаг watch у источника (для слежения)')
             print(' e. Настройки источника (ветка/путь/база/режим)')
             print(' d. Удалить источник')
@@ -606,6 +607,17 @@ class Tui:
                               f'{r["local"][:8]} -> {r["remote"][:8]}')
                     else:
                         print(f'{r["id"]}: изменений нет ({r["local"][:8]})')
+                input('Нажмите Enter…')
+            elif choice == 'a':
+                source_id = self._pick_repo(rows, allow_all=False)
+                if source_id:
+                    print('Если репозиторий приватный — откроется браузер или '
+                          'окно входа git; авторизуйтесь там.')
+                    try:
+                        core.repos_auth(source_id=source_id)
+                        print('Доступ есть. Запустите синхронизацию (s).')
+                    except ValueError as err:
+                        print(f'Ошибка: {err}')
                 input('Нажмите Enter…')
             elif choice == 'w':
                 source_id = self._pick_repo(rows, allow_all=False)

@@ -868,6 +868,18 @@ class UiCore:
             results.append(result)
         return results
 
+    def repos_auth(self, source_id=None, url=None, log=print):
+        """Явная авторизация в git-хостинге (браузер/окно входа GCM).
+
+        url — напрямую, иначе URL источника source_id. После входа сохранённые
+        учётные данные использует обычная (неинтерактивная) синхронизация.
+        """
+        from . import repos
+        if url is None:
+            url = repos.find_source(repos.load_sources(), source_id)['url']
+        repos.authorize(url, log=log)
+        return {'ok': True, 'url': url}
+
     def repos_check(self, ids=None):
         """Проверка изменений в удалённых ветках без обновления зеркал/баз."""
         from . import repos

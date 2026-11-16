@@ -148,6 +148,12 @@ class WebUi:
             'repos', title,
             lambda: self.core.repos_sync(ids=ids or None, force=force))
 
+    def repos_auth(self, source_id=None, url=None):
+        title = f'Авторизация git: {source_id or url}'
+        return self.tasks.start(
+            'repos-auth', title,
+            lambda: self.core.repos_auth(source_id=source_id, url=url))
+
     # ---------- MCP-сервер ----------
 
     def start_server(self, dbs, group_names, port):
@@ -296,6 +302,11 @@ def make_handler(web):
             if path == '/api/repos/check':
                 return {'results': core.repos_check(
                     ids=data.get('ids') or None)}
+            if path == '/api/repos/auth':
+                if tasks.busy():
+                    raise ValueError('уже выполняется задача')
+                return {'task': web.repos_auth(
+                    source_id=data.get('id') or None, url=data.get('url') or None)}
             if path == '/api/repos/watch':
                 if data.get('enabled'):
                     status = core.repos_watch_start(

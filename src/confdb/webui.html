@@ -307,6 +307,8 @@ $("#main").addEventListener("click", async e=>{
       else if(!x.cloned) toast("Не клонирован — нужна синхронизация","info");
       else if(x.changed) toast("Есть изменения: "+x.local.slice(0,8)+" → "+x.remote.slice(0,8),"info");
       else toast("Изменений нет ("+x.local.slice(0,8)+")","ok"); }
+    else if(b.dataset.repoAuth){ await api("/api/repos/auth","POST",{id:b.dataset.repoAuth});
+      toast("Авторизация запущена — завершите вход в открывшемся браузере/окне git","info"); pollTask(); }
     else if(b.dataset.repoWatch){ const rec=(S.repos||[]).find(x=>x.id===b.dataset.repoWatch); if(!rec)return;
       await api("/api/repos/update","POST",{id:rec.id,watch:!rec.watch}); await refresh(); }
     else if(b.dataset.repoEdit){ fillRepoForm(b.dataset.repoEdit); }
@@ -552,6 +554,7 @@ function reposListHtml(){
         <button class="btn sm" data-repo-sync="${esc(r.id)}">Синхронизировать</button>
         <button class="btn ghost sm" data-repo-force="${esc(r.id)}" title="полная пересборка даже без изменений">Пересобрать</button>
         <button class="btn ghost sm" data-repo-check="${esc(r.id)}" title="fetch без сборки">Проверить</button>
+        <button class="btn ghost sm" data-repo-auth="${esc(r.id)}" title="Откроется браузер/окно входа git (GCM); сохранённые учётные данные затем использует синхронизация">Авторизоваться</button>
         <button class="btn ghost sm" data-repo-watch="${esc(r.id)}" title="включить/выключить слежение">${r.watch?"watch: вкл":"watch: выкл"}</button>
         <button class="btn ghost sm" data-repo-edit="${esc(r.id)}">Настройки</button>
         <button class="btn danger sm" data-repo-del="${esc(r.id)}">Удалить</button></div>
@@ -568,7 +571,8 @@ function viewRepos(){
   return `<div class="card"><h2>Git-репозитории — источники баз знаний</h2>
     <p class="muted small">Репозиторий с выгрузкой конфигурации в файлы (ConfigDumpInfo.xml) или файлом .cf/.cfe/.epf/.erf.
     Клон хранится в ~/.confdb/repos; выгрузка обновляется <b>частично</b> (только изменённые объекты, работает при запущенном MCP-сервере),
-    файлы 1С пересобираются полностью при изменении. Другая ревизия схемы распаковщика тоже требует пересборки.</p>
+    файлы 1С пересобираются полностью при изменении. Другая ревизия схемы распаковщика тоже требует пересборки.
+    Приватный репозиторий — кнопка «Авторизоваться» (браузер/окно входа git) либо SSH-URL/URL с токеном.</p>
     <div id="repos-list">${reposListHtml()}</div>
     <div class="row" style="margin-top:12px">
       <button class="btn" id="repos-sync-all">Синхронизировать все</button>
@@ -1014,6 +1018,7 @@ async function pollTask(){
         else if(task.kind==="bench"){ toast("Бенчмарк: рекомендовано процессов "+task.result,"ok"); }
         else if(task.kind==="repos"){ const rs=task.result||[]; const bad=rs.filter(x=>!x.ok).length;
           toast("Git-синхронизация: "+(rs.length-bad)+" ОК, ошибок: "+bad, bad?"err":"ok"); }
+        else if(task.kind==="repos-auth"){ toast("Авторизация git успешна — запустите синхронизацию","ok"); }
         else toast("Задача завершена","ok");
         await refresh();
       } else { toast(task.error||"Ошибка задачи","err"); }

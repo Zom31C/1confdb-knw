@@ -79,7 +79,7 @@ def _auth_hint(detail):
     return ''
 
 
-def _git(args, cwd=None, timeout=120):
+def _git(args, cwd=None, timeout=120, interactive=False):
     """Вызов git с перехватом вывода; ошибка — RepoError с текстом git.
 
     core.longpaths=true — выгрузки 1С дают пути длиннее 260 символов
@@ -88,12 +88,16 @@ def _git(args, cwd=None, timeout=120):
     браузер с логином GitHub и клон висит до таймаута (приватный/несуществующий
     репозиторий = 404 = запрос учётных данных). Сохранённые учётные данные
     helper использует молча; если нужен вход — быстрая ошибка с подсказкой.
+    interactive=True — явная авторизация (repos.authorize): GCM может открыть
+    браузер/окно входа, пользователь логинится, креды сохраняются для будущих
+    неинтерактивных синхронизаций.
     """
     env = dict(os.environ)
     env['GIT_TERMINAL_PROMPT'] = '0'
-    env['GCM_INTERACTIVE'] = 'false'
+    env['GCM_INTERACTIVE'] = 'true' if interactive else 'false'
     cmd = ['git', '--no-pager', '-c', 'core.longpaths=true',
-           '-c', 'credential.interactive=false'] + list(args)
+           '-c', 'credential.interactive=' + ('true' if interactive else 'false')]
+    cmd += list(args)
     try:
         proc = subprocess.run(cmd, cwd=cwd, env=env, timeout=timeout,
                               capture_output=True, text=True,
@@ -116,6 +120,24 @@ def git_available():
         return _git(['--version'], timeout=15)
     except RepoError:
         return None
+
+
+def authorize(url, log=print, timeout=300):
+    """Явный вход в git-хостинг по действию пользователя (кнопка/команда auth).
+
+    В отличие от синхронизации здесь интерактивность РАЗРЕШЕНА: Git Credential
+    Manager откроет браузер или окно входа, пользователь авторизуется, креды
+    сохранятся в менеджере учётных данных. Обычная синхронизация и слежение
+    остаются неинтерактивными и используют сохранённые креды молча.
+    Публичный репозиторий пройдёт без входа («доступ есть»).
+    """
+    log(f'Проверяю доступ к {url}…')
+    log('Если репозиторий приватный — откроется браузер или окно входа git; '
+        'авторизуйтесь там. Учётные данные сохранятся и будут использоваться '
+        'синхронизацией автоматически.')
+    _git(['ls-remote', url], timeout=timeout, interactive=True)
+    log('Доступ есть: авторизация не требуется или выполнена успешно.')
+    return True
 
 
 def _current_branch(directory):

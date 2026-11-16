@@ -428,6 +428,38 @@ def test_remote_check_broken_mirror(home, origin):
     assert check['cloned'] is False and check['changed'] is True
 
 
+def test_auth_interactive_flags(monkeypatch):
+    """Явная авторизация разрешает вход (браузер GCM), фон — нет."""
+    seen = {}
+
+    class Proc:
+        returncode = 0
+        stdout = 'refs/heads/main'
+        stderr = ''
+
+    def fake_run(cmd, **kw):
+        seen['cmd'] = cmd
+        seen['env'] = kw.get('env') or {}
+        return Proc()
+
+    monkeypatch.setattr(repos.subprocess, 'run', fake_run)
+    assert repos.authorize('https://x/y.git', log=lambda *a: None) is True
+    assert seen['cmd'][:2] == ['git', '--no-pager']
+    assert 'ls-remote' in seen['cmd']
+    assert 'credential.interactive=true' in seen['cmd']
+    assert seen['env']['GCM_INTERACTIVE'] == 'true'
+    # обычная синхронизация остаётся неинтерактивной
+    repos._git(['status'])
+    assert 'credential.interactive=false' in seen['cmd']
+    assert seen['env']['GCM_INTERACTIVE'] == 'false'
+
+
+@needs_git
+def test_authorize_public_local(home, origin):
+    """Локальный/публичный репозиторий: доступ есть без входа."""
+    assert repos.authorize(str(origin), log=lambda *a: None) is True
+
+
 def test_cli_repos_parser():
     args = build_parser().parse_args(
         ['repos', 'add', 'https://x/y.git', '--id', 's', '--branch', 'dev',
@@ -441,3 +473,7 @@ def test_cli_repos_parser():
     assert args.interval == 60 and args.once and args.all
     args = build_parser().parse_args(['repos', 'remove', 's', '--purge'])
     assert args.purge
+    args = build_parser().parse_args(['repos', 'auth', 's'])
+    assert args.repos_cmd == 'auth' and args.id == 's'
+    args = build_parser().parse_args(['repos', 'auth', '--url', 'https://x/y.git'])
+    assert args.url == 'https://x/y.git'
