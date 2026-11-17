@@ -288,3 +288,69 @@ def test_check_tabular(ctx):
     assert check_query(
         'ВЫБРАТЬ Т.Товары.ТоварыНоменклатура.СсылкаАтрибут '
         'ИЗ Документ.ЗаказПокупателя КАК Т', ctx) == []
+
+
+# ---------- таблица значений: только через ПОМЕСТИТЬ (2026-11-17) ----------
+
+def test_value_table_direct_select_forbidden(ctx):
+    errs = check_query('ВЫБРАТЬ Т.Колонка ИЗ &ТЗ КАК Т', ctx)
+    assert any('таблица значений &ТЗ' in e and 'ПОМЕСТИТЬ' in e for e in errs)
+
+
+def test_value_table_join_forbidden(ctx):
+    errs = check_query(
+        'ВЫБРАТЬ Т.Ссылка ИЗ Справочник.Справочник1 КАК Т '
+        'ЛЕВОЕ СОЕДИНЕНИЕ &ТЗ КАК ТЗ ПО Т.Ссылка = ТЗ.Ссылка', ctx)
+    assert any('соединение с ней напрямую запрещено' in e for e in errs)
+
+
+def test_value_table_join_inside_put_forbidden(ctx):
+    errs = check_query(
+        'ВЫБРАТЬ Т.Ссылка ПОМЕСТИТЬ ВТ_ТЗ ИЗ Справочник.Справочник1 КАК Т '
+        'СОЕДИНЕНИЕ &ТЗ КАК ТЗ ПО Т.Ссылка = ТЗ.Ссылка', ctx)
+    assert any('соединение с ней напрямую запрещено' in e for e in errs)
+
+
+def test_value_table_nested_select_forbidden(ctx):
+    errs = check_query(
+        'ВЫБРАТЬ Т.Колонка ИЗ (ВЫБРАТЬ ТЗ.Колонка ИЗ &ТЗ КАК ТЗ) КАК Т', ctx)
+    assert any('таблица значений &ТЗ' in e for e in errs)
+
+
+def test_value_table_put_then_select_ok(ctx):
+    errs = check_query(
+        'ВЫБРАТЬ Т.Колонка КАК Колонка ПОМЕСТИТЬ ВТ_ТЗ ИЗ &ТЗ КАК Т;'
+        'ВЫБРАТЬ ВТ_ТЗ.Колонка ИЗ ВТ_ТЗ', ctx)
+    assert errs == []
+
+
+def test_value_table_put_with_where_ok(ctx):
+    errs = check_query(
+        'ВЫБРАТЬ Т.Колонка ПОМЕСТИТЬ ВТ_ТЗ ИЗ &ТЗ КАК Т ГДЕ Т.Колонка > 0;'
+        'ВЫБРАТЬ ВТ_ТЗ.Колонка ИЗ ВТ_ТЗ', ctx)
+    assert errs == []
+
+
+def test_value_table_in_condition_ok(ctx):
+    # параметр-таблица в условии (В (&ТЗ)) — не источник записей, разрешено
+    errs = check_query(
+        'ВЫБРАТЬ Т.Ссылка ИЗ Справочник.Справочник1 КАК Т '
+        'ГДЕ Т.Ссылка В (&ТЗ)', ctx)
+    assert errs == []
+
+
+def test_put_star_columns_from_extra_schema():
+    from confdb.query_lang import (_put_star_cols, _select_columns,
+                                   check_query_full, parse_query)
+    node = parse_query('ВЫБРАТЬ * ПОМЕСТИТЬ ВТ_ТЗ ИЗ &ТЗ КАК Т')[0]
+
+    class Ctx:
+        extra = {'тз': {'колонка': None}}
+
+    assert _select_columns(node, _put_star_cols(node, Ctx())) == {'колонка'}
+    assert _select_columns(node, _put_star_cols(node, None)) is None
+    errs, _ = check_query_full(
+        'ВЫБРАТЬ * ПОМЕСТИТЬ ВТ_ТЗ ИЗ &ТЗ КАК Т;'
+        'ВЫБРАТЬ ВТ_ТЗ.Колонка ИЗ ВТ_ТЗ', Ctx(),
+        extra_tables={'ТЗ': ['Колонка']})
+    assert errs == []

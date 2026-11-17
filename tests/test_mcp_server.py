@@ -279,8 +279,10 @@ def test_check_and_sql(tmp_path_factory):
 def test_check_query_partial_status(tmp_path_factory):
     """Непроверенные поля параметров-таблиц → PARTIAL, а не OK (отзыв LLM)."""
     server = _server(tmp_path_factory)
-    text = ('ВЫБРАТЬ Т.Ссылка ИЗ Справочник.Справочник1 КАК Т, '
-            '&Таблица КАК П ГДЕ Т.Ссылка = П.Ссылка')
+    # таблица значений — только через ПОМЕСТИТЬ (правило платформы)
+    text = ('ВЫБРАТЬ П.Ссылка ПОМЕСТИТЬ ВТ_П ИЗ &Таблица КАК П;'
+            'ВЫБРАТЬ Т.Ссылка ИЗ Справочник.Справочник1 КАК Т, '
+            'ВТ_П КАК П ГДЕ Т.Ссылка = П.Ссылка')
     resp = _call(server, 'check_query', text=text)['content'][0]['text']
     assert 'PARTIAL' in resp and 'П.Ссылка' in resp
     assert 'OK:' not in resp
@@ -519,7 +521,9 @@ def test_check_syntax_file_path_ignores_schema_revision(tmp_path_factory,
 def test_check_query_external_tables(tmp_path_factory):
     """tables задаёт схемы параметров-таблиц и ВТ: PARTIAL → OK, ошибки полей."""
     server = _server(tmp_path_factory)
-    q = ('ВЫБРАТЬ Т.Ссылка ИЗ Справочник.Справочник1 КАК Т, &Таблица КАК П '
+    # таблица значений помещается во ВТ, соединение — уже с ВТ (правило 1С)
+    q = ('ВЫБРАТЬ П.Ссылка КАК Ссылка ПОМЕСТИТЬ ВТ_П ИЗ &Таблица КАК П;'
+         'ВЫБРАТЬ Т.Ссылка ИЗ Справочник.Справочник1 КАК Т, ВТ_П КАК П '
          'ГДЕ Т.Ссылка = П.Ссылка')
     # без схемы — PARTIAL с подсказкой про tables
     resp = _call(server, 'check_query', text=q)['content'][0]['text']
@@ -533,7 +537,8 @@ def test_check_query_external_tables(tmp_path_factory):
                  tables={'Таблица': {'Другое': None}})['content'][0]['text']
     assert 'неизвестное поле внешней таблицы' in resp
     # цепочка по типу колонки проверяется как у объекта
-    q2 = 'ВЫБРАТЬ П.Ссылка.СсылкаАтрибут ИЗ &Таблица КАК П'
+    q2 = ('ВЫБРАТЬ П.Ссылка.СсылкаАтрибут ПОМЕСТИТЬ ВТ_П '
+          'ИЗ &Таблица КАК П')
     resp = _call(server, 'check_query', text=q2,
                  tables={'Таблица': {'Ссылка': 'СправочникСсылка.Справочник1'}})
     assert 'OK:' in resp['content'][0]['text']
@@ -544,6 +549,12 @@ def test_check_query_external_tables(tmp_path_factory):
     resp = _call(server, 'check_query', text=q,
                  tables='{"Таблица": ["Ссылка"]}')['content'][0]['text']
     assert 'OK:' in resp
+    # прямое соединение с параметром-таблицей запрещено платформой
+    resp = _call(server, 'check_query',
+                 text='ВЫБРАТЬ Т.Ссылка ИЗ Справочник.Справочник1 КАК Т, '
+                      '&Таблица КАК П ГДЕ Т.Ссылка = П.Ссылка',
+                 tables={'Таблица': ['Ссылка']})['content'][0]['text']
+    assert 'таблица значений &Таблица' in resp
     # временная таблица, созданная в другом методе (односегментная)
     q3 = 'ВЫБРАТЬ В.Колонка ИЗ ВТ КАК В'
     resp = _call(server, 'check_query', text=q3,

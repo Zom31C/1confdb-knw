@@ -911,6 +911,12 @@ def check_query_full(text, ctx, extra_tables=None):
     {имя: {колонка: тип}} либо {имя: [колонки]}. Покрывает параметры-таблицы
     (&Сотрудники, &Периоды) и временные таблицы, созданные в другом методе:
     их поля проверяются строго, цепочки — по указанному типу колонки.
+    Схема параметра-таблицы также задаёт состав ВТ при ВЫБРАТЬ * ПОМЕСТИТЬ.
+
+    Правило таблицы значений (2026-11-17): параметр-источник &ТЗ можно
+    использовать только в помещающем запросе (ВЫБРАТЬ … ПОМЕСТИТЬ <ВТ>
+    ИЗ &ТЗ, единственный источник); прямая выборка и соединения с ним
+    запрещены — ошибка с подсказкой поместить во временную таблицу.
     """
     if extra_tables:
         ctx = _ExtraCtx(ctx, _normalize_extra_tables(extra_tables))
@@ -974,25 +980,40 @@ def _check_query_full(text, ctx):
     temp = {}
     for st in statements:
         if 'destroy' not in st:
-            _collect_puts(st, temp)
+            _collect_puts(st, temp, ctx)
     for st in statements:
         if 'destroy' not in st:
             _check_select(st, ctx, temp, errors, unverified)
     return errors, unverified
 
 
-def _collect_puts(node, temp):
+def _collect_puts(node, temp, ctx=None):
     if node.get('put') and node['put'] not in temp:
-        temp[node['put']] = _select_columns(node)
+        temp[node['put']] = _select_columns(node, _put_star_cols(node, ctx))
     for _, sub in node.get('union', []):
-        _collect_puts(sub, temp)
+        _collect_puts(sub, temp, ctx)
 
 
-def _select_columns(node):
+def _put_star_cols(node, ctx):
+    """Колонки ВТ при ВЫБРАТЬ * ПОМЕСТИТЬ … ИЗ &ТЗ: схема параметра-таблицы.
+
+    Без известной схемы (extra_tables) звёздочка даёт None — поля ВТ не
+    проверяются, как у прочих временных таблиц с неизвестным составом.
+    """
+    src = node.get('source')
+    if not src or src['joins'] or src['base'][0] != 'param':
+        return None
+    extra = getattr(ctx, 'extra', None) if ctx is not None else None
+    if extra and src['base'][1].lower() in extra:
+        return set(extra[src['base'][1].lower()])
+    return None
+
+
+def _select_columns(node, star_cols=None):
     cols = set()
     for item in node['items']:
         if item[0] == 'star':
-            return None
+            return set(star_cols) if star_cols is not None else None
         if item[2]:
             cols.add(item[2])
         elif item[1][0] == 'field':
@@ -1000,15 +1021,64 @@ def _select_columns(node):
     return cols
 
 
+def _check_value_table_usage(node, errors):
+    """Таблица значений (параметр-источник &ТЗ) — только через ПОМЕСТИТЬ.
+
+    Платформа запрещает прямую выборку из параметра-таблицы и любые
+    соединения с ней («Содержимое объекта данных может быть выбрано только
+    во временную таблицу»): единственная законная форма — помещающий запрос
+    ВЫБРАТЬ … ПОМЕСТИТЬ <ВТ> ИЗ &ТЗ, где параметр-таблица — единственный
+    источник. В условиях (В (&ТЗ) и т.п.) параметр использовать можно —
+    это не источник записей, проверка не затрагивает выражения.
+    """
+    src = node.get('source')
+    if not src:
+        return
+    base, joins = src['base'], src['joins']
+    names = [base[1]] if base[0] == 'param' else []
+    names += [s[1] for _, s, _on in joins if s[0] == 'param']
+    if not names:
+        return
+    if joins:
+        for name in names:
+            errors.append(
+                f'таблица значений &{name}: соединение с ней напрямую запрещено '
+                f'— сначала ПОМЕСТИТЬ <ВТ> ИЗ &{name}, соединять уже временную таблицу')
+        return
+    if not node['put']:
+        errors.append(
+            f'таблица значений &{names[0]}: выборка из неё напрямую запрещена '
+            f'— сначала поместите во временную таблицу: '
+            f'ВЫБРАТЬ … ПОМЕСТИТЬ <ВТ> ИЗ &{names[0]}')
+
+
+def _check_value_table_deep(node, errors):
+    """Правило таблицы значений по всему дереву источников запроса.
+
+    Вложенные запросы в ИЗ/СОЕДИНЕНИЕ полностью не проверяются (поля СКД
+    могут достраиваться вне текста), но правило таблицы значений действует
+    и внутри них — обходим только источники-подзапросы. ОБЪЕДИНИТЬ и
+    вложенные запросы в условиях обходятся самим _check_select/_check_expr.
+    """
+    _check_value_table_usage(node, errors)
+    src = node.get('source')
+    if not src:
+        return
+    for source in [src['base']] + [s for _, s, _on in src['joins']]:
+        if source[0] == 'query':
+            _check_value_table_deep(source[1], errors)
+
+
 def _check_select(node, ctx, temp, errors, unverified=None):
     scope = {}
     if node['source']:
+        _check_value_table_deep(node, errors)
         _register_source(node['source']['base'], ctx, temp, scope, errors)
         for _, source, on_expr in node['source']['joins']:
             _register_source(source, ctx, temp, scope, errors)
             _check_expr(on_expr, ctx, scope, errors, unverified)
     if node['put']:
-        temp[node['put']] = _select_columns(node)
+        temp[node['put']] = _select_columns(node, _put_star_cols(node, ctx))
     for item in node['items']:
         if item[0] == 'expr':
             _check_expr(item[1], ctx, scope, errors, unverified)

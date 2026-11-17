@@ -5525,7 +5525,12 @@ TOOLS = [
          '{"ИмяТаблицы": {"Колонка": "Тип", ...}} (or a list of columns) — '
          'covers parameter tables (&Сотрудники, &Периоды) and temp tables '
          'created in another method; column types like СправочникСсылка.Х '
-         'enable reference-chain checks.',
+         'enable reference-chain checks. VALUE TABLE RULE: a value table '
+         'passed as a query parameter (&ТЗ) may ONLY be used as the single '
+         'source of a placing statement (ВЫБРАТЬ … ПОМЕСТИТЬ <ВТ> ИЗ &ТЗ); '
+         'selecting from it directly or joining it is forbidden by the '
+         'platform and reported as an error — join the temp table instead. '
+         'With tables schema given, ВЫБРАТЬ * ПОМЕСТИТЬ inherits its columns.',
          _schema({'text': _STR,
                   'tables': {'type': 'object',
                              'description': 'External table schemas: '
