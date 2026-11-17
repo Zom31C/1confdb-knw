@@ -478,3 +478,129 @@ def test_http_scan_task(tmp_path, monkeypatch):
             time.sleep(0.05)
         assert t['task']['status'] == 'done'
         assert t['task']['result'][0]['status'] == 'new'
+
+
+# ---------- актуальность открытой базы + дозагрузка различий ----------
+
+def _dump_db(tmp_path, name='d.sqlite'):
+    from confdb.dump import build_db
+    from test_dump import make_dump_dir
+    dump = str(tmp_path / 'dump')
+    os.makedirs(dump, exist_ok=True)
+    make_dump_dir(dump)
+    db = str(tmp_path / name)
+    build_db(dump, db, workers=1, build_fts=False, log=lambda *a: None)
+    return dump, db
+
+
+def _first_bsl(dump):
+    import glob
+    return glob.glob(os.path.join(dump, '**', '*.bsl'), recursive=True)[0]
+
+
+def test_db_freshness_and_refresh_dump(tmp_path):
+    from confdb.ui_core import db_freshness, refresh_db
+    dump, db = _dump_db(tmp_path)
+    fr = db_freshness(db)
+    assert fr['status'] == 'current' and fr['can_update'] is False
+    res = refresh_db(db, workers=1, build_fts=False, log=lambda *a: None)
+    assert res['updated'] is False
+    mod = _first_bsl(dump)
+    with open(mod, 'a', encoding='utf-8') as f:
+        f.write('\n// маркер-актуальности\n')
+    fr = db_freshness(db)
+    assert fr['status'] == 'changed' and fr['dirty'] == 1 and fr['can_update']
+    res = refresh_db(db, workers=1, build_fts=False, log=lambda *a: None)
+    assert res['updated'] is True and res['stats']['changed_granules']
+    assert 'дозагружено различий: 1' in res['summary']
+    assert db_freshness(db)['status'] == 'current'
+
+
+def test_refresh_live_server_connection_sees_changes(tmp_path):
+    from confdb.mcp_server import McpServer
+    from confdb.ui_core import refresh_db
+    dump, db = _dump_db(tmp_path)
+    server = McpServer(db)
+    try:
+        conn = server.dbs[server.active]['conn']
+        mod = _first_bsl(dump)
+        with open(mod, 'a', encoding='utf-8') as f:
+            f.write('\n// маркер-живого-сервера\n')
+        res = refresh_db(db, workers=1, build_fts=False, log=lambda *a: None)
+        assert res['updated'] is True
+        # живое read-only соединение сервера видит изменения без переоткрытия
+        assert conn.execute(
+            "SELECT COUNT(*) FROM module WHERE body LIKE '%маркер-живого-сервера%'"
+        ).fetchone()[0] == 1
+    finally:
+        server.close_all()
+
+
+def test_db_freshness_schema_mismatch_blocks_refresh(tmp_path):
+    import sqlite3
+    from confdb.db.writer import SCHEMA_VERSION
+    from confdb.ui_core import db_freshness, refresh_db
+    dump, db = _dump_db(tmp_path)
+    conn = sqlite3.connect(db)
+    conn.execute(f'PRAGMA user_version={SCHEMA_VERSION - 1}')
+    conn.commit()
+    conn.close()
+    fr = db_freshness(db)
+    assert fr['status'] == 'schema' and fr['can_update'] is False
+    with pytest.raises(ValueError, match='пересборка'):
+        refresh_db(db, workers=1, log=lambda *a: None)
+
+
+def test_db_freshness_and_refresh_cf(tmp_path, monkeypatch):
+    from confdb.db.writer import write_db
+    from confdb.extract import file_sha256 as real_sha
+    from confdb.ui_core import db_freshness, refresh_db
+    from test_parity import make_cf_tree
+    tree = tmp_path / 'tree'
+    tree.mkdir()
+    make_cf_tree(str(tree))
+    src = str(tmp_path / 't.cf')
+    with open(src, 'wb') as f:
+        f.write(b'cf')
+    db = str(tmp_path / 'c.sqlite')
+    write_db(str(tree), db, source_file=src, source_sha256='aaa',
+             build_fts=False, workers=1)
+    sha_val = ['aaa']
+    monkeypatch.setattr('confdb.extract.file_sha256',
+                        lambda p, **kw: sha_val[0] if p == src else real_sha(p, **kw))
+    assert db_freshness(db)['status'] == 'current'
+    sha_val[0] = 'bbb'
+    assert db_freshness(db)['status'] == 'changed'
+    monkeypatch.setattr('confdb.extract.decode_tree',
+                        lambda *a, **kw: str(tree))
+    mod = str(tree / 'Catalog' / 'Справочник1' / 'Catalog.obj.bsl')
+    with open(mod, 'a', encoding='utf-8') as f:
+        f.write('\n// маркер-cf\n')
+    res = refresh_db(db, workers=1, build_fts=False, log=lambda *a: None)
+    assert res['updated'] is True
+    assert res['stats']['changed_granules'] == ['Catalog/Справочник1']
+    assert db_freshness(db)['status'] == 'current'
+
+
+def test_http_server_refresh_task(tmp_path, monkeypatch):
+    dump, db = _dump_db(tmp_path)
+    with _http(monkeypatch, tmp_path) as (web, port):
+        _req(port, 'POST', '/api/server/start',
+             {'dbs': [db], 'groups': [], 'port': 0})
+        alias = web.core.runner.server.active
+        mod = _first_bsl(dump)
+        with open(mod, 'a', encoding='utf-8') as f:
+            f.write('\n// маркер-http\n')
+        code, r = _req(port, 'POST', '/api/server/refresh', {'alias': alias})
+        assert code == 200 and r['task']['status'] == 'running'
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            _, t = _req(port, 'GET', '/api/task')
+            if t['task'] and t['task']['status'] != 'running':
+                break
+            time.sleep(0.05)
+        assert t['task']['status'] == 'done', t['task']['error']
+        assert t['task']['result']['updated'] is True
+        assert t['task']['result']['alias'] == alias
+        _req(port, 'POST', '/api/server/stop', {})
+    os.remove(db)

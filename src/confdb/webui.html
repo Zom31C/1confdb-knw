@@ -298,6 +298,8 @@ $("#main").addEventListener("click", async e=>{
     else if(id==="cfg-add-selected"){ await addSelectedGroups(); }
     else if(id==="cfg-replace"){ await applyCfg(true); }
     else if(b.dataset.close){ await api("/api/server/close","POST",{alias:b.dataset.close}); await refresh(true); }
+    else if(b.dataset.srvRefresh){ await api("/api/server/refresh","POST",{alias:b.dataset.srvRefresh});
+      toast("Проверка актуальности и дозагрузка различий запущены","ok"); pollTask(); }
     else if(b.dataset.gclose){ await api("/api/server/group/close","POST",{name:b.dataset.gclose}); await refresh(true); }
     else if(b.dataset.repoSync){ await api("/api/repos/sync","POST",{ids:[b.dataset.repoSync]}); toast("Синхронизация запущена","ok"); pollTask(); }
     else if(b.dataset.repoForce){ if(!confirm("Пересобрать базу полностью (даже без изменений)?"))return;
@@ -420,7 +422,8 @@ function serverStatusHtml(sv){
   const dbs = sv.dbs.map(d=>`<tr>
       <td>${dbBadge(d.path)}</td>
       <td><b>${esc(dbName(d.path))}</b> <span class="pill path">${esc(d.alias)}</span>${d.outdated?' <span class="badge b-outdated">устарела</span>':''}<div class="path">${esc(d.path)}</div></td>
-      <td><button class="btn ghost sm" data-close="${esc(d.alias)}">закрыть</button></td></tr>`).join("")
+      <td><button class="btn ghost sm" data-srv-refresh="${esc(d.alias)}" title="Проверить актуальность исходника и дозагрузить различия инкрементально, без остановки сервера">Актуальность</button>
+      <button class="btn ghost sm" data-close="${esc(d.alias)}">закрыть</button></td></tr>`).join("")
     || `<tr><td colspan="3" class="empty">Нет открытых баз.</td></tr>`;
   const groups = sv.groups.map(g=>`<tr>
       <td><b>${esc(g.name)}</b><div class="muted small">${esc(g.aliases.join(", "))||"(пусто)"}</div></td>
@@ -1023,6 +1026,8 @@ async function pollTask(){
         else if(task.kind==="repos"){ const rs=task.result||[]; const bad=rs.filter(x=>!x.ok).length;
           toast("Git-синхронизация: "+(rs.length-bad)+" ОК, ошибок: "+bad, bad?"err":"ok"); }
         else if(task.kind==="repos-auth"){ toast("Авторизация git успешна — запустите синхронизацию","ok"); }
+        else if(task.kind==="srv-refresh"){ const r=task.result||{};
+          toast((r.alias?r.alias+": ":"")+(r.summary||"готово"), r.updated?"ok":"info"); }
         else toast("Задача завершена","ok");
         await refresh();
       } else { toast(task.error||"Ошибка задачи","err"); }

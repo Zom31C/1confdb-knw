@@ -85,6 +85,124 @@ def _is_dump_db(db_path):
         conn.close()
 
 
+def db_freshness(db_path):
+    """Актуальность базы знаний относительно её исходника (для живой базы).
+
+    {'status', 'detail', 'can_update', 'dirty', 'source'}:
+      'current' — исходник не менялся (cf: SHA-256 совпал; dump: состав совпал);
+      'changed' — есть различия, можно дозагрузить инкрементально при живом
+                  сервере (can_update=True);
+      'schema'  — другая ревизия схемы: нужна полная пересборка со остановкой
+                  сервера (can_update=False);
+      'rebuild' — база без состояния выгрузки: нужна полная пересборка;
+      'missing' — исходник не найден на диске; 'unknown' — нет строки source.
+    Проверка дешёвая: cf — потоковый SHA-256, dump — stat-обход + хэши только
+    изменённых файлов (scan_changes), без распаковки.
+    """
+    import sqlite3
+
+    from .db.writer import SCHEMA_VERSION
+    from .extract import file_sha256, source_info
+    out = {'status': 'unknown', 'detail': '', 'can_update': False,
+           'dirty': 0, 'source': ''}
+    info = source_info(db_path)
+    if not info:
+        out['detail'] = 'в базе нет строки source — происхождение неизвестно'
+        return out
+    src = info.get('file') or ''
+    out['source'] = src
+    uri = 'file:' + os.path.abspath(db_path).replace(os.sep, '/') + '?mode=ro'
+    try:
+        conn = sqlite3.connect(uri, uri=True)
+    except sqlite3.Error as err:
+        out['detail'] = f'база не читается: {err}'
+        return out
+    try:
+        rev = conn.execute('PRAGMA user_version').fetchone()[0]
+    finally:
+        conn.close()
+    if rev != SCHEMA_VERSION:
+        out.update(status='schema',
+                   detail=f'ревизия схемы базы {rev} ≠ {SCHEMA_VERSION}: нужна '
+                          f'полная пересборка (остановите сервер)')
+        return out
+    if not src or not os.path.exists(src):
+        out.update(status='missing', detail=f'исходник не найден: {src or "?"}')
+        return out
+    if os.path.isdir(src):
+        if not _is_dump_db(db_path):
+            out.update(status='rebuild',
+                       detail='база без состояния выгрузки (dump_state) — '
+                              'нужна полная пересборка (остановите сервер)')
+            return out
+        from .dump import model as dump_model
+        from .dump.update import scan_changes
+        try:
+            _objects, granule_files, _warnings = dump_model.scan(src)
+            conn = sqlite3.connect(uri, uri=True)
+            try:
+                dirty, _current, _stored = scan_changes(conn, src, granule_files)
+            finally:
+                conn.close()
+        except (sqlite3.Error, OSError, ValueError) as err:
+            out.update(status='unknown', detail=f'состояние не читается: {err}')
+            return out
+        out['dirty'] = len(dirty)
+        if dirty:
+            out.update(status='changed', can_update=True,
+                       detail=f'изменённых гранул выгрузки: {len(dirty)}')
+        else:
+            out.update(status='current', detail='выгрузка соответствует базе')
+        return out
+    ext = os.path.splitext(src)[1].lower()
+    if ext in CF_EXTS:
+        sha = file_sha256(src)
+        if sha == info.get('file_sha256'):
+            out.update(status='current', detail='SHA-256 исходника совпал')
+        else:
+            out.update(status='changed', can_update=True,
+                       detail='исходник изменился (SHA-256 другой); состав '
+                              'изменённых гранул определится при обновлении')
+        return out
+    out['detail'] = f'неизвестный тип исходника: {src}'
+    return out
+
+
+def refresh_db(db_path, log=print, workers=None, build_fts=None,
+               store_blobs=False):
+    """Проверяет актуальность базы и дозагружает различия инкрементально.
+
+    Работает при ЖИВОМ MCP-сервере: dump — update_db (WAL + hot reload),
+    cf — update_cf (гранулы cf_granule). Если база актуальна — ничего не
+    делает; если нужна полная пересборка (ревизия/без состояния) — внятная
+    ошибка «остановите сервер», без попытки тронуть файл живой базы.
+    Возвращает {'updated', 'summary', 'freshness', 'stats'?}.
+    """
+    fr = db_freshness(db_path)
+    if fr['status'] == 'current':
+        return {'updated': False, 'freshness': fr,
+                'summary': 'база актуальна: исходник не менялся'}
+    if not fr['can_update']:
+        raise ValueError(fr['detail'])
+    if workers is None:
+        workers = bench_workers() or 1
+    src = fr['source']
+    if os.path.isdir(src):
+        from .dump import update_db
+        stats = update_db(src, db_path, workers=workers,
+                          rebuild_fts=build_fts, log=log)
+    else:
+        from .cf_update import update_cf
+        stats = update_cf(src, db_path, workers=workers,
+                          rebuild_fts=build_fts, store_blobs=store_blobs,
+                          log=log)
+    dirty = len(stats.get('changed_granules') or [])
+    summary = (f'дозагружено различий: {dirty} гранул' if dirty
+               else 'изменений не оказалось — база актуальна')
+    return {'updated': True, 'stats': stats, 'freshness': db_freshness(db_path),
+            'summary': summary}
+
+
 def cf_candidates(extra_dirs=()):
     """Файлы 1С для выбора: текущий каталог, корень проекта, cf/, доп. каталоги."""
     roots = [os.getcwd(), _project_root()]
@@ -1132,6 +1250,15 @@ class UiCore:
     def server_close_db(self, alias):
         self._server().close_db(alias)
         return self.server_status()
+
+    def server_db_refresh(self, alias, log=print):
+        """Актуальность открытой базы + дозагрузка различий (живой сервер)."""
+        path = self._server().dbs[alias]['path']
+        result = refresh_db(path, log=log, workers=self.workers,
+                            build_fts=None if self.build_fts else False,
+                            store_blobs=self.store_blobs)
+        result['alias'] = alias
+        return result
 
     def server_create_group(self, name):
         self._server().create_group(name)

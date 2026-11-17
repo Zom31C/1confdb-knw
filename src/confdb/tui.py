@@ -1272,6 +1272,7 @@ class Tui:
             print(' 7. Удалить группу конфигураций')
             print(' 8. Журнал запросов LLM (ответы сервера)')
             print(' 9. Журнал LLM: включить/выключить запись в базу')
+            print(' 10. Проверить актуальность базы и дозагрузить различия')
             print(' 0. Остановить сервер и выйти')
             choice = input('Выбор: ').strip()
             if choice == '0':
@@ -1392,6 +1393,29 @@ class Tui:
                           else 'Запись журнала LLM выключена.')
                 except ValueError as err:
                     print(f'Ошибка: {err}')
+                input('Нажмите Enter…')
+            elif choice == '10':
+                if not aliases:
+                    print('Нет открытых баз.')
+                    input('Нажмите Enter…')
+                    continue
+                for i, a in enumerate(aliases, 1):
+                    print(f'  {i}. {a}' + schema_tail(server, a))
+                pick = _ask('Номер базы для проверки актуальности')
+                if pick.isdigit() and 1 <= int(pick) <= len(aliases):
+                    from .ui_core import db_freshness, refresh_db
+                    path = server.dbs[aliases[int(pick) - 1]]['path']
+                    fr = db_freshness(path)
+                    print(f'{fr["status"]}: {fr["detail"]}')
+                    if fr['can_update']:
+                        try:
+                            res = refresh_db(
+                                path, workers=self.workers,
+                                build_fts=None if self.build_fts else False,
+                                store_blobs=self.store_blobs)
+                            print(res['summary'])
+                        except ValueError as err:
+                            print(f'Ошибка: {err}')
                 input('Нажмите Enter…')
             else:
                 print('Неизвестный пункт.')

@@ -335,6 +335,13 @@ def make_handler(web):
                 return {'alias': alias, 'status': status}
             if path == '/api/server/close':
                 return {'status': core.server_close_db(data['alias'])}
+            if path == '/api/server/refresh':
+                if tasks.busy():
+                    raise ValueError('уже выполняется задача')
+                alias = data['alias']
+                return {'task': tasks.start(
+                    'srv-refresh', f'Актуальность базы {alias}',
+                    lambda: core.server_db_refresh(alias))}
             if path == '/api/server/group/create':
                 return {'status': core.server_create_group(data['name'])}
             if path == '/api/server/group/add':
