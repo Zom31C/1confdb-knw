@@ -714,6 +714,47 @@ def test_update_no_changes(env):
     assert stats['objects'] == 0
 
 
+def test_update_schema_mismatch_full_rebuild(env):
+    """Прежняя ревизия схемы: инкремент её не поднимает — полная пересборка.
+
+    Иначе база навсегда оставалась бы «устаревшей» для сервера новой ревизии,
+    сколько ни запускай extract/update (жалоба пользователя 2026-11-17).
+    """
+    from confdb.db.writer import SCHEMA_VERSION
+    dump, path = env
+    conn = sqlite3.connect(path)
+    conn.execute(f'PRAGMA user_version={SCHEMA_VERSION - 1}')
+    conn.commit()
+    conn.close()
+    stats = _update(env)
+    assert 'changed_granules' not in stats      # признак полной сборки
+    conn = _conn(path)
+    try:
+        assert conn.execute('PRAGMA user_version').fetchone()[0] == SCHEMA_VERSION
+        assert conn.execute('SELECT root_name FROM source').fetchone()[0]
+    finally:
+        conn.close()
+
+
+def test_update_schema_mismatch_live_server_guard(env):
+    """Полная пересборка при живом MCP-сервере невозможна — внятная ошибка."""
+    import json
+    from confdb.db.writer import SCHEMA_VERSION
+    dump, path = env
+    conn = sqlite3.connect(path)
+    conn.execute(f'PRAGMA user_version={SCHEMA_VERSION - 1}')
+    conn.commit()
+    conn.close()
+    pidfile = path + '.server.json'
+    with open(pidfile, 'w', encoding='utf-8') as f:
+        json.dump({'pid': os.getpid(), 'port': 8765}, f)
+    try:
+        with pytest.raises(ValueError, match='MCP-сервер'):
+            _update(env)
+    finally:
+        os.remove(pidfile)
+
+
 def test_update_module_body(env):
     dump, db = env
     before = _conn(db)

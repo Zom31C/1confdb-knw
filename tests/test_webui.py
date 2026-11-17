@@ -414,6 +414,23 @@ def test_db_meta_classification(tmp_path):
     assert db_meta(str(tmp_path / 'нет.sqlite'))['ext'] == ''
 
 
+def test_db_meta_dump_classification(tmp_path):
+    """dump-база: source.file — каталог выгрузки → тип 'dump', имя конфигурации."""
+    import os
+    from confdb.dump import build_db
+    from confdb.ui_core import db_meta
+    from test_dump import make_dump_dir
+    dump = str(tmp_path / 'dump')
+    os.makedirs(dump)
+    make_dump_dir(dump)
+    db = str(tmp_path / 'dump.sqlite')
+    build_db(dump, db, workers=1, build_fts=False, log=lambda *a: None)
+    meta = db_meta(db)
+    assert meta['ext'] == 'dump'
+    assert meta['name']
+    assert meta['root_type'] == 'Configuration'
+
+
 def test_http_state_includes_db_meta(tmp_path, monkeypatch):
     db = _real_db(tmp_path, 'мета.sqlite')
     with _http(monkeypatch, tmp_path) as (web, port):

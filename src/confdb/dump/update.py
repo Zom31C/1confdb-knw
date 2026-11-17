@@ -335,6 +335,13 @@ def update_db(dump_dir, db_path, *, workers=1, rebuild_fts=None, log=print):
     db_path = os.path.abspath(db_path)
 
     def _full(reason):
+        if os.path.isfile(db_path):
+            server = read_server_pidfile(db_path)
+            if server:
+                raise ValueError(
+                    f'полная пересборка невозможна: базу держит MCP-сервер '
+                    f'(pid {server.get("pid")}). Остановите сервер и повторите; '
+                    'частичное обновление работает и при запущенном сервере.')
         log(reason)
         return build_db(dump_dir, db_path, workers=workers,
                         build_fts=rebuild_fts if rebuild_fts is not None else True,
@@ -351,6 +358,14 @@ def update_db(dump_dir, db_path, *, workers=1, rebuild_fts=None, log=print):
                 'SELECT COUNT(*) FROM dump_state').fetchone()[0]:
             conn.close()
             return _full('База собрана не из выгрузки — полная пересборка.')
+        # инкремент не меняет схему: база прежней ревизии навсегда осталась бы
+        # «устаревшей» для сервера — при несовпадении ревизии полная пересборка
+        from ..db.writer import SCHEMA_VERSION
+        rev = conn.execute('PRAGMA user_version').fetchone()[0]
+        if rev != SCHEMA_VERSION:
+            conn.close()
+            return _full(f'База ревизии схемы {rev} (текущая {SCHEMA_VERSION}) '
+                         '— полная пересборка.')
     except sqlite3.Error as err:
         conn.close()
         return _full(f'База не читается ({err}) — полная пересборка.')

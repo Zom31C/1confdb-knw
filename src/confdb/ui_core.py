@@ -377,7 +377,11 @@ def db_meta(db_path):
     if cached and cached[0] == key:
         return cached[1]
     info = source_info(db_path) or {}
-    ext = os.path.splitext(info.get('file') or '')[1].lstrip('.').lower()
+    src_file = info.get('file') or ''
+    ext = os.path.splitext(src_file)[1].lstrip('.').lower()
+    if not ext and os.path.isdir(src_file):
+        # у dump-баз source.file — каталог выгрузки, не файл 1С
+        ext = 'dump'
     meta = {'ext': ext, 'name': info.get('root_name'),
             'root_type': info.get('root_type')}
     _DB_META_CACHE[db_path] = (key, meta)
