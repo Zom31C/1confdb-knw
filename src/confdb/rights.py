@@ -414,10 +414,16 @@ def parse_role_rights(data):
                       rls_templates=tuple(templates), flags=flags)
 
 
-def parse_role_file(directory, file_name='Role.0.c1brace'):
-    """Прочитать и разобрать файл прав роли из каталога дампа."""
+def parse_role_file(directory, file_name='Role.0.c1brace', raw=None):
+    """Прочитать и разобрать файл прав роли из каталога дампа.
+
+    `raw` — байты файла (виртуальное дерево stream-сборки): разбор из памяти,
+    без обращения к диску.
+    """
     from .v8 import helper
 
+    if raw is not None:
+        return parse_role_rights(helper.brace_read_bytes(raw, file_name))
     return parse_role_rights(helper.brace_file_read(directory, file_name))
 
 

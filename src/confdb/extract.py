@@ -207,8 +207,43 @@ def decode_tree(src_file, temp_dir, options=None, workers=1, dump_dir=None,
     return stage3
 
 
+def decode_tree_stream(src_file, temp_dir, options=None, workers=1):
+    """Стадии 0/1 + декодирование сразу в виртуальное дерево (без диска стадии 3).
+
+    Возвращает (virtual_root, payload_dir, headers_dir): файлы декодера
+    перехватываются на уровне I/O и пишутся потоком payload-<pid>.pkl (v8/helper),
+    запись БД читает их как дерево {rel-путь: байты}; заголовки дополнительно идут
+    быстрым потоком headers_dir. Дисковое дерево стадии 3 не создаётся — экономия
+    записи, обратного чтения и очистки. Для полной сборки БД; cf-инкремент и дамп
+    используют decode_tree с дисковым деревом.
+    """
+    from .v8 import helper
+    if options is None:
+        options = {}
+    stage0 = os.path.join(temp_dir, 'decode_stage_0')
+    stage1 = os.path.join(temp_dir, 'decode_stage_1')
+    print(f'Стадия 0: читаем контейнеры {src_file}')
+    container_reader.extract(src_file, stage0, deflate=False, recursive=False)
+    print('Стадия 1: разжимаем файлы контейнеров')
+    container_reader.decompress_and_extract(stage0, stage1)
+    virtual_root = os.path.join(temp_dir, 'decode_stage_3')
+    payload_dir = os.path.join(temp_dir, 'payload')
+    headers_dir = os.path.join(temp_dir, 'headers')
+    decode_options = dict(options)
+    decode_options['stream_root'] = virtual_root
+    decode_options['stream_sink'] = payload_dir
+    decode_options['header_sink'] = headers_dir
+    # заголовки идут и в быстрый поток (запись БД), и в виртуальное дерево
+    # (отпечатки гранул cf_granule считают все файлы, включая заголовки)
+    decode_options['dump_headers'] = True
+    print('Стадия 3: декодируем метаданные в поток (без диска)')
+    v8_decoder.decode(stage1, virtual_root, options=decode_options, workers=workers)
+    helper.stream_end()
+    return virtual_root, payload_dir, headers_dir
+
+
 def extract(src_file, *, db_path=None, dump_dir=None, temp_dir=None, keep_temp=False, options=None,
-            workers=1, build_fts=True, source_sha256=None):
+            workers=1, build_fts=True, source_sha256=None, stream=None):
     """Распаковывает файл 1С и (опционально) загружает результат в SQLite.
 
     :param src_file: путь к .cf/.cfe/.epf
@@ -224,6 +259,10 @@ def extract(src_file, *, db_path=None, dump_dir=None, temp_dir=None, keep_temp=F
     :param source_sha256: готовый отпечаток исходного файла (`file_sha256`).
         None — посчитать здесь; вызывающая сторона передаёт его, когда уже
         считала для проверки «не та же ли это конфигурация»
+    :param stream: полная сборка БД потоком мимо дискового дерева стадии 3
+        (декодер отдаёт файлы в память, запись читает их оттуда). None — авто:
+        включено для сборки БД без дампа; False — дисковое дерево (`--no-stream`,
+        отладка). На сборку дампа (`dump_dir`) и инкремент не влияет
     :return: словарь со статистикой
     """
     src_file = os.path.abspath(src_file)
@@ -232,6 +271,11 @@ def extract(src_file, *, db_path=None, dump_dir=None, temp_dir=None, keep_temp=F
 
     if options is None:
         options = {}
+
+    # stream=None — авто: полная сборка БД (без дампа) идёт потоком мимо диска
+    # стадии 3; явные True/False переопределяют (False — дисковое дерево, --no-stream)
+    if stream is None:
+        stream = bool(db_path) and not dump_dir
 
     # отпечаток исходника пишется в source: по нему повторное извлечение той же
     # конфигурации видно до распаковки, а две базы — сравниваются на происхождение
@@ -248,21 +292,44 @@ def extract(src_file, *, db_path=None, dump_dir=None, temp_dir=None, keep_temp=F
              'temp_dir': temp_dir, 'dump_dir': dump_dir, 'db': db_path}
     begin = datetime.now()
     try:
-        headers_dir = os.path.join(temp_dir, 'headers') if db_path else None
-        stage3 = decode_tree(src_file, temp_dir, options=options, workers=workers,
-                             dump_dir=dump_dir, headers_dir=headers_dir)
-
-        if db_path:
-            # импорт здесь, чтобы не тянуть sqlite при работе без БД
+        if stream and db_path and not dump_dir:
+            # полная сборка без дискового дерева стадии 3: декодер отдаёт файлы
+            # потоком, запись БД читает их из памяти (v8/helper.payload_read)
+            from .v8 import helper
             from .db.writer import write_db
+            virtual_root, payload_dir, headers_dir = decode_tree_stream(
+                src_file, temp_dir, options=options, workers=workers)
+            vt = helper.payload_read(payload_dir)
             db_path = os.path.abspath(db_path)
-            print(f'Пишем базу данных {db_path}')
-            stats['db_rows'] = write_db(stage3, db_path, source_file=src_file,
+            print(f'Пишем базу данных {db_path} (поток, без диска стадии 3)')
+            stats['db_rows'] = write_db(virtual_root, db_path, source_file=src_file,
                                         source_sha256=source_sha256,
                                         source_size=src_size,
                                         store_blobs=options.get('store_blobs', False),
                                         workers=workers, build_fts=build_fts,
-                                        headers_dir=headers_dir)
+                                        headers_dir=headers_dir, virtual_tree=vt)
+            stats['stream'] = True
+        else:
+            # Дисковое дерево (--no-stream или дамп). Поток заголовков включаем
+            # только когда дерево дампа и так пишет заголовки (dump_dir). Для
+            # --no-stream сборки БД дерево полное, с заголовками: отпечатки гранул
+            # cf_granule тогда совпадают с cf_update (он считает по полному дереву
+            # с заголовками); sink-дерево без заголовков давало бы рассинхрон.
+            headers_dir = os.path.join(temp_dir, 'headers') if (db_path and dump_dir) else None
+            stage3 = decode_tree(src_file, temp_dir, options=options, workers=workers,
+                                 dump_dir=dump_dir, headers_dir=headers_dir)
+
+            if db_path:
+                # импорт здесь, чтобы не тянуть sqlite при работе без БД
+                from .db.writer import write_db
+                db_path = os.path.abspath(db_path)
+                print(f'Пишем базу данных {db_path}')
+                stats['db_rows'] = write_db(stage3, db_path, source_file=src_file,
+                                            source_sha256=source_sha256,
+                                            source_size=src_size,
+                                            store_blobs=options.get('store_blobs', False),
+                                            workers=workers, build_fts=build_fts,
+                                            headers_dir=headers_dir)
 
         stats['dump_dir'] = dump_dir if dump_dir else None
     finally:

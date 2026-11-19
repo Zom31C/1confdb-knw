@@ -98,7 +98,7 @@ class MetaObject:
                 obj_data = _metadata[j + 2]
                 if isinstance(obj_data, str):
                     if j == 0:
-                        os.mkdir(long_path(os.path.join(dest_dir, new_dest_path)))
+                        helper.makedirs(os.path.join(dest_dir, new_dest_path), exist_ok=True)
 
                     tasks.append([metadata_type.name,
                                   [src_dir, obj_data, dest_dir, new_dest_path, self.container_uuid, self.options]])
@@ -111,7 +111,7 @@ class MetaObject:
                     except Exception as err:
                         continue
                     if j == 0:
-                        os.mkdir(long_path(os.path.join(dest_dir, new_dest_path)))
+                        helper.makedirs(os.path.join(dest_dir, new_dest_path), exist_ok=True)
                     obj_uuid = handler.decode_internal_include(self, obj_data, src_dir, dest_dir, new_dest_path,
                                                                self.options)
                     if not auto_include:
@@ -221,7 +221,7 @@ class MetaObject:
             file_name = f'{self.header["uuid"]}.{file_number}'
             file_size = os.path.getsize(os.path.join(src_dir, file_name))
             if file_size > 1000000:  # если файл больше мегабайте не разбираем
-                shutil.copy2(
+                helper.copy_file(
                     os.path.join(src_dir, file_name),
                     os.path.join(dest_dir, f'{dest_file_name}.bin')
                 )
@@ -266,7 +266,7 @@ class MetaObject:
         if self._unknown_binary:
             for elem in self._unknown_binary:
                 try:
-                    shutil.copy2(
+                    helper.copy_file(
                         os.path.join(src_dir, f'{self.header["uuid"]}.{self._unknown_binary[elem]}'),
                         os.path.join(dest_dir, f'{dest_file_name}.{elem}.bin')
                     )

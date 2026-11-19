@@ -48,6 +48,11 @@ def build_parser():
                    help='писать JSON дампа с отступами, как v8unpack — для побайтового '
                         'сравнения дампов; по умолчанию вывод компактный, с ним стадия 3 '
                         'заметно быстрее, а дамп примерно втрое меньше')
+    p.add_argument('--no-stream', action='store_true',
+                   help='полная сборка БД через дисковое дерево стадии 3 (как раньше): '
+                        'декодер пишет файлы на диск, запись читает их обратно. По умолчанию '
+                        'полная сборка идёт потоком мимо диска (быстрее, без дерева стадии 3); '
+                        'флаг нужен для отладки дампа. На --dump и инкремент не влияет')
 
     c = subparsers.add_parser('check', help='проверить запросы СКД в готовой базе')
     c.add_argument('db', help='путь к базе SQLite')
@@ -740,6 +745,7 @@ def main(argv=None):
             workers=args.workers,
             build_fts=not args.no_fts,
             source_sha256=src_sha256,
+            stream=False if args.no_stream else None,
         )
     except FileNotFoundError as err:
         print(f'Файл не найден: {err}', file=sys.stderr)

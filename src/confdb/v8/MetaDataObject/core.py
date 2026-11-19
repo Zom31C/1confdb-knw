@@ -119,6 +119,6 @@ class SimpleWithInfo(Simple):
         try:
             _src = os.path.join(src_dir, f'{self.header["uuid"]}.0')
             _dest = os.path.join(dest_dir, self.new_dest_path, f'{self.new_dest_file_name}.0.c1brace')
-            shutil.copy2(_src, _dest)
+            helper.copy_file(_src, _dest)
         except FileNotFoundError:
             return

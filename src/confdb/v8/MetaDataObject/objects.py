@@ -95,7 +95,7 @@ class Template2(Simple):
 
     def decode_scheme_data(self, src_dir, dest_dir, write, *, extension='bin'):
         try:
-            shutil.copy2(
+            helper.copy_file(
                 os.path.join(src_dir, f'{self.header["uuid"]}.0'),
                 os.path.join(self.new_dest_dir, f'{self.new_dest_file_name}.{extension}')
             )
@@ -122,14 +122,14 @@ class Template2(Simple):
         try:
             data = helper.brace_file_read(src_dir, filename)
         except BigBase64:
-            shutil.copy2(os.path.join(src_dir, filename),
-                         os.path.join(self.new_dest_dir, f'{self.new_dest_file_name}.c1b64'))
+            helper.copy_file(os.path.join(src_dir, filename),
+                             os.path.join(self.new_dest_dir, f'{self.new_dest_file_name}.c1b64'))
             return
         except FileNotFoundError:
             file_name = f'{self.header["uuid"]}.0'
             if os.path.isfile(os.path.join(src_dir, file_name)):
                 # todo сюда можно вставить выдергивание бинарника из файла если кому то хочется
-                shutil.copy2(
+                helper.copy_file(
                     os.path.join(src_dir, file_name),
                     os.path.join(self.new_dest_dir, f'{self.new_dest_file_name}')
                 )
@@ -917,7 +917,7 @@ class WSReference(Simple):
         dest = os.path.join(self.new_dest_dir, self.header["name"], self.__class__.__name__)
         if not os.path.isdir(src):
             return
-        shutil.copytree(src, dest)
+        helper.copy_tree(src, dest)
 
 
 # --- MetaDataObject/WebService.py ---

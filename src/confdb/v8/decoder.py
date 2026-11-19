@@ -189,6 +189,8 @@ class Decoder:
             progress.start('Декодируем метаданные', total)
         try:
             decoder = cls.detect_version(src_dir, options=options)
+            if options and options.get('stream_sink'):
+                helper.stream_begin(options['stream_root'], options['stream_sink'])
             helper.clear_dir(dest_dir)
             tasks = decoder.decode(src_dir, dest_dir)  # возвращает список вложенных объектов MetaDataObject
             while tasks:  # рекурсивно декодируем вложенные объекты MetaDataObject
@@ -202,6 +204,7 @@ class Decoder:
             # поток заголовков должен попасть на диск до того, как его прочитает
             # запись БД: в рабочих процессах его закрывает atexit, здесь — свой
             helper.sink_close()
+            helper.payload_close()
         if err_count.value:
             print(f'ВНИМАНИЕ: пропущено объектов с ошибками декодирования: '
                   f'{err_count.value} — дамп и база неполные.')
@@ -210,6 +213,8 @@ class Decoder:
     @classmethod
     def decode_include(cls, params):
         include_type, (obj_uuid, src_dir, dest_dir, new_dest_path, parent_container_uuid, options) = params
+        if options and options.get('stream_sink'):
+            helper.stream_begin(options['stream_root'], options['stream_sink'])
         try:
             handler = helper.get_class_metadata_object(include_type)
             tasks = handler.decode(obj_uuid, src_dir, dest_dir, new_dest_path, options,
@@ -240,4 +245,11 @@ def decode(src_dir, dest_dir, *, pool=None, options=None, workers=1):
     _src_dir = os.path.join(src_dir, containers[-1])
     Decoder.decode(_src_dir, dest_dir, pool=pool, options=options, workers=workers)
     if containers_count == 2:
-        shutil.make_archive(os.path.join(dest_dir, 'dummy'), 'zip', os.path.join(src_dir, '0'))
+        dummy_base = os.path.join(dest_dir, 'dummy')
+        shutil.make_archive(dummy_base, 'zip', os.path.join(src_dir, '0'))
+        if helper.stream_active():
+            dummy_zip = dummy_base + '.zip'
+            with open(helper.long_path(dummy_zip), 'rb') as file:
+                helper._stream_put(dest_dir, 'dummy.zip', file.read())
+            os.remove(helper.long_path(dummy_zip))
+            helper.payload_close()

@@ -141,21 +141,25 @@ def _type(el, prefixes):
     }
 
 
-def parse_package(path):
+def parse_package(path, raw=None):
     """Состав пакета XDTO: {'namespace', 'imports', 'types', 'props'} или None.
 
     'props' — свойства, объявленные прямо в пакете (вне типов). None — файл не
     является пакетом XDTO (другой бинарный макет, битый XML): вызывающий код
-    тогда не пишет ничего, а не пустые таблицы.
+    тогда не пишет ничего, а не пустые таблицы. `raw` — байты файла из
+    виртуального дерева (stream-сборка), чтобы не читать диск.
     """
     try:
-        with open(helper.long_path(path), 'rb') as f:
-            # проверка по началу файла: макеты (.mxl и т.п.) бывают большими,
-            # читать их целиком ради ответа «это не пакет XDTO» незачем
-            if not f.read(64).lstrip(b'\xef\xbb\xbf \t\r\n').startswith(b'<package'):
-                return None
-            f.seek(0)
-            raw = f.read()
+        if raw is None:
+            with open(helper.long_path(path), 'rb') as f:
+                # проверка по началу файла: макеты (.mxl и т.п.) бывают большими,
+                # читать их целиком ради ответа «это не пакет XDTO» незачем
+                if not f.read(64).lstrip(b'\xef\xbb\xbf \t\r\n').startswith(b'<package'):
+                    return None
+                f.seek(0)
+                raw = f.read()
+        elif not raw[:64].lstrip(b'\xef\xbb\xbf \t\r\n').startswith(b'<package'):
+            return None
     except OSError:
         return None
     try:

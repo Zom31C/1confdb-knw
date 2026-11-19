@@ -9,6 +9,7 @@
 (порядок братьев из заголовка родителя), секции — по type, состав подсистем —
 в subsystem_content.
 """
+import errno
 import json
 import os
 import re
@@ -191,7 +192,7 @@ def _unquote(value):
 
 def _read_refmap(path):
     """Таблица {ссылочный uuid: имя объекта} из потока .10 корневого объекта."""
-    if not os.path.isfile(path):
+    if not _vexists(path):
         return {}
     try:
         data = _read_json(path)[0][3]
@@ -1098,11 +1099,14 @@ def _extract_predefined(bin_path, header=None):
     Вторая '#' неоднозначна (у справочника — родитель, у ПВХ — тип значения) и не
     используется. Формат — страница знаний predefined-structure.
     """
-    if not os.path.isfile(bin_path):
+    if not _vexists(bin_path):
         return [], []
     try:
-        data = helper.brace_file_read(os.path.dirname(bin_path),
-                                      os.path.basename(bin_path))
+        if _VIRTUAL is not None:
+            data = helper.brace_read_bytes(_vbytes(bin_path), os.path.basename(bin_path))
+        else:
+            data = helper.brace_file_read(os.path.dirname(bin_path),
+                                          os.path.basename(bin_path))
         wrapper = data[0][1]
         columns = _predef_columns(wrapper[1])
         pos_to_col, top_rows = _predef_rows(wrapper[2])
@@ -1647,6 +1651,8 @@ def _scan_tree(root):
     Порядок совпадает с прежним os.walk + sorted(filenames): каталоги в порядке
     scandir, файлы по имени (от него зависят id строк в базе).
     """
+    if _VIRTUAL is not None:
+        return _scan_tree_virtual(root)
     result = []
 
     def rec(dirpath):
@@ -1661,10 +1667,39 @@ def _scan_tree(root):
                     files.append((entry.name, entry.stat().st_size))
         files.sort()
         result.append((dirpath, files))
-        for name in dirs:
+        for name in sorted(dirs):
             rec(os.path.join(dirpath, name))
 
     rec(root)
+    return result
+
+
+def _scan_tree_virtual(root):
+    """Снимок виртуального дерева {rel: байты} в формате _scan_tree.
+
+    Каталоги и файлы по имени (детерминированный порядок id строк); размер —
+    длина байтов (побайтово совпадает с дисковым файлом, включая CRLF).
+    """
+    files_by_dir = {}
+    subdirs = {}
+    for rel, data in _VIRTUAL.items():
+        d, name = os.path.split(rel)
+        files_by_dir.setdefault(d, []).append((name, len(data)))
+        parts = d.split('/') if d else []
+        for i in range(len(parts)):
+            parent = '/'.join(parts[:i])
+            child = '/'.join(parts[:i + 1])
+            subdirs.setdefault(parent, set()).add(child)
+    files_by_dir.setdefault('', [])
+    result = []
+
+    def rec(drel):
+        dirpath = os.path.join(root, drel.replace('/', os.sep)) if drel else root
+        result.append((dirpath, sorted(files_by_dir.get(drel, []))))
+        for child in sorted(subdirs.get(drel, [])):
+            rec(child)
+
+    rec('')
     return result
 
 
@@ -1712,11 +1747,61 @@ def _find_objects(tree, dump_dir):
     return objects
 
 
+# --- виртуальное дерево стадии 3 (stream-сборка): запись читает из памяти ---
+#
+# При полной сборке без дискового дерева декодер отдаёт файлы потоком
+# (v8/helper.payload_read); write_db получает их словарём {rel-путь: байты} и
+# читает через _vbytes/_vtext/_vexists вместо диска. В инкременте cf и при
+# чтении готового дампа _VIRTUAL is None — те же функции читают диск как раньше.
+_VIRTUAL = None       # {rel-путь через '/': байты файла}
+_VIRTUAL_ROOT = None  # абсолютный корень виртуального дерева (dump_dir)
+
+
+def _vrel(path):
+    return os.path.relpath(path, _VIRTUAL_ROOT).replace(os.sep, '/')
+
+
+def _vbytes(path):
+    """Байты файла дампа: из виртуального дерева (stream) или с диска.
+
+    Отсутствие файла в виртуальном дереве даёт FileNotFoundError как open() на
+    диске — чтобы состояния ошибок (например, role_rights_state.error) совпадали.
+    """
+    if _VIRTUAL is not None:
+        rel = _vrel(path)
+        if rel not in _VIRTUAL:
+            raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT),
+                                    helper.long_path(path))
+        return _VIRTUAL[rel]
+    with open(helper.long_path(path), 'rb') as f:
+        return f.read()
+
+
+def _vexists(path):
+    if _VIRTUAL is not None:
+        return _vrel(path) in _VIRTUAL
+    return os.path.isfile(helper.long_path(path))
+
+
+def _vtext(path):
+    """Текст файла с универсальными переводами строк — как чтение в текстовом
+    режиме (utf-8-sig → windows-1251 → utf-8 replace)."""
+    raw = _vbytes(path)
+    for encoding in ('utf-8-sig', 'windows-1251'):
+        try:
+            text = raw.decode(encoding)
+            break
+        except UnicodeDecodeError:
+            continue
+    else:
+        text = raw.decode('utf-8', errors='replace')
+    return text.replace('\r\n', '\n').replace('\r', '\n')
+
+
 def _read_json(path):
     # байты + loads быстрее json.load через TextIOWrapper: заголовков в дампе
     # десятки тысяч (УНФ — 23 513 объекта, 322 МБ JSON)
-    with open(helper.long_path(path), 'rb') as f:
-        return json.loads(f.read())
+    return json.loads(_vbytes(path))
 
 
 def _read_header(path):
@@ -1727,8 +1812,7 @@ def _read_header(path):
     УНФ не нужно сериализовать второй раз (1.8 с). Дампу с --dump-indent текст не
     подходит — тогда колонку пишет json.dumps, как раньше.
     """
-    with open(helper.long_path(path), 'r', encoding='utf-8') as f:
-        text = f.read()
+    text = _vbytes(path).decode('utf-8')
     return json.loads(text), (None if '\n' in text else text)
 
 
@@ -1737,8 +1821,7 @@ RE_ID_UUID = re.compile(rb'"uuid"\s*:\s*"([^"]*)"')
 
 def _read_id_uuid(path):
     """uuid из <Класс>.id.json: файл — одна пара ключ-значение, разбор JSON лишний."""
-    with open(helper.long_path(path), 'rb') as f:
-        raw = f.read()
+    raw = _vbytes(path)
     found = RE_ID_UUID.search(raw)
     if found:
         return found.group(1).decode('utf-8')
@@ -1746,14 +1829,7 @@ def _read_id_uuid(path):
 
 
 def _read_text(path):
-    for encoding in ('utf-8-sig', 'windows-1251'):
-        try:
-            with open(helper.long_path(path), 'r', encoding=encoding) as f:
-                return f.read()
-        except UnicodeDecodeError:
-            continue
-    with open(helper.long_path(path), 'r', encoding='utf-8', errors='replace') as f:
-        return f.read()
+    return _vtext(path)
 
 
 def _flatten_uuids(node, out):
@@ -1839,9 +1915,8 @@ def _extract_skd_queries(path):
     Возвращает список строк запросов или None, если файл не является СКД.
     """
     try:
-        with open(helper.long_path(path), 'rb') as f:
-            raw = f.read()
-    except OSError:
+        raw = _vbytes(path)
+    except (OSError, KeyError):
         return None
     if b'<?xml' not in raw or b'<query' not in raw:
         return None
@@ -1902,6 +1977,11 @@ MAX_PARSE_WORKERS = 8
 def _parse_bsl_worker(path):
     """Разбор модуля в рабочем процессе пула (данные остаются на диске)."""
     return parse_methods(_read_text(path))
+
+
+def _parse_bsl_text_worker(text):
+    """Разбор модуля по тексту (stream-сборка: тела передаются через IPC)."""
+    return parse_methods(text)
 
 
 # Индекс именно по телам МЕТОДОВ: module.body — это модуль минус код методов
@@ -2185,7 +2265,10 @@ def granule_fingerprints(dump_dir, tree, rel_by_dir):
         for rel_file, full in sorted(items):
             digest.update(rel_file.encode('utf-8'))
             digest.update(b'\0')
-            digest.update(file_sha256(full).encode('ascii'))
+            if _VIRTUAL is not None:
+                digest.update(hashlib.sha256(_vbytes(full)).hexdigest().encode('ascii'))
+            else:
+                digest.update(file_sha256(full).encode('ascii'))
             digest.update(b'\n')
         out[granule] = digest.hexdigest()
     return out
@@ -2225,11 +2308,10 @@ def collect_object_rows(info, obj_id, resolver, uuid_to_id, uuid_to_path):
         # содержимое формы: реквизиты/команды/параметры из elem.json,
         # события — из заголовка формы
         elem_path = os.path.join(info['dirpath'], f'{info["stem"]}.elem.json')
-        if os.path.isfile(helper.long_path(elem_path)):
+        if _vexists(elem_path):
             try:
-                with open(helper.long_path(elem_path), encoding='utf-8') as f:
-                    elem = json.load(f)
-            except (OSError, ValueError):
+                elem = json.loads(_vbytes(elem_path).decode('utf-8'))
+            except (OSError, ValueError, KeyError):
                 elem = None
             if elem:
                 fa, fc, fp = _extract_form_elem(elem, resolver, info['parent_rel'])
@@ -2273,7 +2355,11 @@ def _role_right_rows(conn, role_id, role_dir, resolver, stats):
     uuid общим резолвером. Сбой разбора одной роли не прерывает запись.
     """
     try:
-        parsed = rights.parse_role_file(role_dir)
+        if _VIRTUAL is not None:
+            parsed = rights.parse_role_file(
+                role_dir, raw=_vbytes(os.path.join(role_dir, 'Role.0.c1brace')))
+        else:
+            parsed = rights.parse_role_file(role_dir)
     except Exception as err:  # noqa: BLE001
         stats['role_rights_failed'] += 1
         return [], [], [(role_id, None, 0, 0, 0, 0, str(err)[:300])]
@@ -2331,7 +2417,33 @@ def _write_role_rights(conn, dump_dir, stats):
 
 def write_db(dump_dir, db_path, *, source_file=None, source_sha256=None,
              source_size=None, store_blobs=False, workers=1,
-             build_fts=True, headers_dir=None):
+             build_fts=True, headers_dir=None, virtual_tree=None):
+    """Пишет дамп стадии 3 в SQLite. Возвращает статистику.
+
+    `virtual_tree` — {rel-путь через '/': байты файла} виртуального дерева
+    (stream-сборка: декодер отдал файлы потоком, диска стадии 3 нет). Тогда
+    dump_dir — лишь корень для rel-путей, каталог на диске не нужен. Без
+    virtual_tree читается дисковый каталог dump_dir (или поток headers_dir).
+    """
+    global _VIRTUAL, _VIRTUAL_ROOT
+    if virtual_tree is not None:
+        _VIRTUAL = virtual_tree
+        _VIRTUAL_ROOT = os.path.abspath(dump_dir)
+        # headers_dir может сосуществовать с virtual_tree (гибрид: заголовки из
+        # быстрого потока, файлы из виртуального дерева); без него — no-sink путь
+    try:
+        return _write_db_impl(dump_dir, db_path, source_file=source_file,
+                              source_sha256=source_sha256, source_size=source_size,
+                              store_blobs=store_blobs, workers=workers,
+                              build_fts=build_fts, headers_dir=headers_dir)
+    finally:
+        _VIRTUAL = None
+        _VIRTUAL_ROOT = None
+
+
+def _write_db_impl(dump_dir, db_path, *, source_file=None, source_sha256=None,
+                   source_size=None, store_blobs=False, workers=1,
+                   build_fts=True, headers_dir=None):
     """Пишет дамп каталога stage 3 в SQLite. Возвращает статистику.
 
     :param dump_dir: каталог результата декодера (стадия 3)
@@ -2352,7 +2464,7 @@ def write_db(dump_dir, db_path, *, source_file=None, source_sha256=None,
         файлов <Класс>.json и <Класс>.id.json дампа — на УНФ это 6 с из 27
     """
     dump_dir = os.path.abspath(dump_dir)
-    if not os.path.isdir(dump_dir):
+    if _VIRTUAL is None and not os.path.isdir(dump_dir):
         raise FileNotFoundError(dump_dir)
     if os.path.isdir(db_path):
         raise ValueError(f'Путь БД указывает на каталог: {db_path}')
@@ -2595,7 +2707,19 @@ def write_db(dump_dir, db_path, *, source_file=None, source_sha256=None,
                                       m.group('code'), context))
 
         # CPU-тяжёлый разбор модулей — в пуле процессов; данные остаются на диске
-        if workers > 1 and len(bsl_tasks) > 1:
+        # (в stream-сборке диска нет — тела модулей передаются воркерам через IPC)
+        if _VIRTUAL is not None:
+            bsl_texts = [_vtext(t[0]) for t in bsl_tasks]
+            if workers > 1 and len(bsl_texts) > 1:
+                import multiprocessing
+                pool_size = min(workers, MAX_PARSE_WORKERS, len(bsl_texts))
+                mp_ctx = multiprocessing.get_context('spawn')
+                with mp_ctx.Pool(pool_size) as pool:
+                    parsed = pool.map(_parse_bsl_text_worker, bsl_texts,
+                                      chunksize=max(1, len(bsl_texts) // (pool_size * 8)))
+            else:
+                parsed = [_parse_bsl_text_worker(tx) for tx in bsl_texts]
+        elif workers > 1 and len(bsl_tasks) > 1:
             import multiprocessing
             pool_size = min(workers, MAX_PARSE_WORKERS, len(bsl_tasks))
             mp_ctx = multiprocessing.get_context('spawn')
@@ -2663,8 +2787,7 @@ def write_db(dump_dir, db_path, *, source_file=None, source_sha256=None,
                     data = _read_text(full).encode('utf-8')
                     stats['files_content'] += 1
                 elif store_blobs:
-                    with open(helper.long_path(full), 'rb') as f:
-                        data = f.read()
+                    data = _vbytes(full)
                     stats['files_content'] += 1
                 if object_id and ext == 'bin':
                     skd = _extract_skd_queries(full)
@@ -2673,7 +2796,8 @@ def write_db(dump_dir, db_path, *, source_file=None, source_sha256=None,
                             skd_params.append((object_id, ord_no, query))
                         stats['skd'] += len(skd)
                     # содержимое пакета XDTO — тоже XML в .bin, но другой разметки
-                    package = xdto.parse_package(full)
+                    package = xdto.parse_package(
+                        full, raw=_vbytes(full) if _VIRTUAL is not None else None)
                     if package:
                         _insert_xdto(conn, object_id, package, stats)
                 file_params.append((source_id, object_id, rel_file, ext or 'bin', size, data))

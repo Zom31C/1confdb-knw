@@ -51,6 +51,21 @@ def brace_file_read(path, file_name):
         raise ExtException(parent=err, message='Ошибка чтения', detail=f'{err} в файле ({_path})')
 
 
+def brace_read_bytes(raw, file_name='?'):
+    """Разбор скобкофайла из байтов в памяти — как brace_file_read, но без диска
+    (виртуальное дерево stream-сборки). Кодировки и переводы строк те же."""
+    import io
+    for code_page in ['utf-8-sig', 'windows-1251']:
+        try:
+            text = raw.decode(code_page)
+        except UnicodeDecodeError:
+            continue
+        text = text.replace('\r\n', '\n').replace('\r', '\n')
+        decoder = JsonContainerDecoder(src_dir='', file_name=file_name)
+        return decoder.decode_file(io.StringIO(text))
+    raise ExtException(message=f'Unknown code page in file {file_name}')
+
+
 def json_read(path, file_name):
     _path = os.path.normpath(os.path.join(path, file_name))
     progress.note_read(_path)
@@ -73,10 +88,14 @@ def json_write(data, path, file_name, indent=None):
     — его и применяют для сверки эквивалентности декодера.
     """
     _path = os.path.normpath(os.path.join(path, file_name))
+    text = json.dumps(data, ensure_ascii=False, indent=indent)
+    if _STREAM is not None:
+        _stream_put(path, file_name, _text_bytes(text, 'utf-8'))
+        return
     makedirs(path, exist_ok=True)
     try:
         with open(long_path(_path), 'w', encoding='utf-8') as file:
-            file.write(json.dumps(data, ensure_ascii=False, indent=indent))
+            file.write(text)
     except Exception as err:
         raise ExtException(message='Ошибка записи', detail=f'{err} в файле ({_path})')
 
@@ -94,7 +113,7 @@ _SINKS = {}
 def _sink_handle(sink_dir):
     handle = _SINKS.get(sink_dir)
     if handle is None:
-        makedirs(sink_dir, exist_ok=True)
+        os.makedirs(long_path(sink_dir), exist_ok=True)
         handle = open(long_path(os.path.join(sink_dir, f'headers-{os.getpid()}.pkl')), 'wb')
         _SINKS[sink_dir] = handle
     return handle
@@ -142,6 +161,121 @@ def sink_close():
 atexit.register(sink_close)
 
 
+# --- поток дерева (stream-режим): декодирование сразу в виртуальное дерево ---
+#
+# Для полной сборки БД без дискового дерева стадии 3: все файлы, которые декодер
+# иначе записал бы в дамп (txt/bin/json/копии), перехватываются на уровне I/O и
+# пишутся потоком по одному файлу на процесс (payload-<pid>.pkl). Запись БД
+# читает этот поток как виртуальное дерево, побайтово идентичное дисковому,
+# поэтому её штатный путь «без потока заголовков» даёт ту же базу. Дерево на
+# диск при этом не пишется (экономия записи стадии 3, обратного чтения и очистки).
+_STREAM = None
+_PAYLOAD_SINKS = {}
+
+
+def stream_begin(root_dir, sink_dir):
+    """Включает перехват записи дерева: root_dir — корень виртуального дерева."""
+    global _STREAM
+    _STREAM = {'root': os.path.abspath(root_dir), 'sink': sink_dir}
+
+
+def stream_end():
+    global _STREAM
+    _STREAM = None
+
+
+def stream_active():
+    return _STREAM is not None
+
+
+def _payload_handle(sink_dir):
+    handle = _PAYLOAD_SINKS.get(sink_dir)
+    if handle is None:
+        os.makedirs(long_path(sink_dir), exist_ok=True)
+        # 'ab': поток можно дооткрыть после payload_close (например, dummy.zip
+        # создаётся после Decoder.decode); pickle-записи просто дописываются
+        handle = open(long_path(os.path.join(sink_dir, f'payload-{os.getpid()}.pkl')), 'ab')
+        _PAYLOAD_SINKS[sink_dir] = handle
+    return handle
+
+
+def _stream_put(path, file_name, data):
+    """Записывает байты файла в поток дерева (rel-путь от корня виртуального дерева)."""
+    import pickle
+    full = os.path.normpath(os.path.join(path, file_name))
+    rel = os.path.relpath(full, _STREAM['root']).replace(os.sep, '/')
+    pickle.dump((rel, data), _payload_handle(_STREAM['sink']), protocol=4)
+
+
+def _text_bytes(data, encoding):
+    """Байты в точности как при записи текстового файла на диск (newline=None):
+    на Windows '\\n' транслируется в '\\r\\n' — виртуальное дерево побайтово
+    идентично дисковому, включая режим store_blobs."""
+    import io
+    buf = io.BytesIO()
+    wrapper = io.TextIOWrapper(buf, encoding=encoding, newline=None)
+    wrapper.write(data)
+    wrapper.flush()
+    raw = buf.getvalue()
+    wrapper.detach()
+    return raw
+
+
+def payload_read(sink_dir):
+    """Виртуальное дерево: {rel-путь через '/': байты файла}."""
+    import pickle
+    result = {}
+    for file_name in sorted(os.listdir(long_path(sink_dir))):
+        if not file_name.endswith('.pkl'):
+            continue
+        with open(long_path(os.path.join(sink_dir, file_name)), 'rb') as file:
+            while True:
+                try:
+                    rel, data = pickle.load(file)
+                except EOFError:
+                    break
+                result[rel] = data
+    return result
+
+
+def payload_close():
+    for handle in _PAYLOAD_SINKS.values():
+        try:
+            handle.close()
+        except OSError:
+            pass
+    _PAYLOAD_SINKS.clear()
+
+
+atexit.register(payload_close)
+
+
+def copy_file(src, dest):
+    """Копия файла: в stream-режиме — байты в поток дерева, иначе shutil.copy2."""
+    if _STREAM is not None:
+        with open(long_path(src), 'rb') as file:
+            data = file.read()
+        dest_dir, dest_name = os.path.split(dest)
+        _stream_put(dest_dir, dest_name, data)
+    else:
+        shutil.copy2(src, dest)
+
+
+def copy_tree(src, dest):
+    """Копия каталога: в stream-режиме — файлы в поток дерева, иначе shutil.copytree."""
+    if _STREAM is not None:
+        for dirpath, _dirs, filenames in os.walk(src):
+            for fn in filenames:
+                full = os.path.join(dirpath, fn)
+                rel = os.path.relpath(full, src)
+                with open(long_path(full), 'rb') as file:
+                    data = file.read()
+                target_dir, target_name = os.path.split(os.path.join(dest, rel))
+                _stream_put(target_dir, target_name, data)
+    else:
+        shutil.copytree(src, dest)
+
+
 def txt_read(path, file_name, encoding='utf-8-sig'):
     try:
         return txt_read_detect_encoding(path, file_name, encoding=encoding)[0]
@@ -164,6 +298,9 @@ def txt_write(data, path, file_name, encoding='utf-8'):
     try:
         if data is None:
             return
+        if _STREAM is not None:
+            _stream_put(path, file_name, _text_bytes(data, encoding))
+            return
         _path = os.path.normpath(os.path.join(path, file_name))
         makedirs(path, exist_ok=True)
         for i in range(3):
@@ -179,6 +316,9 @@ def txt_write(data, path, file_name, encoding='utf-8'):
 
 
 def bin_write(data, path, file_name):
+    if _STREAM is not None:
+        _stream_put(path, file_name, data)
+        return
     _path = os.path.normpath(os.path.join(path, file_name))
     makedirs(path, exist_ok=True)
     with open(long_path(_path), 'wb') as file:
@@ -314,6 +454,8 @@ def get_extension_from_comment(comment: str) -> str:
 
 
 def makedirs(name, exist_ok=False):
+    if _STREAM is not None:
+        return  # каталоги виртуального дерева подразумеваются rel-путями файлов
     for i in range(3):
         try:
             os.makedirs(long_path(name), exist_ok=exist_ok)
