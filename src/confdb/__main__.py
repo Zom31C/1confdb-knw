@@ -11,7 +11,7 @@ def build_parser():
     parser = argparse.ArgumentParser(
         prog='confdb',
         description='Экстрактор конфигурации 1С:Предприятие 8 (.cf/.cfe/.epf) в SQLite. '
-                    'Только распаковка и разбор (на базе алгоритма v8unpack, MIT).'
+                    'Только распаковка и разбор (алгоритм распаковки — происхождение NOTICE.md (MIT)).'
     )
     parser.add_argument('--version', action='version', version=f'confdb {__version__}')
     subparsers = parser.add_subparsers(dest='cmd', required=True)
@@ -44,10 +44,6 @@ def build_parser():
                         '<база>.fts, на УНФ 7.5 с в 8 шардов); поиск по телам останется '
                         'рабочим, но медленным, индекс собирается позже — '
                         '"confdb fts <база>"')
-    p.add_argument('--dump-indent', action='store_true',
-                   help='писать JSON дампа с отступами, как v8unpack — для побайтового '
-                        'сравнения дампов; по умолчанию вывод компактный, с ним стадия 3 '
-                        'заметно быстрее, а дамп примерно втрое меньше')
     p.add_argument('--no-stream', action='store_true',
                    help='полная сборка БД через дисковое дерево стадии 3 (как раньше): '
                         'декодер пишет файлы на диск, запись читает их обратно. По умолчанию '
@@ -724,8 +720,6 @@ def main(argv=None):
         options['prefix'] = args.prefix
     if args.skip_errors:
         options['skip_errors'] = True
-    if args.dump_indent:
-        options['dump_indent'] = 2
 
     try:
         # отпечаток исходника считывается один раз: он и решает, нужна ли

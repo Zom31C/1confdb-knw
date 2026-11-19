@@ -1,6 +1,6 @@
-"""Вспомогательные функции чтения/записи промежуточных файлов конвейера распаковки.
+"""Вспомогательные функции чтения/записи конвейера распаковки confdb (происхождение — NOTICE.md).
 
-Порт read-части v8unpack.helper (MIT). Пул процессов заменён последовательным выполнением.
+Пул процессов заменён последовательным выполнением.
 """
 import atexit
 import json
@@ -66,29 +66,15 @@ def brace_read_bytes(raw, file_name='?'):
     raise ExtException(message=f'Unknown code page in file {file_name}')
 
 
-def json_read(path, file_name):
-    _path = os.path.normpath(os.path.join(path, file_name))
-    progress.note_read(_path)
-    try:
-        with open(long_path(_path), 'r', encoding='utf-8') as file:
-            return json.load(file)
-    except FileNotFoundError as err:
-        raise err
-    except Exception as err:
-        raise ExtException(message='Ошибка чтения', detail=f'{err} в файле ({_path})')
-
-
-def json_write(data, path, file_name, indent=None):
+def json_write(data, path, file_name):
     """Запись JSON в дамп.
 
-    По умолчанию вывод компактный: `json.dumps` без отступов включает C-энкодер `_json`,
+    Вывод компактный: `json.dumps` без отступов включает C-энкодер `_json`,
     тогда как `json.dump` и любой `indent` всегда идут через рекурсивный Python-энкодер.
     Замер на 405 МиБ заголовков УНФ: 12.98 с и 366 МиБ против 2.19 с и 127 МиБ.
-    `indent=2` возвращает побайтовое совпадение с дампом v8unpack (опция `--dump-indent`)
-    — его и применяют для сверки эквивалентности декодера.
     """
     _path = os.path.normpath(os.path.join(path, file_name))
-    text = json.dumps(data, ensure_ascii=False, indent=indent)
+    text = json.dumps(data, ensure_ascii=False)
     if _STREAM is not None:
         _stream_put(path, file_name, _text_bytes(text, 'utf-8'))
         return
@@ -367,7 +353,7 @@ def str_decode(data: str) -> str:
     return data[1:-1]
 
 
-def run_in_pool(method, list_args, pool=None, title=None, need_result=False):
+def run_in_pool(method, list_args, pool=None, need_result=False):
     """Выполнение задач: последовательно или на пуле процессов (опция --workers).
 
     Сигнатура сохранена для совместимости с портированным кодом.
@@ -386,14 +372,6 @@ def run_in_pool(method, list_args, pool=None, title=None, need_result=False):
     return result
 
 
-def list_merge(*args):
-    result = []
-    for lst in args:
-        if lst:
-            result.extend(lst)
-    return result
-
-
 def get_class_metadata_object(name):
     from .MetaDataObject import core, form, objects
     for mod in (objects, form, core):
@@ -401,25 +379,6 @@ def get_class_metadata_object(name):
         if isinstance(cls, type):
             return cls
     raise AttributeError(f'get_class_metadata_object: нет класса "{name}"')
-
-
-def get_class(kls):
-    try:
-        parts = kls.split('.')
-        module = ".".join(parts[:-1])
-        m = __import__(module)
-        for comp in parts[1:]:
-            m = getattr(m, comp)
-        return m
-    except ImportError as e:
-        # ошибки в классе  или нет файла
-        raise ImportError(f'get_class({kls}: {str(e)}')
-    except AttributeError as e:
-        # Нет такого класса
-        raise AttributeError(f'get_class({kls}: {str(e)}')
-    except Exception as e:
-        # ошибки в классе
-        raise Exception(f'get_class({kls}: {str(e)}')
 
 
 def detect_by_bom(path, default=None):
@@ -437,10 +396,6 @@ def detect_by_bom(path, default=None):
         if raw.startswith(bom):
             return enc
     return default
-
-
-def str_time(value, _format='%H:%M:%S.%f'):
-    return value.strftime(_format)
 
 
 def get_extension_from_comment(comment: str) -> str:
@@ -467,20 +422,6 @@ def makedirs(name, exist_ok=False):
 
 class FuckingBrackets(ExtException):
     pass
-
-
-def get_options_param(options, param_name, default=None):
-    try:
-        return options[param_name]
-    except (KeyError, TypeError):
-        return default
-
-
-def set_options_param(options, param_name, param_value):
-    if options is None:
-        options = {}
-    options[param_name] = param_value
-    return options
 
 
 def calc_offset(counters, raw_data):

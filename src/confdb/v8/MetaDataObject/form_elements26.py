@@ -1,5 +1,5 @@
-"""Элементы форм 2.6 (слитый порт v8unpack FormElements26, MIT)."""
-from .form_elements27 import FormProps as FormProps27, FormElement as FormElement27, Anchor
+"""Элементы форм 2.6 (происхождение кода — NOTICE.md)."""
+from .form_elements27 import FormProps as FormProps27
 from .form_elements27 import Panel as Panel27
 from .form_elements27 import FormElements27
 

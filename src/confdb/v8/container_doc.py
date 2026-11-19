@@ -1,16 +1,13 @@
 # -*- coding: utf-8 -*-
 """Чтение документов и блоков из контейнеров 1С.
 
-Порт read-части v8unpack.container_doc (MIT) — только чтение.
+Происхождение кода — NOTICE.md (v8unpack, MIT); только чтение.
 """
 import collections
 import math
 from struct import unpack
 
-Header = collections.namedtuple('Header', 'first_empty_block_offset, default_block_size, count_files')
 Block = collections.namedtuple('Block', 'doc_size, current_block_size, next_block_offset, data')
-File = collections.namedtuple('File', 'name, size, created, modified, data')
-DocumentData = collections.namedtuple('DocumentData', 'size, data')
 
 
 class Document:

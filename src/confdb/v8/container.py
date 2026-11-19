@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Формат контейнеров 1С (32-битный и 64-битный): чтение оглавления и файлов.
 
-Порт read-части v8unpack.container (MIT) — только чтение, без сборки.
+Происхождение кода — NOTICE.md (v8unpack, MIT); только чтение, без сборки.
 """
 import collections
 import os
@@ -13,9 +13,7 @@ from .container_doc import Document
 from .helper import clear_dir, long_path
 
 Header = collections.namedtuple('Header', 'first_empty_block_offset, default_block_size, count_files')
-Block = collections.namedtuple('Block', 'doc_size, current_block_size, next_block_offset, data')
 File = collections.namedtuple('File', 'name, size, created, modified, data')
-DocumentData = collections.namedtuple('DocumentData', 'size, data')
 
 
 class Container:
@@ -32,11 +30,9 @@ class Container:
     def __init__(self):
         self.file = None
         self.offset = 0
-        self.first_empty_block_offset = None
         self.default_block_size = 0x200
         self.files = None
         self.size = 0
-        self.toc = []
 
     def read(self, file, offset=0):
         self.offset = offset
@@ -49,12 +45,11 @@ class Container:
             raise BufferError('Container is empty')
 
         self.file = file
-        self.first_empty_block_offset = header.first_empty_block_offset
         self.default_block_size = header.default_block_size
         #: Список файлов в контейнере
         self.files = self.read_files(self.file)
 
-    def extract(self, dest_dir, deflate=False, recursive=False, *, progress=None):
+    def extract(self, dest_dir, deflate=False, recursive=False):
         """
         Распаковывает содержимое контейнера в каталог
 

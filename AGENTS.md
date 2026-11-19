@@ -164,10 +164,13 @@ One line each; detail in docs/details.md «Состав» and on the page named 
   docs/details.md «Синтакс-помощник платформы». Ported from the user's retired project
   `1c-syntax-db-extractor`; the port is verbatim — a rebuild of the real shcntx_ru.hbk
   matches the original build counts exactly.
-- `v8/` — the ported unpack core. The DB root uuid is the header's `file_uuid` (the
-  Configuration metadata uuid, same as the dump root — configuration rights resolve against
-  it); Enum and FilterCriterion modules decode as `mgr` (they ARE manager modules,
-  `ManagerModule.bsl` in a file dump).
+- `v8/` — the decode engine (origin: v8unpack, MIT — see `NOTICE.md`; cleaned of encode
+  leftovers and dead code in 1.15.5). Full DB builds decode straight into a memory payload
+  stream (`helper.stream_*`/`payload_read`) consumed by `writer.write_db(virtual_tree=…)` —
+  no stage-3 disk tree (`extract(stream=…)` auto; `--no-stream` for a disk tree). The DB root
+  uuid is the header's `file_uuid` (the Configuration metadata uuid, same as the dump root —
+  configuration rights resolve against it); Enum and FilterCriterion modules decode as `mgr`
+  (they ARE manager modules, `ManagerModule.bsl` in a file dump).
 - `tests/` — fast tests (`test.bat`); `tests/test_parity.py` builds ONE synthetic config in
   both formats and diffs the two DBs table by table — the standing guard of cf/dump parity.
   `_tmp/` — throwaway probes (gitignored, safe to clean).

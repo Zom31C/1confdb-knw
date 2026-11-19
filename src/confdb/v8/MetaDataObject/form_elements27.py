@@ -1,4 +1,4 @@
-"""Элементы форм 2.7 (слитый порт v8unpack FormElements27, MIT)."""
+"""Элементы форм 2.7 (происхождение кода — NOTICE.md)."""
 from enum import Enum
 from .. import helper
 from ..ext_exception import ExtException
@@ -34,19 +34,8 @@ class FormItemTypes(Enum):
     Dendrogram = '984981b1-622d-4ebc-94f7-885f0cdfb59a'
 
 
-class Anchor(Enum):
-    top = '0'
-    bottom_center = '1'
-    left = '2'
-    right = '3'
-
-
 class FormElement:
     ver = 27
-    name = 'elements'
-
-    def __init__(self):
-        self.anchored = {}
 
     @classmethod
     def get_class_form_elem(cls, name):
@@ -89,13 +78,11 @@ class FormElement:
     #                                dump=dict(anchor_data=anchor_data, anchor_id=anchor_id))
     #
     #         elem_id = anchor_data[1]
-    #         border = Anchor(anchor_data[2]).name
     #         if elem_id not in anchored:
     #             anchored[elem_id] = []
     #         anchored[elem_id].append(dict(
     #             border=border,
     #             anchor=anchor_id,
-    #             anchor_border=Anchor(str(anchor_border)).name,
     #         ))
     #     try:
     #         for anchor_border in range(4):
@@ -111,7 +98,6 @@ class FormElement:
 
 
 class FormProps:
-    name = 'props'
     name_index = 4
 
 
@@ -154,12 +140,9 @@ class Panel(FormElement):
         self.form = None
         self._elements_tree_index = {}
         self.elements_index = {}
-        self.anchor_index = [[], [], [], []]
         self.auto_include = False
         self.elements_data = {}
         self.props_index = {}
-        self.last_elem_id = 1
-        self.field_data_source = []
 
     @staticmethod
     def calc_id(path, page, name=None):
@@ -445,51 +428,6 @@ class Panel(FormElement):
         except Exception as err:
             raise ExtException(message='Не смогли найти описание страниц элементов формы')
 
-    def anchored_elem_name_to_elem_id(self, result, path):
-        def anchor_name_is_num(name):
-            try:
-                return str(int(name)) == name
-            except (TypeError, ValueError):
-                return False
-
-        try:
-            for elem in result:
-                elem_raw_data = elem[-3]
-                elem_id = elem[1]
-                offset = 6
-                _path = path.replace('includr', 'include')
-                for anchor_border in range(6):
-                    border = 1 if anchor_border > 3 else anchor_border
-                    for j in range(1, 3):
-                        anchor_name = elem_raw_data[offset][j][1]
-                        if anchor_name == '-1':  # ни к чему не привязан
-                            continue
-                        if anchor_name == '0':  # привязан к панели
-                            anchor_border = int(elem_raw_data[offset][j][2])
-                            anchor_border = 1 if anchor_border > 3 else anchor_border
-                            self.anchor_index[anchor_border].append([elem_raw_data[offset][0], elem_id, str(border)])
-                        if anchor_name_is_num(anchor_name):
-                            continue
-                        else:
-                            elem_raw_data[offset][j][1] = self.elements_index[
-                                _path + anchor_name]  # нужно имя относительно панели
-                    offset += 1
-
-                for anchor_border in range(4):
-                    count_anchor = int(elem_raw_data[offset])
-                    for j in range(count_anchor):
-                        offset += 1
-                        anchor_data = elem_raw_data[offset]
-                        anchor_name = anchor_data[1]
-                        if not anchor_name_is_num(anchor_name):
-                            anchor_data[1] = self.elements_index[_path + anchor_name]
-                    # elem_raw_data[offset] = '0'
-                    # del elem_raw_data[offset + 1: offset + 1 + count_anchor]
-                    offset += 1
-        except Exception as err:
-            raise ExtException(parent=err)
-        pass
-
 
 # --- MetaDataObject/Form/FormElements27/FormElements27.py ---
 class FormElements27:
@@ -499,8 +437,6 @@ class FormElements27:
     def __init__(self, form):
         self.form = form
         self.props_index = {}
-        self.last_elem_id = 1
-        self.field_data_source = []
 
     @property
     def options(self):
@@ -567,19 +503,3 @@ class FormElements27:
                 #     raise NotImplementedError('prop index  > 1')
         except Exception as err:
             raise ExtException(parent=err)
-
-    def create_prop_index_by_name(self):
-        try:
-            self.props_index = {}
-            if self.form.props:
-                for prop in self.form.props:
-                    self.props_index[prop['name']] = prop['id']
-        except Exception as err:
-            raise ExtException(parent=err)
-
-    def fill_datasource(self, raw_data):
-        raw_data.append(str(len(self.field_data_source)))
-        for elem_id, prop_id in self.field_data_source:
-            raw_data.append(
-                [str(elem_id), ['1', [str(prop_id)]]]
-            )

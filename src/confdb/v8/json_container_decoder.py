@@ -1,6 +1,6 @@
 """Парсер «скобкофайлов» 1С (текстовый формат {значение, {вложенный список}, ...}).
 
-Порт decode-части v8unpack.json_container_decoder (MIT) — только разбор, без обратной записи.
+Происхождение кода — NOTICE.md (v8unpack, MIT); только разбор, без обратной записи.
 
 Производительность: текущее значение собирается списком фрагментов и склеивается
 один раз в _end_value; строковые прогоны добавляются срезом (регекс _RUN_PARAM,
@@ -28,7 +28,6 @@ class Mode(Enum):
     READ_PARAM = 1
     BEGIN_READ_STRING_VALUE = 2
     BEGIN_READ_MULTI_STRING_VALUE = 6
-    END_READ_MULTI_STRING_VALUE = 7
     END_READ_STRING_VALUE = 3
     READ_B64 = 4
     READ_TEXT_FILE = 5
@@ -43,7 +42,6 @@ _BEGIN_MULTI_STRING = Mode.BEGIN_READ_MULTI_STRING_VALUE
 class JsonContainerDecoder:
     def __init__(self, *, src_dir=None, file_name=None):
         self.data = None
-        self.raw_data = None
         self.mode = Mode.READ_PARAM
         self.current_object = None
         self._chunks = []
@@ -52,7 +50,6 @@ class JsonContainerDecoder:
         self.src_dir = src_dir
         self.file_name = file_name
         self.path = []
-        self.params_in_line = 0
         self.line_number = None
 
     # ---------- аккумулятор текущего значения ----------
@@ -127,10 +124,6 @@ class JsonContainerDecoder:
         if not self.data:
             return ''
         return self.data
-
-    def decode_line(self, line):
-        handler = getattr(self, f'_decode_line_{self.mode.name.lower()}')
-        return handler(line)
 
     def _decode_line_read_b64(self, line):
         if line == '\n':
@@ -350,15 +343,6 @@ class JsonContainerDecoder:
             self._chunks.append(line)
             return False
 
-    def _decode_line_end_read_multi_string_value(self, line):
-        if line[0] in ['{', '}']:
-            self._end_value()
-            self._decode_line_read_param(line)
-        else:
-            self.mode = Mode.BEGIN_READ_MULTI_STRING_VALUE
-            self._chunks.append(",\n")
-            self._decode_line_begin_read_multi_string_value(line)
-
     def _end_current_object(self):
         self._end_value()
         if self.path:  # могут быль лишние закрывающие скобки
@@ -371,8 +355,8 @@ class JsonContainerDecoder:
     def _end_value(self):
         self.mode = Mode.READ_PARAM
         if self.previous_char != '}':
-            # эквивалентность v8unpack: пустое значение после закрытого объекта
-            # (например, «,,») даёт None, а не ''
+            # пустое значение после закрытого объекта (например, «,,»)
+            # даёт None, а не '' (совместимость формата)
             self.current_object.append(None if self._value_is_none else self._value())
             self._reset_value_empty()
         self.previous_char = ','

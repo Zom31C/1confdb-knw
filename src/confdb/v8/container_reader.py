@@ -2,7 +2,6 @@
 import concurrent.futures
 import os
 import zlib
-from datetime import datetime
 
 from . import helper
 from . import progress
@@ -24,7 +23,6 @@ def extract(filename, folder, deflate=True, recursive=True):
     :param recursive: рекурсивно достаем все контейнеры
     :type recursive: boolean
     """
-    begin = datetime.now()
     print(f'{"Распаковываем бинарник":30}:', end="")
     helper.clear_dir(folder)
     with open(long_path(filename), 'rb') as f:
@@ -34,8 +32,7 @@ def extract(filename, folder, deflate=True, recursive=True):
             try:
                 container = detect_format(f, offset)
                 container.read(f, offset)
-                container.extract(os.path.join(folder, str(container_index)), deflate, recursive,
-                                  progress=container_index)
+                container.extract(os.path.join(folder, str(container_index)), deflate, recursive)
                 container_index += 1
                 offset += container.size
                 if offset == 0:
@@ -44,8 +41,6 @@ def extract(filename, folder, deflate=True, recursive=True):
                 return
             except Exception as err:
                 raise err from err
-
-    print(f"{datetime.now() - begin}")
 
 
 def detect_format(f, offset):
@@ -61,7 +56,7 @@ def detect_format(f, offset):
         # raise Exception('Файл не является контейнером')
 
 
-def decompress_and_extract(src_folder, dest_folder, *, pool=None):
+def decompress_and_extract(src_folder, dest_folder):
     helper.clear_dir(dest_folder)
     containers = os.listdir(src_folder)
     helper.clear_dir(dest_folder)

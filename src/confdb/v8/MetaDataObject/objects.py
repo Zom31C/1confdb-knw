@@ -1,7 +1,6 @@
-"""Классы объектов метаданных конфигурации (слитый порт v8unpack.MetaDataObject, MIT)."""
+"""Классы объектов метаданных конфигурации (происхождение кода — NOTICE.md)."""
 from . import MetaDataObject
 import os
-import shutil
 from base64 import b64decode
 from enum import Enum
 from .core import Simple
@@ -14,8 +13,6 @@ from .form import Form0
 from .form import Form1
 from .core import SimpleNameFolder
 from .core import FormContainer
-from .form import Form9
-from ..ext_exception import ExtException
 from .core import SimpleWithInfo
 from .form import Form
 
@@ -41,8 +38,6 @@ class Template2(Simple):
         super().__init__(meta_obj_class=meta_obj_class, obj_version=obj_version, options=options)
         self.data = None
         self.tmpl_type = None
-        self.raw_data = None
-        self.raw_header = None
 
     def decode_object(self, src_dir, uuid, dest_dir, dest_path, version, header):
         try:
@@ -461,7 +456,6 @@ class CommonPicture(Simple):
         super().__init__(meta_obj_class=meta_obj_class, obj_version=obj_version, options=options)
         self.ext_code = {}
         self.data = None
-        self.raw_data = None
 
     def decode_object(self, src_dir, file_name, dest_dir, dest_path, version, header_data):
         try:

@@ -1,6 +1,6 @@
 """Базовый класс объектов метаданных (справочники, документы, общие модули и т.д.).
 
-Порт decode-части v8unpack.MetaDataObject (MIT) — только разбор.
+Происхождение кода — NOTICE.md (v8unpack, MIT); только разбор.
 """
 import os
 
@@ -99,12 +99,8 @@ class MetaDataObject(MetaObject):
         if sink:
             helper.sink_put(sink, dest_path, file_name, id_data['uuid'], self.header)
         if self.get_options('dump_headers', True):
-            indent = self.get_options('dump_indent')
-            helper.json_write(id_data, dest_full_path, f'{file_name}.id.json', indent=indent)
-            helper.json_write(self.header, dest_full_path, f'{file_name}.json', indent=indent)
-
-    def get_internal_data(self):
-        return self.uuid
+            helper.json_write(id_data, dest_full_path, f'{file_name}.id.json')
+            helper.json_write(self.header, dest_full_path, f'{file_name}.json')
 
     def set_write_decode_mode(self, dest_dir, dest_path):
         self.new_dest_path = os.path.join(dest_path, self.header['name'])

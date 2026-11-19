@@ -1,27 +1,22 @@
-"""Корневые объекты: MetaObject, Configuration, ConfigurationExtension, ExternalDataProcessor (слитый порт v8unpack.MetaObject, MIT)."""
+"""Корневые объекты: MetaObject, Configuration, ConfigurationExtension, ExternalDataProcessor (происхождение кода — NOTICE.md)."""
 import os
 import re
-import shutil
 from base64 import b64decode
 from . import helper
 from .ext_exception import ExtException
 from .metadata_types import MetaDataTypes
 from . import __version__
 from .metadata_types import MetaDataGroup
-from .helper import long_path
 
 
 # --- MetaObject/__init__.py ---
 class MetaObject:
     ext_code = {'obj': 0}
     encrypted_types = ['text', 'image', 'bin']
-    _unknown_binary = None
     _obj_info = None
-    _obj_name = None
 
-    re_meta_data_obj = re.compile('^[^.]+\.json$')
-    directive_1c_uncomment = re.compile('(?P<n>\\n)(?P<d>#Область|#КонецОбласти|&НаСервере|&НаКлиенте)')
-    directive_1c_comment = re.compile('(?P<n>\\n)(?P<c>// v8unpack )(?P<d>[#|&])')
+    re_meta_data_obj = re.compile(r'^[^.]+\.json$')
+    directive_1c_comment = re.compile(r'(?P<n>\n)(?P<c>// v8unpack )(?P<d>[#|&])')
 
     def __init__(self, *, meta_obj_class=None, obj_version='803', options=None):
         self.meta_obj_class = meta_obj_class
@@ -149,13 +144,6 @@ class MetaObject:
                 code = self.directive_1c_comment.sub(r'\g<n>\g<d>', code)
         return code, encoding
 
-    def write_raw_code(self, code, dest_dir, filename, *, encoding='uft-8', comment_directive=False):
-        if code is not None:
-            # if self.options['version'] in ['801', '802'] or comment_directive:  # комментируем директивы
-            if comment_directive:  # комментируем директивы
-                code = self.directive_1c_uncomment.sub(r'\g<n>// v8unpack \g<d>', code)
-            helper.txt_write(code, dest_dir, filename, encoding=encoding)
-
     def decode_code(self, src_dir, *, uncomment_directive=False):
         for code_name in self.ext_code:
             if code_name in self.code:
@@ -212,8 +200,7 @@ class MetaObject:
                             self.header.get('file_uuid') or self.header.get('uuid'),
                             self.header)
         if self.get_options('dump_headers', True):
-            helper.json_write(self.header, dest_dir, f'{file_name}.json',
-                              indent=self.get_options('dump_indent'))
+            helper.json_write(self.header, dest_dir, f'{file_name}.json')
 
     def _decode_html_data(self, src_dir, dest_dir, dest_file_name, *, header_field='html', file_number=0,
                           extension='html'):
@@ -256,20 +243,8 @@ class MetaObject:
             for elem in self._obj_info:
                 try:
                     data = helper.brace_file_read(src_dir, f'{self.header["uuid"]}.{self._obj_info[elem]}')
-                    helper.json_write(data, dest_dir, f'{dest_file_name}.{self._obj_info[elem]}.json',
-                                      indent=self.get_options('dump_indent'))
+                    helper.json_write(data, dest_dir, f'{dest_file_name}.{self._obj_info[elem]}.json')
 
-                except FileNotFoundError:
-                    pass
-
-    def _decode_unknown(self, src_dir, dest_dir, dest_file_name):
-        if self._unknown_binary:
-            for elem in self._unknown_binary:
-                try:
-                    helper.copy_file(
-                        os.path.join(src_dir, f'{self.header["uuid"]}.{self._unknown_binary[elem]}'),
-                        os.path.join(dest_dir, f'{dest_file_name}.{elem}.bin')
-                    )
                 except FileNotFoundError:
                     pass
 
@@ -303,7 +278,6 @@ class Configuration(MetaObject):
 
     def __init__(self, *, meta_obj_class=None, obj_version=None, options=None):
         super().__init__(meta_obj_class=meta_obj_class, obj_version=obj_version, options=options)
-        self.counter = {}
 
     def decode(self, src_dir, dest_dir, *, version=None, **kwargs):
         self.header = {}
@@ -330,7 +304,6 @@ class Configuration(MetaObject):
         self._decode_html_data(src_dir, dest_dir, 'help', header_field='help', file_number=self.help_file_number)
         self._decode_images(src_dir, dest_dir)
         self._decode_info(src_dir, dest_dir, file_name)
-        # self._decode_unknown(src_dir, dest_dir, file_name)
 
         tasks = self.decode_includes(src_dir, dest_dir, '', self.header['header'])
         self.header['obj_version'] = self.obj_version
@@ -379,11 +352,9 @@ class ExternalDataProcessor(MetaObject):
 
     def __init__(self, *, meta_obj_class=None, obj_version=None, options=None):
         super().__init__(meta_obj_class=meta_obj_class, obj_version=obj_version, options=options)
-        self.data = None
 
     def decode(self, src_dir, dest_dir):
         self.header = {}
-        self.data = {}
         root = helper.brace_file_read(src_dir, 'root')
         self.header['root'] = True
         self.header["file_uuid"] = root[0][1]

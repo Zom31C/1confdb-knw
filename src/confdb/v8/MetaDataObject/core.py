@@ -1,9 +1,8 @@
-"""Базовые классы объектов метаданных (слитый порт v8unpack.MetaDataObject.core, MIT)."""
+"""Базовые классы объектов метаданных (происхождение кода — NOTICE.md)."""
 from . import MetaDataObject
 from .. import helper
 from ..ext_exception import ExtException
 import os
-import shutil
 
 
 # --- MetaDataObject/core/Simple.py ---
@@ -62,19 +61,6 @@ class FormContainer(Container):
         return header_data[0][1][1]
 
 
-# --- MetaDataObject/core/IncludeEmpty.py ---
-class IncludeEmpty(MetaDataObject):
-
-    @classmethod
-    def decode(cls, src_dir: str, file_name: str, dest_dir: str, dest_path: str, options, *, parent_type=None,
-               parent_container_uuid=None):
-        raise Exception('Так быть не должно, этот класс обслуживает вложенные объекты')
-
-    @classmethod
-    def decode_internal_include(cls, parent, header_data, src_dir, dest_dir, dest_path, version):
-        return
-
-
 # --- MetaDataObject/core/IncludeSimple.py ---
 class IncludeSimple(MetaDataObject):
     ext_code = {'obj': 2}
@@ -107,9 +93,6 @@ class IncludeSimple(MetaDataObject):
     @classmethod
     def get_decode_header(cls, header_data):
         return header_data[0][1][3][2][9]
-
-    def get_internal_data(self):
-        return self.header['header']
 
 
 # --- MetaDataObject/core/SimpleWithInfo.py ---

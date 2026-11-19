@@ -1,4 +1,4 @@
-"""Парсеры форм 5.x/9.x (слитый порт v8unpack MetaDataObject.Form, MIT)."""
+"""Парсеры форм 5.x/9.x (происхождение кода — NOTICE.md)."""
 import os
 import re
 from .form_elements26 import FormElements26
@@ -7,18 +7,14 @@ from .form_elements4 import FormElements4
 from .core import SimpleNameFolder
 from .. import helper
 from ..ext_exception import ExtException
-import json
 
 
 # --- MetaDataObject/Form/FormCore.py ---
 OF = '0'  # обычные формы
-UF = '1'  # управляемые формы
 
 
 class FormCore(SimpleNameFolder):
-    _obj_name = "Form"
     double_quotes = re.compile(r'("")')
-    quotes = re.compile(r'(")')
     supported_form_versions = {
         # '0-2': FormElements2,
         # '0-23': FormElements26,# 801
@@ -190,13 +186,15 @@ class FormCore(SimpleNameFolder):
             if not form_element_decoder:
                 return
 
-            backup = json.dumps(self.form)
             try:
                 form_element_decoder(self).decode(src_dir, dest_dir, dest_path, self.form[0][0])
-            except Exception as err:
-                self.form = json.loads(backup)
-                pass  # todo если какие то елементы формы не разбираются, не прерываем
-                # raise ExtException(parent=err, message='Ошибка при разборе формы')
+            except Exception:
+                # элементы формы не разобрались — не прерываем (elem.json будет
+                # неполным). Резервная копия self.form не нужна: после разбора
+                # элементов self.form больше не читается — вывод строится из
+                # elements_tree/props/commands/params, а json.loads-восстановление
+                # лишь рвало ссылки и стоило ~5 с на корпус (замер 2026-11-19).
+                pass
         except Exception as err:
             raise ExtException(parent=err)
 
@@ -218,8 +216,7 @@ class FormCore(SimpleNameFolder):
                 tree=self.elements_tree,
                 data=self.elements_data,
             ),
-            self.new_dest_dir, f"{file_name}.elem.json",
-            indent=self.get_options('dump_indent'))
+            self.new_dest_dir, f"{file_name}.elem.json")
         return []
 
     def decode_data(self, src_dir, uuid):

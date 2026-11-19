@@ -1,4 +1,4 @@
-"""Элементы форм 4.x (слитый порт v8unpack FormElements4, MIT)."""
+"""Элементы форм 4.x (происхождение кода — NOTICE.md)."""
 from enum import Enum
 from .. import helper
 from ..ext_exception import ExtException
@@ -150,8 +150,6 @@ class FormElement:
 
 
 class _FormRoot:
-    element_node_offset = [[2, 1], [3, 1], [4, 1]]
-    name = ''
     index = 0
     index_name = 0
 
@@ -184,13 +182,11 @@ class _FormRoot:
 
 
 class FormParams(_FormRoot):
-    name = 'params'
     index = 4
     index_name = 1
 
 
 class FormProps(_FormRoot):
-    name = 'props'
     index = 3
     index_name = 3
     child_offset = 13
@@ -231,7 +227,6 @@ class FormProps(_FormRoot):
 
 
 class FormCommands(_FormRoot):
-    name = 'commands'
     index = 5
     index_name = 2
 
@@ -450,21 +445,6 @@ class FormElements4:
         if self.form.commands:
             for command in self.form.commands:
                 self.commands_index[command['id']] = command['name']
-
-    def create_prop_index_by_name(self):
-        self.props_index = {}
-        if self.form.props:
-            for prop in self.form.props:
-                self.props_index[prop['name']] = prop['id']
-                childs = prop.get('child', [])
-                for child in childs:
-                    self.props_index[f"{prop['name']}.{child['name']}"] = prop['id'], child['id']
-
-    def create_commands_index_by_name(self):
-        self.commands_index = {}
-        if self.form.commands:
-            for command in self.form.commands:
-                self.commands_index[command['name']] = command['raw'][1]
 
     def decode_elements(self, raw_data):
         try:
