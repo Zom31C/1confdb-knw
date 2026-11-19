@@ -6,6 +6,14 @@
 упавший при декодировании, пропускается с сообщением, разбор продолжается
 (у эталона любая ошибка прерывает весь файл). В штатном режиме поведение
 идентично эталону.
+
+Отклонение от эталона (осознанное, 2026-11-19): определение версии терпимо к
+режиму совместимости — номер версии платформы во внутреннем блоке version/
+configinfo может быть замещён флагом '1' (реальная версия рядом, {1,80312}).
+Эталон на этом падает «Не удалось определить парсер» (cfe) или слепо маппит
+'1' в 8.2 (cf); здесь версия ищется по блоку (_find_platform_version), а для
+cfe при отсутствии версии берётся базовый '803' (расширения существуют только
+в 8.3). Обычные файлы разбираются идентично эталону.
 """
 import os
 import shutil
@@ -63,6 +71,25 @@ def _skip_error(err, include_type):
     print(f'\nПропуск объекта {include_type}: {title}{inner}', file=sys.stderr)
 
 
+def _find_platform_version(block, prefix='80'):
+    """Ищет номер версии платформы ('802…'/'803…') в блоке версий.
+
+    Обычно блок плоский — {80316,0}. Но в выгрузках в режиме совместимости
+    первым элементом может быть флаг ('1'), а сама версия платформы — лежать
+    рядом ({1,80312}); поэтому обходим все элементы, включая вложенные.
+    Возвращает первую подходящую строку или None. Числа формата ('216') и
+    флаги ('0', '1') под маску '80…' не попадают.
+    """
+    if isinstance(block, str):
+        return block if block.startswith(prefix) and len(block) >= 3 else None
+    if isinstance(block, (list, tuple)):
+        for item in block:
+            found = _find_platform_version(item, prefix)
+            if found:
+                return found
+    return None
+
+
 class Decoder:
     @staticmethod
     def get_handler_by_version_file(*, version=None, root=None, header=None, options=None, configinfo=None, **kwargs):
@@ -77,7 +104,13 @@ class Decoder:
                     if len(obj_version) == 3:
                         pass
                     elif obj_version in ['1', '2']:
-                        obj_version = '802'
+                        # '1'/'2' — маркер старого формата либо флаг режима
+                        # совместимости. Во втором случае реальная версия
+                        # платформы лежит рядом во внутреннем блоке ({1,80312}):
+                        # ищем её, чтобы не принять 8.3 за 8.2; если версии нет —
+                        # это legacy 8.2, как раньше.
+                        real = _find_platform_version(version[0][0][2])
+                        obj_version = real[:3] if real else '802'
                     else:
                         raise Exception(f'Not supported version {obj_version}')
                 else:
@@ -92,12 +125,20 @@ class Decoder:
                 options['obj_version'] = '801'
                 return ExternalDataProcessor(options=options, obj_version=options['obj_version'])
         if configinfo:
-            if int(configinfo[0][1][0]) >= 216:
-                if len(configinfo[0][1]) == 3:
-                    obj_version = configinfo[0][1][2][0]
-                    if obj_version.startswith('803'):
-                        options['obj_version'] = obj_version
-                        return ConfigurationExtension(options=options, obj_version=options['obj_version'])
+            try:
+                fmt = int(configinfo[0][1][0])
+            except (IndexError, TypeError, ValueError):
+                fmt = 0
+            if fmt >= 216:
+                # Расширения (cfe) существуют только в 8.3, поэтому наличие
+                # configinfo с форматом >= 216 однозначно определяет парсер.
+                # Номер версии платформы во внутреннем блоке может быть замещён
+                # флагом режима совместимости ('1'), а реальная версия — лежать
+                # рядом ({1,80312}). Ищем '803…' по блоку версий; если не нашли —
+                # берём базовый '803' (младшая версия на логику разбора не влияет).
+                obj_version = _find_platform_version(configinfo[0][1], '803') or '803'
+                options['obj_version'] = obj_version
+                return ConfigurationExtension(options=options, obj_version=obj_version)
         raise Exception('Не удалось определить парсер')
 
     @classmethod
