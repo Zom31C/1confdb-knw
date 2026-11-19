@@ -604,3 +604,80 @@ def test_http_server_refresh_task(tmp_path, monkeypatch):
         assert t['task']['result']['alias'] == alias
         _req(port, 'POST', '/api/server/stop', {})
     os.remove(db)
+
+
+# ---------- версия конфигурации, имя базы от исходника, переизвлечение ----------
+
+def test_db_config_version(tmp_path):
+    from confdb.ui_core import db_config_version
+    db = _real_db(tmp_path, 'версия.sqlite')
+    assert db_config_version(db) == '1.2.3.4'   # _cfg_props синтетики
+    assert db_config_version(str(tmp_path / 'нет.sqlite')) is None
+
+
+def test_extract_defaults_name_and_exists(tmp_path, core):
+    src = str(tmp_path / 'МояКонф.cf')
+    with open(src, 'wb') as f:
+        f.write(b'cf')
+    d = core.extract_defaults(src)
+    assert d['db'].endswith('МояКонф.sqlite') and d['db_exists'] is False
+    assert d['dump'].endswith('МояКонф')
+    db = str(tmp_path / 'явная.sqlite')
+    d = core.extract_defaults(src, db)
+    assert d['db'] == db and d['db_exists'] is False
+    with open(db, 'wb') as f:
+        f.write(b'x')
+    assert core.extract_defaults(src, db)['db_exists'] is True
+
+
+def test_scan_cf_sources_config_version(tmp_path, core):
+    from confdb.extract import file_sha256
+    from confdb.ui_core import scan_cf_sources
+    cf_dir = tmp_path / 'cf'
+    cf_dir.mkdir()
+    src = cf_dir / 'Конф.cf'
+    src.write_bytes(b'container-bytes')
+    sha = file_sha256(str(src))
+    db = _real_db(tmp_path, 'Конф.sqlite')
+    conn = sqlite3.connect(db)
+    conn.execute('UPDATE source SET file=?, file_sha256=?', (str(src), sha))
+    conn.commit()
+    conn.close()
+    recs = scan_cf_sources(str(cf_dir), [db], log=lambda *a: None)
+    assert len(recs) == 1
+    assert recs[0]['status'] == 'current'
+    assert recs[0]['config_version'] == '1.2.3.4'
+
+
+def test_extract_force_full_rebuild(tmp_path, core, monkeypatch):
+    src = tmp_path / 'x.cf'
+    src.write_bytes(b'cf')
+    db = tmp_path / 'x.sqlite'
+    db.write_bytes(b'old')
+    calls = {}
+    monkeypatch.setattr('confdb.ui_core.check_same_source',
+                        lambda s, d, force=False, log=print: ('sha', True))
+    monkeypatch.setattr('confdb.ui_core._extract_cf',
+                        lambda s, **k: calls.setdefault('full', k) or {'db': str(db), 'elapsed': '0'})
+    monkeypatch.setattr('confdb.cf_update.update_cf',
+                        lambda *a, **k: calls.setdefault('upd', True) or {})
+    # без force: та же база — пропуск
+    r = core.extract(str(src), str(db))
+    assert r.get('skipped') and 'full' not in calls and 'upd' not in calls
+    # с force: полная пересборка, не инкремент и не пропуск
+    r = core.extract(str(src), str(db), force=True)
+    assert 'full' in calls and 'upd' not in calls and not r.get('skipped')
+
+
+def test_http_extract_defaults(tmp_path, monkeypatch):
+    with _http(monkeypatch, tmp_path) as (web, port):
+        src = tmp_path / 'config.cf'
+        src.write_bytes(b'cf')
+        db = tmp_path / 'my.sqlite'
+        code, r = _req(port, 'POST', '/api/extract_defaults',
+                       {'src': str(src), 'db': str(db)})
+        assert code == 200 and r['db'] == str(db) and r['db_exists'] is False
+        db.write_bytes(b'x')
+        code, r = _req(port, 'POST', '/api/extract_defaults',
+                       {'src': str(src), 'db': str(db)})
+        assert code == 200 and r['db_exists'] is True

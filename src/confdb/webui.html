@@ -514,10 +514,11 @@ function viewCatalog(){
     const target = r.status==="current"?"":`<div class="path">→ ${esc(r.db)}${repl}</div>`;
     // имя корневого объекта метаданных (из собранной базы); для новой базы — имя файла
     const title = r.name ? esc(r.name) : esc(base(r.src));
+    const ver = r.config_version ? ` <span class="muted small">· версия ${esc(r.config_version)}</span>` : "";
     const fname = r.name ? `<div class="path">${esc(base(r.src))}</div>` : "";
     const kind = r.root_type ? `<span class="muted small"> · ${esc(TYPE_KIND[r.ext]||r.root_type)}</span>` : "";
     return `<tr><td>${check}</td><td>${typeBadge(r.ext)}</td><td>${badge}</td>
-      <td><b>${title}</b>${kind}${fname}${target}${r.note?`<div class="hint">${esc(r.note)}</div>`:""}</td></tr>`;
+      <td><b>${title}</b>${ver}${kind}${fname}${target}${r.note?`<div class="hint">${esc(r.note)}</div>`:""}</td></tr>`;
   }).join("");
   const table = scanRows.length?`<table><thead><tr><th></th><th>Тип</th><th>Статус</th><th>Конфигурация</th></tr></thead><tbody>${rows}</tbody></table>`
     :`<div class="empty">Нажмите «Сканировать», чтобы сверить файлы каталога с базами по SHA-256.</div>`;
@@ -839,10 +840,20 @@ function bind(){
   const on = (id,ev,fn)=>{ const el=$("#"+id); if(el) el.addEventListener(ev,fn); };
   const checked = id => $("#"+id) && $("#"+id).checked;
 
-  // извлечение
-  on("ex-src-sel","change",()=>{ if(val("ex-src-sel")) $("#ex-src").value=val("ex-src-sel"); });
+  // извлечение: имя базы/дампа по умолчанию обновляется от имени исходника;
+  // существующая база — вопрос-подтверждение на полное переизвлечение (force)
+  const syncDefaults = async ()=>{ const src=val("ex-src").trim(); if(!src) return;
+    try{ const d=await api("/api/extract_defaults","POST",{src,db:""});
+      if(val("ex-src").trim()===src){ $("#ex-db").value=d.db||""; $("#ex-dump").value=d.dump||""; } }catch(e){} };
+  let exT=null;
+  on("ex-src-sel","change",()=>{ if(val("ex-src-sel")){ $("#ex-src").value=val("ex-src-sel"); syncDefaults(); } });
+  on("ex-src","input",()=>{ clearTimeout(exT); exT=setTimeout(syncDefaults,400); });
   on("ex-run","click",async()=>{ const src=val("ex-src").trim(); if(!src){toast("Укажите файл или каталог","err");return;}
-    try{ await api("/api/extract","POST",{src,db:val("ex-db"),dump:val("ex-dump")}); toast("Извлечение запущено","ok"); pollTask(); }catch(e){ toast(e.message,"err"); } });
+    let force=false;
+    try{ const d=await api("/api/extract_defaults","POST",{src,db:val("ex-db").trim()});
+      if(d.db_exists){ if(!confirm("База SQLite уже существует:\n"+d.db+"\n\nПереизвлечь (заменить) базу полностью?")) return; force=true; }
+      await api("/api/extract","POST",{src,db:val("ex-db"),dump:val("ex-dump"),force}); toast("Извлечение запущено","ok"); pollTask();
+    }catch(e){ toast(e.message,"err"); } });
   on("fts-run","click",async()=>{ try{ await api("/api/fts","POST",{db:val("fts-db")}); toast("Построение FTS запущено","ok"); pollTask(); }catch(e){ toast(e.message,"err"); } });
 
   // каталог cf

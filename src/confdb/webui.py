@@ -111,10 +111,10 @@ class WebUi:
         return self.tasks.start('scan', 'Сканирование каталога cf',
                                 self.core.scan_cf)
 
-    def extract(self, src, db=None, dump=None):
+    def extract(self, src, db=None, dump=None, force=False):
         title = f'Извлечение {os.path.basename(src)}'
         return self.tasks.start('extract', title,
-                                lambda: self.core.extract(src, db, dump))
+                                lambda: self.core.extract(src, db, dump, force=force))
 
     def extract_batch(self, items):
         def run():
@@ -269,7 +269,10 @@ def make_handler(web):
                 if tasks.busy():
                     raise ValueError('уже выполняется задача')
                 return {'task': web.extract(data['src'], data.get('db'),
-                                            data.get('dump'))}
+                                            data.get('dump'),
+                                            force=bool(data.get('force')))}
+            if path == '/api/extract_defaults':
+                return core.extract_defaults(data.get('src') or '', data.get('db'))
             if path == '/api/extract_batch':
                 if tasks.busy():
                     raise ValueError('уже выполняется задача')

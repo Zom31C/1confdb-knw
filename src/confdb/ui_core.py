@@ -404,6 +404,7 @@ def scan_cf_sources(cf_dir, db_pool, log=print):
                         'db': db, 'found': found, 'note': note,
                         'ext': ext, 'name': meta.get('root_name'),
                         'root_type': meta.get('root_type'),
+                        'config_version': db_config_version(found) if found else None,
                         'db_version': db_version, 'cur_version': __version__,
                         'incremental': incremental})
 
@@ -466,6 +467,7 @@ def scan_cf_sources(cf_dir, db_pool, log=print):
                         'db': db, 'found': found, 'note': note,
                         'ext': 'dump', 'name': meta.get('root_name'),
                         'root_type': meta.get('root_type'),
+                        'config_version': db_config_version(found) if found else None,
                         'db_version': db_version, 'cur_version': __version__,
                         'incremental': bool(status == 'outdated'
                                             and 'гранул' in note)})
@@ -504,6 +506,43 @@ def db_meta(db_path):
             'root_type': info.get('root_type')}
     _DB_META_CACHE[db_path] = (key, meta)
     return meta
+
+
+_DB_VER_CACHE = {}
+
+
+def db_config_version(db_path):
+    """Версия конфигурации (например '3.0.4.4') из заголовка корневого объекта.
+
+    None — база не читается/нет корня/версия не задана. Кэш по mtime/size:
+    заголовок корня крупный (у УНФ ~4 МБ), повторные снимки не перечитывают.
+    """
+    import sqlite3
+    from . import header_props
+    try:
+        st = os.stat(db_path)
+        key = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return None
+    cached = _DB_VER_CACHE.get(db_path)
+    if cached and cached[0] == key:
+        return cached[1]
+    version = None
+    uri = 'file:' + os.path.abspath(db_path).replace(os.sep, '/') + '?mode=ro'
+    try:
+        conn = sqlite3.connect(uri, uri=True)
+        try:
+            row = conn.execute(
+                'SELECT header_json FROM meta_object '
+                'WHERE parent_id IS NULL ORDER BY id LIMIT 1').fetchone()
+        finally:
+            conn.close()
+        if row and row[0]:
+            version = header_props.config_props(row[0]).get('version')
+    except (sqlite3.Error, OSError, ValueError):
+        version = None
+    _DB_VER_CACHE[db_path] = (key, version)
+    return version
 
 
 # ---------- вспомогательное для панели запущенного сервера ----------
@@ -855,11 +894,15 @@ class UiCore:
             self.recent_db = [db] + [x for x in self.recent_db if x != db][:5]
         self.save()
 
-    def extract(self, src, db=None, dump=None, log=print, source_sha256=None):
+    def extract(self, src, db=None, dump=None, log=print, source_sha256=None,
+                force=False):
         """Извлечение .cf/.cfe/.epf либо каталога выгрузки (автоопределение).
 
         source_sha256 — готовый отпечаток (пакетный режим после сканирования):
         с ним проверка «не та же ли база» не хэширует файл повторно.
+        force — переизвлечь базу полностью, даже если она уже собрана из этого
+        же файла (вопрос-подтверждение задаёт интерфейс); иначе существующая
+        cf-база обновляется инкрементально, а та же база пропускается.
         """
         src = os.path.abspath(src)
         if os.path.isdir(src):
@@ -879,11 +922,11 @@ class UiCore:
             if out:
                 os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
         if db and source_sha256 is None:
-            source_sha256, skip = check_same_source(src, db, log=log)
-            if skip:
+            source_sha256, skip = check_same_source(src, db, force=force, log=log)
+            if skip and not force:
                 return {'skipped': True, 'db': db, 'src': src,
                         'elapsed': '0:00:00'}
-        if db and os.path.isfile(db) and not dump:
+        if db and os.path.isfile(db) and not dump and not force:
             # существующая база из cf — инкрементальное обновление (только
             # изменённые гранулы); update_cf сам сделает полную сборку, если
             # база не из cf или прежней ревизии схемы
@@ -901,6 +944,23 @@ class UiCore:
                 source_sha256=source_sha256)
         self._remember_extract(src, db, stats)
         return stats
+
+    def extract_defaults(self, src, db=None):
+        """Пути по умолчанию для исходника + существование целевой базы.
+
+        {'db', 'dump', 'db_exists'}: db — указанный путь или имя по умолчанию
+        от имени исходника (out_defaults), dump — путь дампа по умолчанию,
+        db_exists — есть ли уже файл базы (интерфейс спрашивает подтверждение
+        на переизвлечение). Для каталога выгрузки db_exists тоже проверяется.
+        """
+        src = os.path.abspath(src) if src else ''
+        db_def, dump_def = out_defaults(src) if src else ('', '')
+        resolved = db or db_def
+        if resolved and os.path.isdir(resolved):
+            base = os.path.splitext(os.path.basename(src))[0]
+            resolved = os.path.join(resolved, base + '.sqlite')
+        return {'db': resolved, 'dump': dump_def,
+                'db_exists': bool(resolved and os.path.isfile(resolved))}
 
     def extract_dump(self, src, db=None, log=print):
         """Сборка/инкрементальное обновление базы из выгрузки в файлы."""

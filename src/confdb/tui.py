@@ -325,7 +325,8 @@ class Tui:
             for i, r in enumerate(records, 1):
                 ext = (r.get('ext') or '?').upper()
                 name = r.get('name') or os.path.basename(r['src'])
-                print(f' {i}. [{labels[r["status"]]}] [{ext}] {name}')
+                ver = f' — версия {r["config_version"]}' if r.get('config_version') else ''
+                print(f' {i}. [{labels[r["status"]]}] [{ext}] {name}{ver}')
                 if r.get('name'):
                     kind = 'каталог' if r.get('ext') == 'dump' else 'файл'
                     print(f'      {kind}: {os.path.basename(r["src"])}')
@@ -462,16 +463,23 @@ class Tui:
         # целевая база из этого же файла (SHA-256 885 МБ — 1,7 с против ~70 с
         # извлечения), и уходит в source новой базы
         src_sha256 = None
+        force = False
+        if self.db and os.path.isfile(self.db) and not self.dump:
+            force = _yes_no(
+                f'База уже существует: {self.db}\n'
+                'Переизвлечь (заменить) полностью? (нет — инкрементальное обновление)',
+                False)
         if self.db:
-            src_sha256, skip = check_same_source(self.src, self.db)
-            if skip and not _yes_no('Пересобрать базу всё равно?', False):
+            src_sha256, skip = check_same_source(self.src, self.db, force=force)
+            if skip and not force:
+                print('Извлечение не требуется: база уже собрана из этого же файла.')
                 input('Нажмите Enter…')
                 return
         _cls()
         try:
-            if self.db and os.path.isfile(self.db) and not self.dump:
+            if self.db and os.path.isfile(self.db) and not self.dump and not force:
                 # существующая база из cf — инкрементальное обновление
-                # (только изменённые гранулы); полная сборка — confdb extract
+                # (только изменённые гранулы); полная сборка — force/extract
                 from .cf_update import update_cf
                 stats = update_cf(
                     self.src, self.db, workers=self.workers,
