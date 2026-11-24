@@ -571,8 +571,11 @@ def test_db_freshness_and_refresh_cf(tmp_path, monkeypatch):
     assert db_freshness(db)['status'] == 'current'
     sha_val[0] = 'bbb'
     assert db_freshness(db)['status'] == 'changed'
-    monkeypatch.setattr('confdb.extract.decode_tree',
-                        lambda *a, **kw: str(tree))
+    from test_cf_update import _tree_bytes
+    monkeypatch.setattr('confdb.extract.decode_tree_stream',
+                        lambda *a, **kw: (str(tree), 'pl', 'hd'))
+    monkeypatch.setattr('confdb.v8.helper.payload_read',
+                        lambda sink: _tree_bytes(tree))
     mod = str(tree / 'Catalog' / 'Справочник1' / 'Catalog.obj.bsl')
     with open(mod, 'a', encoding='utf-8') as f:
         f.write('\n// маркер-cf\n')

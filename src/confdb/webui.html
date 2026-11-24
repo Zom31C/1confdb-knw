@@ -257,6 +257,25 @@ function toast(msg, kind="info"){
   $("#toast").appendChild(el);
   setTimeout(()=>el.remove(), 4200);
 }
+// модальный выбор: возвращает value нажатой кнопки или null (отмена/клик мимо)
+function choose(title, msg, buttons){
+  return new Promise(resolve=>{
+    const wrap=document.createElement("div");
+    wrap.style.cssText="position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;z-index:1000";
+    const card=document.createElement("div");
+    card.className="card"; card.style.cssText="max-width:500px;margin:16px";
+    card.innerHTML=`<h3 style="margin-top:0">${esc(title)}</h3>`+
+      `<p class="muted" style="white-space:pre-line">${esc(msg)}</p>`+
+      `<div class="row" style="flex-wrap:wrap;gap:8px"></div>`;
+    wrap.appendChild(card); document.body.appendChild(wrap);
+    const done=v=>{ wrap.remove(); resolve(v); };
+    wrap.addEventListener("click",e=>{ if(e.target===wrap) done(null); });
+    const row=card.querySelector(".row");
+    buttons.forEach(b=>{ const btn=document.createElement("button");
+      btn.className="btn "+(b.kind||"ghost"); btn.textContent=b.label;
+      btn.onclick=()=>done(b.value); row.appendChild(btn); });
+  });
+}
 async function api(path, method="GET", body){
   const opt = {method, headers:{}};
   if(body!==undefined){ opt.headers["Content-Type"]="application/json"; opt.body=JSON.stringify(body); }
@@ -851,7 +870,13 @@ function bind(){
   on("ex-run","click",async()=>{ const src=val("ex-src").trim(); if(!src){toast("Укажите файл или каталог","err");return;}
     let force=false;
     try{ const d=await api("/api/extract_defaults","POST",{src,db:val("ex-db").trim()});
-      if(d.db_exists){ if(!confirm("База SQLite уже существует:\n"+d.db+"\n\nПереизвлечь (заменить) базу полностью?")) return; force=true; }
+      if(d.db_exists && !d.is_dump){
+        const mode=await choose("База уже существует",
+          d.db+"\n\nИнкрементально — обновить только изменённые гранулы (можно при запущенном сервере).\nПолностью — пересобрать базу с нуля (сервер, держащий базу, нужно остановить).",
+          [{label:"Инкрементально",value:"inc"},{label:"Полностью",value:"full",kind:"ok"},{label:"Отмена",value:null,kind:"ghost"}]);
+        if(mode===null) return;
+        force = mode==="full";
+      }
       await api("/api/extract","POST",{src,db:val("ex-db"),dump:val("ex-dump"),force}); toast("Извлечение запущено","ok"); pollTask();
     }catch(e){ toast(e.message,"err"); } });
   on("fts-run","click",async()=>{ try{ await api("/api/fts","POST",{db:val("fts-db")}); toast("Построение FTS запущено","ok"); pollTask(); }catch(e){ toast(e.message,"err"); } });

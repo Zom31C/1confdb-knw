@@ -959,8 +959,13 @@ class UiCore:
         if resolved and os.path.isdir(resolved):
             base = os.path.splitext(os.path.basename(src))[0]
             resolved = os.path.join(resolved, base + '.sqlite')
+        is_dump = False
+        if src and os.path.isdir(src):
+            from .dump import is_dump_dir
+            is_dump = is_dump_dir(src)
         return {'db': resolved, 'dump': dump_def,
-                'db_exists': bool(resolved and os.path.isfile(resolved))}
+                'db_exists': bool(resolved and os.path.isfile(resolved)),
+                'is_dump': is_dump}
 
     def extract_dump(self, src, db=None, log=print):
         """Сборка/инкрементальное обновление базы из выгрузки в файлы."""

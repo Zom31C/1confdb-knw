@@ -169,7 +169,19 @@ def _write_granule_files(conn, tree, rel_by_dir, objects, infos, path_id,
                     context = W._common_module_context(info['header'])
                 bsl_tasks.append((os.path.join(dirpath, fn), path_id[rel],
                                   m.group('code'), context))
-    if workers > 1 and len(bsl_tasks) > 1:
+    if W._VIRTUAL is not None:
+        # stream-дерево: тела модулей в памяти, передаём воркерам через IPC
+        bsl_texts = [W._vtext(t[0]) for t in bsl_tasks]
+        if workers > 1 and len(bsl_texts) > 1:
+            import multiprocessing
+            pool_size = min(workers, W.MAX_PARSE_WORKERS, len(bsl_texts))
+            mp_ctx = multiprocessing.get_context('spawn')
+            with mp_ctx.Pool(pool_size) as pool:
+                parsed = pool.map(W._parse_bsl_text_worker, bsl_texts,
+                                  chunksize=max(1, len(bsl_texts) // (pool_size * 8)))
+        else:
+            parsed = [W._parse_bsl_text_worker(tx) for tx in bsl_texts]
+    elif workers > 1 and len(bsl_tasks) > 1:
         import multiprocessing
         pool_size = min(workers, W.MAX_PARSE_WORKERS, len(bsl_tasks))
         mp_ctx = multiprocessing.get_context('spawn')
@@ -212,15 +224,15 @@ def _write_granule_files(conn, tree, rel_by_dir, objects, infos, path_id,
             if ext in W.TEXT_KINDS:
                 data = W._read_text(full).encode('utf-8')
             elif store_blobs:
-                with open(W.helper.long_path(full), 'rb') as f:
-                    data = f.read()
+                data = W._vbytes(full)
             if obj_id and ext == 'bin':
                 skd = W._extract_skd_queries(full)
                 if skd:
                     conn.executemany(W.INSERT_SQL['skd_query'],
                                      [(obj_id, o, q) for o, q in enumerate(skd)])
                     stats['skd'] = stats.get('skd', 0) + len(skd)
-                package = xdto.parse_package(full)
+                package = xdto.parse_package(
+                    full, raw=W._vbytes(full) if W._VIRTUAL is not None else None)
                 if package:
                     W._insert_xdto(conn, obj_id, package, stats)
             conn.execute(W.INSERT_SQL['file'],
@@ -231,14 +243,35 @@ def _write_granule_files(conn, tree, rel_by_dir, objects, infos, path_id,
 
 def update_cf_tree(tree_dir, db_path, *, source_file, source_sha256,
                    source_size=None, workers=1, rebuild_fts=None,
-                   store_blobs=False, log=print):
+                   store_blobs=False, log=print, virtual_tree=None):
     """Инкрементальное обновление базы по декодированному дереву cf (stage 3).
 
     Сверяет отпечатки гранул с cf_granule, переустанавливает изменившиеся,
     перелинковывает связи глобально. Возвращает статистику (changed_granules,
-    objects/modules/methods/files, elapsed). Дерево должно быть полным
-    (заголовки в JSON-файлах, без потока headers).
+    objects/modules/methods/files, elapsed).
+
+    virtual_tree — {rel-путь: байты} виртуального дерева (stream-декодирование
+    без диска): чтение файлов/заголовков и отпечатки гранул идут из памяти.
+    Без него — дисковое дерево (заголовки в JSON-файлах, без потока headers).
     """
+    if virtual_tree is not None:
+        W._VIRTUAL = virtual_tree
+        W._VIRTUAL_ROOT = os.path.abspath(tree_dir)
+    try:
+        return _update_cf_tree_impl(
+            tree_dir, db_path, source_file=source_file,
+            source_sha256=source_sha256, source_size=source_size,
+            workers=workers, rebuild_fts=rebuild_fts,
+            store_blobs=store_blobs, log=log)
+    finally:
+        if virtual_tree is not None:
+            W._VIRTUAL = None
+            W._VIRTUAL_ROOT = None
+
+
+def _update_cf_tree_impl(tree_dir, db_path, *, source_file, source_sha256,
+                         source_size=None, workers=1, rebuild_fts=None,
+                         store_blobs=False, log=print):
     tree_dir = os.path.abspath(tree_dir)
     db_path = os.path.abspath(db_path)
     begin = datetime.now()
@@ -426,8 +459,9 @@ def update_cf(src_file, db_path, *, workers=1, rebuild_fts=None,
     База отсутствует/не из cf/прежней ревизии — полная сборка (`extract`),
     при живом MCP-сервере полная пересборка невозможна (файл занят).
     """
-    from .extract import (decode_tree, extract as _extract, file_sha256,
+    from .extract import (decode_tree_stream, extract as _extract, file_sha256,
                           make_temp_dir, remove_tree)
+    from .v8 import helper
     src_file = os.path.abspath(src_file)
     db_path = os.path.abspath(db_path)
     begin = datetime.now()
@@ -458,11 +492,16 @@ def update_cf(src_file, db_path, *, workers=1, rebuild_fts=None,
                 'src': src_file, 'elapsed': str(datetime.now() - begin)}
     temp = make_temp_dir(db_path)
     try:
-        stage3 = decode_tree(src_file, temp, options={}, workers=workers)
+        # stream-декодирование в память (без диска стадии 3): отпечатки гранул и
+        # переустановка читают файлы из виртуального дерева — быстро и на HDD
+        virtual_root, payload_dir, _headers = decode_tree_stream(
+            src_file, temp, options={}, workers=workers)
+        vt = helper.payload_read(payload_dir)
         stats = update_cf_tree(
-            stage3, db_path, source_file=src_file, source_sha256=sha,
+            virtual_root, db_path, source_file=src_file, source_sha256=sha,
             source_size=os.path.getsize(src_file), workers=workers,
-            rebuild_fts=rebuild_fts, store_blobs=store_blobs, log=log)
+            rebuild_fts=rebuild_fts, store_blobs=store_blobs, log=log,
+            virtual_tree=vt)
     finally:
         remove_tree(temp, workers=max(workers, 4))
     stats['src'] = src_file

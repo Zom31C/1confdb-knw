@@ -465,10 +465,16 @@ class Tui:
         src_sha256 = None
         force = False
         if self.db and os.path.isfile(self.db) and not self.dump:
-            force = _yes_no(
-                f'База уже существует: {self.db}\n'
-                'Переизвлечь (заменить) полностью? (нет — инкрементальное обновление)',
-                False)
+            print(f'База уже существует: {self.db}')
+            print(' 1. Инкрементально — обновить только изменённые гранулы')
+            print('    (можно при запущенном MCP-сервере)')
+            print(' 2. Полностью — пересобрать базу с нуля')
+            print('    (сервер, держащий базу, нужно остановить)')
+            print(' 0. Отмена')
+            ch = input('Режим обновления [1]: ').strip() or '1'
+            if ch == '0':
+                return
+            force = ch == '2'
         if self.db:
             src_sha256, skip = check_same_source(self.src, self.db, force=force)
             if skip and not force:

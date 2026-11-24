@@ -25,6 +25,18 @@ def cf_update_file_sha256():
     return file_sha256
 
 
+def _tree_bytes(tree):
+    """Виртуальное дерево {rel: байты} из дискового дерева (для подмены потока)."""
+    out = {}
+    for dp, _dirs, fns in os.walk(str(tree)):
+        for fn in fns:
+            full = os.path.join(dp, fn)
+            rel = os.path.relpath(full, str(tree)).replace(os.sep, '/')
+            with open(full, 'rb') as f:
+                out[rel] = f.read()
+    return out
+
+
 @pytest.fixture
 def built(tmp_path):
     """Дерево cf + полная база ревизии текущей схемы (с состоянием гранул)."""
@@ -196,8 +208,9 @@ def test_update_cf_wrapper_skip_and_tree(built, monkeypatch):
     calls = []
     real_sha = cf_update_file_sha256()
     sha_val = ['aaa']
-    monkeypatch.setattr('confdb.extract.decode_tree',
-                        lambda *a, **kw: calls.append(1) or str(tree))
+    monkeypatch.setattr('confdb.extract.decode_tree_stream',
+                        lambda *a, **kw: calls.append(1) or (str(tree), 'pl', 'hd'))
+    monkeypatch.setattr('confdb.v8.helper.payload_read', lambda sink: _tree_bytes(tree))
     monkeypatch.setattr('confdb.extract.file_sha256',
                         lambda p, **kw: sha_val[0] if p == src else real_sha(p, **kw))
     stats = cf_update.update_cf(src, db, log=lambda *a: None)
