@@ -373,6 +373,14 @@ class Tui:
               + (f', из них с заменой существующих баз: {replace}' if replace else ''))
         if not _yes_no('Продолжить?', True):
             return
+        force = False
+        existing_cf = sum(1 for r in chosen
+                          if os.path.isfile(r['db']) and not os.path.isdir(r['src']))
+        if existing_cf:
+            print(f'Существующих баз cf: {existing_cf}. Режим обновления:')
+            print(' 1. Инкрементально — только изменённые гранулы (можно при сервере)')
+            print(' 2. Полностью — пересобрать с нуля (сервер нужно остановить)')
+            force = (input('Режим [1]: ').strip() or '1') == '2'
         ok, failed = 0, []
         for r in chosen:
             _cls()
@@ -394,7 +402,7 @@ class Tui:
                             build_fts=self.build_fts,
                             store_blobs=self.store_blobs)
                 else:
-                    if os.path.isfile(r['db']):
+                    if os.path.isfile(r['db']) and not force:
                         # существующая база из cf — инкрементально
                         from .cf_update import update_cf
                         stats = update_cf(

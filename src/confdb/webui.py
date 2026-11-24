@@ -116,13 +116,14 @@ class WebUi:
         return self.tasks.start('extract', title,
                                 lambda: self.core.extract(src, db, dump, force=force))
 
-    def extract_batch(self, items):
+    def extract_batch(self, items, force=False):
         def run():
             done, failed = [], []
             for it in items:
                 try:
                     stats = self.core.extract(it['src'], it.get('db'),
-                                              source_sha256=it.get('sha'))
+                                              source_sha256=it.get('sha'),
+                                              force=force)
                     done.append({'src': it['src'], 'db': stats.get('db'),
                                  'skipped': bool(stats.get('skipped')),
                                  'elapsed': stats.get('elapsed')})
@@ -276,7 +277,8 @@ def make_handler(web):
             if path == '/api/extract_batch':
                 if tasks.busy():
                     raise ValueError('уже выполняется задача')
-                return {'task': web.extract_batch(data['items'])}
+                return {'task': web.extract_batch(data['items'],
+                                                  force=bool(data.get('force')))}
             if path == '/api/fts':
                 return {'task': web.fts(data['db'])}
             if path == '/api/bench':

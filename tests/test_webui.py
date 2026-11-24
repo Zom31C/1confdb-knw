@@ -684,3 +684,24 @@ def test_http_extract_defaults(tmp_path, monkeypatch):
         code, r = _req(port, 'POST', '/api/extract_defaults',
                        {'src': str(src), 'db': str(db)})
         assert code == 200 and r['db_exists'] is True
+
+
+def test_http_extract_batch_force(tmp_path, monkeypatch):
+    """force пакетного извлечения доходит до core.extract (полная пересборка)."""
+    with _http(monkeypatch, tmp_path) as (web, port):
+        calls = []
+        monkeypatch.setattr(
+            web.core, 'extract',
+            lambda src, db=None, **kw: calls.append(kw.get('force'))
+            or {'db': db, 'elapsed': '0'})
+        code, r = _req(port, 'POST', '/api/extract_batch',
+                       {'items': [{'src': 'a.cf', 'db': 'a.sqlite'}], 'force': True})
+        assert code == 200
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            _, t = _req(port, 'GET', '/api/task')
+            if t['task'] and t['task']['status'] != 'running':
+                break
+            time.sleep(0.05)
+        assert t['task']['status'] == 'done', t['task']['error']
+        assert calls == [True]

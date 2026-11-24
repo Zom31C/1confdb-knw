@@ -984,11 +984,17 @@ function batchSelected(all){
   if(all) items=scanRows.filter(r=>r.status!=="current");
   else items=[...document.querySelectorAll(".scan-check:checked")].map(x=>scanRows[+x.dataset.i]);
   if(!items.length){toast("Не выбрано ни одной конфигурации","err");return;}
-  const repl=items.filter(r=>r.status==="outdated").length;
-  if(!confirm("Извлечь "+items.length+" конфигурац."+ (repl?" (с заменой баз: "+repl+")":"") +"?"))return;
-  api("/api/extract_batch","POST",{items:items.map(r=>({src:r.src,db:r.db,sha:r.sha}))})
+  const existing=items.filter(r=>r.found && r.ext!=="dump").length;
+  const run=force=>api("/api/extract_batch","POST",{items:items.map(r=>({src:r.src,db:r.db,sha:r.sha})),force})
     .then(()=>{toast("Пакетное извлечение запущено","ok");pollTask();})
     .catch(e=>toast(e.message,"err"));
+  if(existing){
+    choose("Пакетное извлечение",
+      "Конфигураций: "+items.length+", из них с существующей базой: "+existing+
+      ".\n\nИнкрементально — обновить только изменённые гранулы существующих баз (можно при запущенном сервере).\nПолностью — пересобрать существующие базы с нуля (сервер, держащий базы, нужно остановить). Новые базы извлекаются всегда.",
+      [{label:"Инкрементально",value:false},{label:"Полностью",value:true,kind:"ok"},{label:"Отмена",value:null,kind:"ghost"}])
+      .then(v=>{ if(v!==null) run(v); });
+  } else if(confirm("Извлечь "+items.length+" конфигурац.?")){ run(false); }
 }
 
 // ---------- задачи ----------
